@@ -101,7 +101,13 @@ function startLibraryBadges(): () => void {
     if (disposed) return;
     const games = findVisibleGameElements();
     syncHomeLabel(games.size > 0);
-    if (!games.size) return;
+    if (!games.size) {
+      if (lastCheckSignature !== "0/0/0") {
+        lastCheckSignature = "0/0/0";
+        window.dispatchEvent(new CustomEvent<LibraryCheck>(CACHE_CHANGED_EVENT, { detail: { visible: 0, checked: 0, supported: 0 } }));
+      }
+      return;
+    }
     try {
       const response = await getControllerSupport([...games.keys()]);
       if (disposed || !response.success) return;

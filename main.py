@@ -24,7 +24,13 @@ STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=eng
 class Plugin:
     def __init__(self) -> None:
         self._cache: dict[str, dict[str, Any]] = {}
-        self._cache_path = Path(decky.DECKY_PLUGIN_SETTINGS_DIR) / "controller-support-cache.json"
+        # Recent Decky versions expose the settings directory as
+        # ``decky_SETTINGS_DIR``.  Keep the older name as a fallback so a
+        # manually installed plugin works on both Loader generations.
+        settings_directory = getattr(decky, "decky_SETTINGS_DIR", None) or getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", None)
+        if not settings_directory:
+            raise RuntimeError("Decky settings directory is unavailable")
+        self._cache_path = Path(settings_directory) / "controller-support-cache.json"
         self._lock = asyncio.Lock()
 
     async def _main(self) -> None:

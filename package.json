@@ -1,6 +1,6 @@
 {
   "name": "controller-xbox",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "description": "Decky Loader badge for Steam games with Full Controller Support",
   "type": "module",
   "main": "dist/index.js",
