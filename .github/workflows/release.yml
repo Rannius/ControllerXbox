@@ -40,20 +40,46 @@ jobs:
         shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          mkdir -p package/ControllerXbox/dist release
-          cp -R dist/. package/ControllerXbox/dist/
-          cp .gitignore main.py package.json plugin.json README.md LICENSE package/ControllerXbox/
-          cd package
-          zip "../release/ControllerXbox-v${VERSION}.zip" \
-            ControllerXbox/.gitignore \
-            ControllerXbox/LICENSE \
-            ControllerXbox/README.md \
-            ControllerXbox/main.py \
-            ControllerXbox/package.json \
-            ControllerXbox/plugin.json \
-            ControllerXbox/pnpm-lock.yaml \
-            ControllerXbox/dist/index.js \
-            ControllerXbox/dist/index.js.map
+          export VERSION
+          mkdir -p release
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import zipfile
+
+          version = os.environ["VERSION"]
+          root = Path("ControllerXbox")
+          files = [
+              ".gitignore",
+              "LICENSE",
+              "README.md",
+              "main.py",
+              "package.json",
+              "plugin.json",
+              "pnpm-lock.yaml",
+              "dist/index.js",
+              "dist/index.js.map",
+          ]
+          output = Path("release") / f"ControllerXbox-v{version}.zip"
+          with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+              for relative in files:
+                  info = zipfile.ZipInfo(f"{root}/{relative}")
+                  info.create_system = 0
+                  info.create_version = 20
+                  info.extract_version = 20
+                  info.flag_bits = 0
+                  info.external_attr = 0
+                  info.compress_type = zipfile.ZIP_DEFLATED
+                  archive.writestr(info, Path(relative).read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+          with zipfile.ZipFile(output) as archive:
+              assert archive.namelist() == [f"{root}/{relative}" for relative in files]
+              for entry in archive.infolist():
+                  assert entry.compress_type == zipfile.ZIP_DEFLATED
+                  assert entry.flag_bits == 0
+                  assert entry.create_system == 0
+                  assert entry.extract_version == 20
+                  assert entry.external_attr == 0
+          PY
 
       - name: GitHub Release létrehozása
         env:
