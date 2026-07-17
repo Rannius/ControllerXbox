@@ -21,6 +21,10 @@ const toaster = api.toaster;
 const BADGE_CLASS = "controller-xbox-badge";
 const HOME_BADGE_ID = "controller-xbox-home-badge";
 const BACKEND_TIMEOUT_MS = 8_000;
+const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
+const REFRESH_EVENT = "controller-xbox-refresh";
+const APP_ID_ATTRIBUTES = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id", "data-ds-appid"];
+const APP_ID_SELECTOR = "[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid], a[href*='/app/'], a[href*='steam://rungameid/']";
 const getControllerSupport = callable("get_controller_support");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
@@ -33,22 +37,23 @@ function withBackendTimeout(request) {
     ]);
 }
 function appIdFrom(element) {
-    const attributes = ["data-appid", "data-gameid"];
-    for (const attribute of attributes) {
-        const value = element.getAttribute(attribute);
-        const match = value?.match(/\d+/);
-        if (match)
-            return match[0];
+    const related = [element, element.closest("a"), element.closest(APP_ID_SELECTOR)].filter((item) => item !== null);
+    for (const item of related) {
+        for (const attribute of APP_ID_ATTRIBUTES) {
+            const match = item.getAttribute(attribute)?.match(/\d+/);
+            if (match)
+                return match[0];
+        }
     }
     const href = element.getAttribute("href") || element.closest("a")?.getAttribute("href") || "";
-    return href.match(/\/app\/(\d+)/)?.[1];
+    return href.match(/(?:\/app\/|steam:\/\/rungameid\/)(\d+)/)?.[1];
 }
 function isVisible(element) {
     const box = element.getBoundingClientRect();
     return box.width > 40 && box.height > 40 && box.bottom > 0 && box.top < window.innerHeight && box.right > 0 && box.left < window.innerWidth;
 }
 function findVisibleGameElements() {
-    const candidates = document.querySelectorAll("[data-appid], [data-gameid], a[href*='/app/']");
+    const candidates = document.querySelectorAll(APP_ID_SELECTOR);
     const games = new Map();
     candidates.forEach((candidate) => {
         if (!isVisible(candidate))
@@ -56,7 +61,7 @@ function findVisibleGameElements() {
         const appId = appIdFrom(candidate);
         if (!appId)
             return;
-        const target = candidate.matches("a") ? candidate : candidate.closest("a") || candidate;
+        const target = candidate.closest("[class*='LibraryTile'], [class*='GameTile'], [class*='Capsule'], a") || candidate;
         const elements = games.get(appId) || [];
         if (!elements.includes(target))
             elements.push(target);
@@ -93,7 +98,7 @@ function installStyles() {
     const style = document.createElement("style");
     style.textContent = `
     .${BADGE_CLASS}, #${HOME_BADGE_ID} { background:#107cde; color:#fff; font-weight:700; border-radius:4px; box-shadow:0 1px 4px #0009; font-family:Arial,sans-serif; z-index:20; }
-    .${BADGE_CLASS} { position:absolute; top:6px; right:6px; padding:3px 6px; font-size:12px; line-height:14px; pointer-events:none; }
+    .${BADGE_CLASS} { position:absolute; top:6px; left:6px; padding:3px 6px; font-size:12px; line-height:14px; pointer-events:none; }
     #${HOME_BADGE_ID} { display:inline-block; margin:8px 16px; padding:5px 9px; font-size:14px; }
   `;
     document.head.appendChild(style);
@@ -103,6 +108,7 @@ function startLibraryBadges() {
     const removeStyles = installStyles();
     let timer;
     let disposed = false;
+    let lastCheckSignature = "";
     const refresh = async () => {
         if (disposed)
             return;
@@ -118,6 +124,17 @@ function startLibraryBadges() {
                 if (supported)
                     games.get(appId)?.forEach(addBadge);
             });
+            const support = response.support || {};
+            const detail = {
+                visible: games.size,
+                checked: Object.keys(support).length,
+                supported: Object.values(support).filter(Boolean).length,
+            };
+            const signature = `${detail.visible}/${detail.checked}/${detail.supported}`;
+            if (signature !== lastCheckSignature) {
+                lastCheckSignature = signature;
+                window.dispatchEvent(new CustomEvent(CACHE_CHANGED_EVENT, { detail }));
+            }
         }
         catch (error) {
             console.debug("ControllerXbox lookup failed", error);
@@ -128,12 +145,18 @@ function startLibraryBadges() {
     observer.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("scroll", schedule, true);
     window.addEventListener("hashchange", schedule);
+    const refreshNow = () => {
+        document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove());
+        schedule();
+    };
+    window.addEventListener(REFRESH_EVENT, refreshNow);
     schedule();
     return () => {
         disposed = true;
         observer.disconnect();
         window.removeEventListener("scroll", schedule, true);
         window.removeEventListener("hashchange", schedule);
+        window.removeEventListener(REFRESH_EVENT, refreshNow);
         window.clearTimeout(timer);
         document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove());
         removeStyles();
@@ -141,6 +164,7 @@ function startLibraryBadges() {
 }
 function Content() {
     const [stats, setStats] = SP_REACT.useState();
+    const [libraryCheck, setLibraryCheck] = SP_REACT.useState();
     const [statusError, setStatusError] = SP_REACT.useState();
     const refreshStats = async () => {
         try {
@@ -153,8 +177,16 @@ function Content() {
     };
     SP_REACT.useEffect(() => {
         void refreshStats();
+        const onCacheChanged = (event) => {
+            const detail = event.detail;
+            if (detail)
+                setLibraryCheck(detail);
+            void refreshStats();
+        };
+        window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
+        return () => window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
     }, []);
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "Cache status betoltese..." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }, children: "Clear and refresh cache" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "Cache status betoltese..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} lathato jatek ellenorizve; ${libraryCheck.supported} kapott Xbox jelvenyt.` : "A lathato jatekok ellenorzese meg nem indult el." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); window.dispatchEvent(new Event(REFRESH_EVENT)); await refreshStats(); }, children: "Clear and refresh cache" }) })] });
 }
 var index = DFL.definePlugin(() => {
     const stopLibraryBadges = startLibraryBadges();
