@@ -17,14 +17,10 @@ if (api._version != API_VERSION) {
 }
 const callable = api.callable;
 const toaster = api.toaster;
+const executeInTab = api.executeInTab;
 
-const BADGE_CLASS = "controller-xbox-badge";
-const HOME_BADGE_ID = "controller-xbox-home-badge";
 const BACKEND_TIMEOUT_MS = 8_000;
-const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
-const REFRESH_EVENT = "controller-xbox-refresh";
-const APP_ID_ATTRIBUTES = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id", "data-ds-appid"];
-const APP_ID_SELECTOR = "[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid], a[href*='/app/'], a[href*='steam://rungameid/']";
+const STEAM_TAB_NAME = "Steam";
 const getControllerSupport = callable("get_controller_support");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
@@ -33,7 +29,7 @@ function withBackendTimeout(request) {
     return Promise.race([
         request,
         new Promise((_, reject) => {
-            window.setTimeout(() => reject(new Error("A Decky backend 8 masodpercen belul nem valaszolt.")), BACKEND_TIMEOUT_MS);
+            window.setTimeout(() => reject(new Error("A Decky backend 8 másodpercen belül nem válaszolt.")), BACKEND_TIMEOUT_MS);
         }),
     ]);
 }
@@ -50,150 +46,136 @@ function errorMessage(error) {
     }
     return String(error);
 }
-function appIdFrom(element) {
-    const related = [element, element.closest("a"), element.closest(APP_ID_SELECTOR)].filter((item) => item !== null);
+/*
+ * The Decky quick-access panel has its own document.  These scripts deliberately
+ * run in Decky's "Steam" tab, where the actual Steam Library tiles live.
+ */
+const STEAM_LIBRARY_PROBE_CODE = String.raw `(() => {
+  const attributes = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id", "data-ds-appid"];
+  const selector = "[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid], [id*='app_'], [id*='app-'], [id*='game_'], [id*='game-'], [class*='app_'], [class*='app-'], [class*='game_'], [class*='game-'], a[href*='/app/'], a[href*='steam://rungameid/']";
+  const appId = (element) => {
+    const related = [element, element.closest("a")].filter(Boolean);
     for (const item of related) {
-        for (const attribute of APP_ID_ATTRIBUTES) {
-            const match = item.getAttribute(attribute)?.match(/\d+/);
-            if (match)
-                return match[0];
-        }
+      for (const attribute of attributes) {
+        const match = (item.getAttribute(attribute) || "").match(/\d+/);
+        if (match) return match[0];
+      }
+      const idMatch = (item.id || "").match(/(?:app|game)[_-](\d+)/i);
+      if (idMatch) return idMatch[1];
+      const classMatch = (typeof item.className === "string" ? item.className : "").match(/(?:^|\s)(?:app|game)[_-](\d+)/i);
+      if (classMatch) return classMatch[1];
+      const href = item.getAttribute("href") || "";
+      const hrefMatch = href.match(/(?:\/app\/|steam:\/\/rungameid\/)(\d+)/);
+      if (hrefMatch) return hrefMatch[1];
     }
-    const href = element.getAttribute("href") || element.closest("a")?.getAttribute("href") || "";
-    return href.match(/(?:\/app\/|steam:\/\/rungameid\/)(\d+)/)?.[1];
-}
-function isVisible(element) {
+    return undefined;
+  };
+  const visible = (element) => {
     const box = element.getBoundingClientRect();
     return box.width > 40 && box.height > 40 && box.bottom > 0 && box.top < window.innerHeight && box.right > 0 && box.left < window.innerWidth;
-}
-function findVisibleGameElements() {
-    const candidates = document.querySelectorAll(APP_ID_SELECTOR);
-    const games = new Map();
-    candidates.forEach((candidate) => {
-        if (!isVisible(candidate))
-            return;
-        const appId = appIdFrom(candidate);
-        if (!appId)
-            return;
-        const target = candidate.closest("[class*='LibraryTile'], [class*='GameTile'], [class*='Capsule'], a") || candidate;
-        const elements = games.get(appId) || [];
-        if (!elements.includes(target))
-            elements.push(target);
-        games.set(appId, elements);
-    });
-    return games;
-}
-function addBadge(target) {
-    if (target.querySelector(`:scope > .${BADGE_CLASS}`))
-        return;
-    const htmlTarget = target;
-    if (getComputedStyle(htmlTarget).position === "static")
-        htmlTarget.style.position = "relative";
-    const badge = document.createElement("span");
-    badge.className = BADGE_CLASS;
-    badge.textContent = "\u2713 Xbox";
-    badge.title = "Steam: Full Controller Support";
-    htmlTarget.appendChild(badge);
-}
-function syncHomeLabel(hasGames) {
-    const old = document.getElementById(HOME_BADGE_ID);
-    const isHome = /library\/home/.test(location.hash) || /library\/home/.test(location.pathname);
-    if (!hasGames || !isHome || old)
-        return;
-    const root = document.querySelector("[class*='Home'], [class*='home']");
-    if (!root)
-        return;
-    const label = document.createElement("div");
-    label.id = HOME_BADGE_ID;
-    label.textContent = "\u2713 Xbox — Full Controller Support";
-    root.prepend(label);
-}
-function installStyles() {
-    const style = document.createElement("style");
-    style.textContent = `
-    .${BADGE_CLASS}, #${HOME_BADGE_ID} { background:#107cde; color:#fff; font-weight:700; border-radius:4px; box-shadow:0 1px 4px #0009; font-family:Arial,sans-serif; z-index:20; }
-    .${BADGE_CLASS} { position:absolute; top:6px; left:6px; padding:3px 6px; font-size:12px; line-height:14px; pointer-events:none; }
-    #${HOME_BADGE_ID} { display:inline-block; margin:8px 16px; padding:5px 9px; font-size:14px; }
-  `;
-    document.head.appendChild(style);
-    return () => style.remove();
-}
-function startLibraryBadges() {
-    const removeStyles = installStyles();
-    let timer;
-    let disposed = false;
-    let enabled = false;
-    let lastCheckSignature = "";
-    const refresh = async () => {
-        if (disposed)
-            return;
-        const games = findVisibleGameElements();
-        syncHomeLabel(games.size > 0);
-        if (!games.size) {
-            if (lastCheckSignature !== "0/0/0") {
-                lastCheckSignature = "0/0/0";
-                window.dispatchEvent(new CustomEvent(CACHE_CHANGED_EVENT, { detail: { visible: 0, checked: 0, supported: 0 } }));
-            }
-            return;
+  };
+  const nodes = Array.from(document.querySelectorAll(selector));
+  const ids = Array.from(new Set(nodes.filter(visible).map(appId).filter(Boolean)));
+  return JSON.stringify({ ids, candidates: nodes.length, location: window.location.href });
+})()`;
+function steamBadgeCode(support) {
+    const supportJson = JSON.stringify(support).replace(/</g, "\\u003c");
+    return String.raw `(() => {
+    const support = ${supportJson};
+    const badgeClass = "controller-xbox-badge";
+    const styleId = "controller-xbox-badge-style";
+    const attributes = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id", "data-ds-appid"];
+    const selector = "[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid], [id*='app_'], [id*='app-'], [id*='game_'], [id*='game-'], [class*='app_'], [class*='app-'], [class*='game_'], [class*='game-'], a[href*='/app/'], a[href*='steam://rungameid/']";
+    const appId = (element) => {
+      const related = [element, element.closest("a")].filter(Boolean);
+      for (const item of related) {
+        for (const attribute of attributes) {
+          const match = (item.getAttribute(attribute) || "").match(/\d+/);
+          if (match) return match[0];
         }
+        const idMatch = (item.id || "").match(/(?:app|game)[_-](\d+)/i);
+        if (idMatch) return idMatch[1];
+        const classMatch = (typeof item.className === "string" ? item.className : "").match(/(?:^|\s)(?:app|game)[_-](\d+)/i);
+        if (classMatch) return classMatch[1];
+        const href = item.getAttribute("href") || "";
+        const hrefMatch = href.match(/(?:\/app\/|steam:\/\/rungameid\/)(\d+)/);
+        if (hrefMatch) return hrefMatch[1];
+      }
+      return undefined;
+    };
+    const visible = (element) => {
+      const box = element.getBoundingClientRect();
+      return box.width > 40 && box.height > 40 && box.bottom > 0 && box.top < window.innerHeight && box.right > 0 && box.left < window.innerWidth;
+    };
+    if (!document.getElementById(styleId)) {
+      const style = document.createElement("style");
+      style.id = styleId;
+      style.textContent = "." + badgeClass + "{position:absolute;top:6px;left:6px;z-index:9999;padding:3px 6px;border-radius:4px;background:#107cde;color:#fff;font:700 12px/14px Arial,sans-serif;box-shadow:0 1px 4px #0009;pointer-events:none}";
+      document.head.appendChild(style);
+    }
+    document.querySelectorAll("." + badgeClass).forEach((badge) => badge.remove());
+    const marked = new Set();
+    const nodes = Array.from(document.querySelectorAll(selector));
+    for (const node of nodes) {
+      if (!visible(node)) continue;
+      const id = appId(node);
+      if (!id || !support[id]) continue;
+      const target = node.closest("[class*='LibraryTile'], [class*='GameTile'], [class*='Capsule'], a") || node.closest("a") || node;
+      if (marked.has(target)) continue;
+      marked.add(target);
+      if (getComputedStyle(target).position === "static") target.style.position = "relative";
+      const badge = document.createElement("span");
+      badge.className = badgeClass;
+      badge.textContent = "✓ Xbox";
+      badge.title = "Steam: Full Controller Support";
+      target.appendChild(badge);
+    }
+    return JSON.stringify({ badged: marked.size, targets: nodes.length });
+  })()`;
+}
+async function runInSteamTab(code) {
+    const response = await executeInTab(STEAM_TAB_NAME, false, code);
+    if (!response.success) {
+        throw new Error(`A Steam lap kódja sikertelen volt: ${errorMessage(response.result)}`);
+    }
+    if (typeof response.result === "string") {
         try {
-            const response = await getControllerSupport([...games.keys()]);
-            if (disposed || !response.success)
-                return;
-            Object.entries(response.support || {}).forEach(([appId, supported]) => {
-                if (supported)
-                    games.get(appId)?.forEach(addBadge);
-            });
-            const support = response.support || {};
-            const detail = {
-                visible: games.size,
-                checked: Object.keys(support).length,
-                supported: Object.values(support).filter(Boolean).length,
-            };
-            const signature = `${detail.visible}/${detail.checked}/${detail.supported}`;
-            if (signature !== lastCheckSignature) {
-                lastCheckSignature = signature;
-                window.dispatchEvent(new CustomEvent(CACHE_CHANGED_EVENT, { detail }));
-            }
+            return JSON.parse(response.result);
         }
-        catch (error) {
-            console.debug("ControllerXbox lookup failed", error);
+        catch {
+            throw new Error(`A Steam lap nem értelmezhető választ adott: ${response.result}`);
         }
-    };
-    const schedule = () => {
-        if (!enabled)
-            return;
-        window.clearTimeout(timer);
-        timer = window.setTimeout(refresh, 250);
-    };
-    const observer = new MutationObserver(schedule);
-    observer.observe(document.body, { childList: true, subtree: true });
-    window.addEventListener("scroll", schedule, true);
-    window.addEventListener("hashchange", schedule);
-    const refreshNow = () => {
-        enabled = true;
-        document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove());
-        schedule();
-    };
-    window.addEventListener(REFRESH_EVENT, refreshNow);
-    return () => {
-        disposed = true;
-        observer.disconnect();
-        window.removeEventListener("scroll", schedule, true);
-        window.removeEventListener("hashchange", schedule);
-        window.removeEventListener(REFRESH_EVENT, refreshNow);
-        window.clearTimeout(timer);
-        document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove());
-        removeStyles();
+    }
+    return response.result;
+}
+async function checkSteamLibrary() {
+    const probe = await runInSteamTab(STEAM_LIBRARY_PROBE_CODE);
+    const ids = Array.isArray(probe.ids) ? [...new Set(probe.ids.filter((id) => /^\d+$/.test(id)))] : [];
+    if (ids.length === 0) {
+        return { check: { visible: 0, checked: 0, supported: 0, badged: 0 }, probe };
+    }
+    const response = await withBackendTimeout(getControllerSupport(ids));
+    if (!response.success)
+        throw new Error("A Decky backend nem adott sikeres ellenőrzési választ.");
+    const support = response.support || {};
+    const badgeResult = await runInSteamTab(steamBadgeCode(support));
+    return {
+        check: {
+            visible: ids.length,
+            checked: Object.keys(support).length,
+            supported: Object.values(support).filter(Boolean).length,
+            badged: badgeResult.badged,
+        },
+        probe,
     };
 }
 function Content() {
     const [stats, setStats] = SP_REACT.useState();
     const [libraryCheck, setLibraryCheck] = SP_REACT.useState();
     const [statusError, setStatusError] = SP_REACT.useState();
-    const [runStatus, setRunStatus] = SP_REACT.useState("Kesz az ellenorzes inditasara.");
+    const [runStatus, setRunStatus] = SP_REACT.useState("Kész az ellenőrzés indítására.");
     const [starting, setStarting] = SP_REACT.useState(false);
-    const [diagnosticLog, setDiagnosticLog] = SP_REACT.useState("Nincs rogzitett hiba.");
+    const [diagnosticLog, setDiagnosticLog] = SP_REACT.useState("Nincs rögzített hiba.");
     const rememberError = (where, error) => {
         const message = errorMessage(error);
         setStatusError(message);
@@ -206,32 +188,34 @@ function Content() {
             setStatusError(undefined);
         }
         catch (error) {
-            rememberError("Cache status", error);
+            rememberError("Cache állapot", error);
         }
     };
     SP_REACT.useEffect(() => {
-        const onCacheChanged = (event) => {
-            const detail = event.detail;
-            if (detail)
-                setLibraryCheck(detail);
-            void refreshStats();
-        };
-        window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
-        return () => window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
+        void refreshStats();
     }, []);
     const startCheck = async () => {
         setStarting(true);
         setStatusError(undefined);
-        setRunStatus("Backend ellenorzese es a lathato jatekok vizsgalata folyamatban...");
+        setRunStatus("Backend ellenőrzése és a Steam Könyvtár csempéinek keresése folyamatban...");
         try {
             const diagnostics = await withBackendTimeout(getBackendDiagnostics());
             setStats(diagnostics);
-            setRunStatus(`Backend rendben. Cache mappa: ${diagnostics.settings_directory}`);
-            window.dispatchEvent(new Event(REFRESH_EVENT));
+            setRunStatus("Steam Könyvtár vizsgálata folyamatban...");
+            const result = await checkSteamLibrary();
+            setLibraryCheck(result.check);
+            await refreshStats();
+            if (result.check.visible === 0) {
+                setRunStatus(`A Steam lap elérhető, de 0 játékcsempe azonosítható (${result.probe.candidates} jelölt elem). Nyisd meg a Könyvtár > Kezdőlap nézetet, majd indítsd újra.`);
+            }
+            else {
+                setRunStatus(`Kész: ${result.check.checked}/${result.check.visible} játék ellenőrizve, ${result.check.badged} kék jelvény kihelyezve.`);
+                setDiagnosticLog("Nincs rögzített hiba.");
+            }
         }
         catch (error) {
-            const message = rememberError("Backend onellenorzes", error);
-            setRunStatus(`Backend hiba: ${message}`);
+            const message = rememberError("Steam Könyvtár ellenőrzése", error);
+            setRunStatus(`Ellenőrzési hiba: ${message}`);
         }
         finally {
             setStarting(false);
@@ -239,22 +223,29 @@ function Content() {
     };
     const clearAndRefresh = async () => {
         setStatusError(undefined);
+        setStarting(true);
+        setRunStatus("Cache törlése folyamatban...");
         try {
             const response = await withBackendTimeout(clearCache());
-            toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` });
-            await startCheck();
+            toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} gyorsítótár-bejegyzés törölve.` });
         }
         catch (error) {
-            const message = rememberError("Cache torles", error);
+            const message = rememberError("Cache törlése", error);
             setRunStatus(`Cache hiba: ${message}`);
+            setStarting(false);
+            return;
         }
+        setStarting(false);
+        await startCheck();
     };
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: runStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "A cache szamlalo az inditas utan jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} lathato jatek ellenorizve; ${libraryCheck.supported} kapott Xbox jelvenyt.` : "A jatek-szamlalo az inditas utan jelenik meg." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanaplo: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: startCheck, children: starting ? "Ellenorzes folyamatban..." : "Ellenorzes inditasa" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: clearAndRefresh, children: "Cache torlese es ujraellenorzes" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00E9k \u2713 Xbox jelv\u00E9ny a Steam \u00C1ruh\u00E1z szerint teljes kontroller-t\u00E1mogat\u00E1ssal rendelkez\u0151 j\u00E1t\u00E9kokat jel\u00F6li." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: runStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} játék van memóriában; ${stats.fresh_entries} bejegyzés friss (${stats.ttl_days} napos cache).` : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} látható játék ellenőrizve; ${libraryCheck.supported} támogatott, ${libraryCheck.badged} kék jelvény kihelyezve.` : "A játék-számláló az indítás után jelenik meg." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Hiba: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: startCheck, children: starting ? "Ellenőrzés folyamatban..." : "Ellenőrzés indítása" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
 }
-var index = DFL.definePlugin(() => {
-    const stopLibraryBadges = startLibraryBadges();
-    return { name: "Xbox Controller Check", titleView: SP_JSX.jsx("div", { className: DFL.staticClasses.Title, children: "Xbox Controller Check" }), content: SP_JSX.jsx(Content, {}), icon: SP_JSX.jsx("span", { children: "\u2713" }), onDismount: stopLibraryBadges };
-});
+var index = DFL.definePlugin(() => ({
+    name: "Xbox Controller Check",
+    titleView: SP_JSX.jsx("div", { className: DFL.staticClasses.Title, children: "Xbox Controller Check" }),
+    content: SP_JSX.jsx(Content, {}),
+    icon: SP_JSX.jsx("span", { children: "\u2713" }),
+}));
 
 export { index as default };
 //# sourceMappingURL=index.js.map
