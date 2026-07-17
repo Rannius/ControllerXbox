@@ -11,3 +11,9 @@ The badge means Steam indicates the game can be downloaded, launched, and played
 ## Development
 
 Install Node.js and pnpm, then run `pnpm install` and `pnpm build`. Copy the resulting plugin directory (including `dist/`, `main.py`, `package.json`, and `plugin.json`) into Decky's plugin location.
+
+## Releases and updates
+
+Pushing a version tag such as `v1.0.2` starts the release workflow. It builds a fresh Decky-installable ZIP, creates a GitHub Release, and attaches that ZIP as the immutable backup for that version.
+
+Developer-mode ZIP installations do not receive automatic in-Decky updates. For the Decky **Update** button and managed automatic updates, the plugin must be accepted into the official Decky Plugin Store (the Decky plugin database). After it has been approved there, each published store version is offered by Decky as an update.

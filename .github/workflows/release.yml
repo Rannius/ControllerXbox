@@ -1,0 +1,56 @@
+name: Kiadási biztonsági mentés
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Telepítőcsomag és GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Forrás letöltése
+        uses: actions/checkout@v4
+
+      - name: Node.js beállítása
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: pnpm beállítása
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Függőségek telepítése
+        run: pnpm install --frozen-lockfile
+
+      - name: Frontend fordítása
+        run: pnpm run build
+
+      - name: Kiadási verzió ellenőrzése
+        run: test "v$(node -p \"require('./package.json').version\")" = "${GITHUB_REF_NAME}"
+
+      - name: Decky telepítő ZIP készítése
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          mkdir -p package/ControllerXbox/dist release
+          cp -R dist/. package/ControllerXbox/dist/
+          cp main.py package.json plugin.json README.md LICENSE package/ControllerXbox/
+          cd package
+          zip -r "../release/ControllerXbox-v${VERSION}.zip" ControllerXbox
+
+      - name: GitHub Release létrehozása
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            "release/ControllerXbox-${GITHUB_REF_NAME}.zip" \
+            --title "ControllerXbox ${GITHUB_REF_NAME}" \
+            --generate-notes
