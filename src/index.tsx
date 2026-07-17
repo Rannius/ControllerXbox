@@ -12,20 +12,14 @@ const clearCache = callable<[], { success: boolean; removed: number }>("clear_ca
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
 
 function appIdFrom(element: Element): string | undefined {
-  const attributes = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id", "data-ds-appid"];
-  const related = [
-    element,
-    element.closest("a"),
-    element.closest("[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid]"),
-  ].filter((item): item is Element => item !== null);
-  for (const item of related) {
-    for (const attribute of attributes) {
-      const match = item.getAttribute(attribute)?.match(/\d+/);
-      if (match) return match[0];
-    }
+  const attributes = ["data-appid", "data-gameid"];
+  for (const attribute of attributes) {
+    const value = element.getAttribute(attribute);
+    const match = value?.match(/\d+/);
+    if (match) return match[0];
   }
   const href = element.getAttribute("href") || element.closest("a")?.getAttribute("href") || "";
-  return href.match(/(?:\/app\/|steam:\/\/rungameid\/)(\d+)/)?.[1];
+  return href.match(/\/app\/(\d+)/)?.[1];
 }
 
 function isVisible(element: Element): boolean {
@@ -34,15 +28,13 @@ function isVisible(element: Element): boolean {
 }
 
 function findVisibleGameElements(): Map<string, Element[]> {
-  const candidates = document.querySelectorAll(
-    "[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid], a[href*='/app/'], a[href*='steam://rungameid/']",
-  );
+  const candidates = document.querySelectorAll("[data-appid], [data-gameid], a[href*='/app/']");
   const games = new Map<string, Element[]>();
   candidates.forEach((candidate) => {
     if (!isVisible(candidate)) return;
     const appId = appIdFrom(candidate);
     if (!appId) return;
-    const target = candidate.closest("a, [class*='LibraryTile'], [class*='GameTile'], [class*='Capsule']") || candidate;
+    const target = candidate.matches("a") ? candidate : candidate.closest("a") || candidate;
     const elements = games.get(appId) || [];
     if (!elements.includes(target)) elements.push(target);
     games.set(appId, elements);
@@ -122,8 +114,14 @@ function startLibraryBadges(): () => void {
 
 function Content() {
   const [stats, setStats] = useState<CacheStats>();
+  const [statusError, setStatusError] = useState<string>();
   const refreshStats = async () => {
-    setStats(await getCacheStats());
+    try {
+      setStats(await getCacheStats());
+      setStatusError(undefined);
+    } catch (error) {
+      setStatusError(error instanceof Error ? error.message : String(error));
+    }
   };
   useEffect(() => {
     void refreshStats();
@@ -131,6 +129,8 @@ function Content() {
   return <PanelSection title="Xbox Controller Check">
     <PanelSectionRow><div>Blue ✓ Xbox badges mark games whose Steam Store listing has official Full Controller Support.</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? `${stats.fresh_entries}/${stats.entries} cached games active — cache expires after ${stats.ttl_days} days.` : "Loading cache status…"}</div></PanelSectionRow>
+    <PanelSectionRow><div>{stats ? `${stats.entries} game loaded into memory; ${stats.fresh_entries} entry is current (${stats.ttl_days}-day cache).` : "Loading cache status..."}</div></PanelSectionRow>
+    {statusError && <PanelSectionRow><div>Cache status error: {statusError}</div></PanelSectionRow>}
     <PanelSectionRow><ButtonItem layout="below" onClick={async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }}>Clear and refresh cache</ButtonItem></PanelSectionRow>
   </PanelSection>;
 }

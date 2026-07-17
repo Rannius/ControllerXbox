@@ -24,28 +24,22 @@ const getControllerSupport = callable("get_controller_support");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
 function appIdFrom(element) {
-    const attributes = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id", "data-ds-appid"];
-    const related = [
-        element,
-        element.closest("a"),
-        element.closest("[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid]"),
-    ].filter((item) => item !== null);
-    for (const item of related) {
-        for (const attribute of attributes) {
-            const match = item.getAttribute(attribute)?.match(/\d+/);
-            if (match)
-                return match[0];
-        }
+    const attributes = ["data-appid", "data-gameid"];
+    for (const attribute of attributes) {
+        const value = element.getAttribute(attribute);
+        const match = value?.match(/\d+/);
+        if (match)
+            return match[0];
     }
     const href = element.getAttribute("href") || element.closest("a")?.getAttribute("href") || "";
-    return href.match(/(?:\/app\/|steam:\/\/rungameid\/)(\d+)/)?.[1];
+    return href.match(/\/app\/(\d+)/)?.[1];
 }
 function isVisible(element) {
     const box = element.getBoundingClientRect();
     return box.width > 40 && box.height > 40 && box.bottom > 0 && box.top < window.innerHeight && box.right > 0 && box.left < window.innerWidth;
 }
 function findVisibleGameElements() {
-    const candidates = document.querySelectorAll("[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid], a[href*='/app/'], a[href*='steam://rungameid/']");
+    const candidates = document.querySelectorAll("[data-appid], [data-gameid], a[href*='/app/']");
     const games = new Map();
     candidates.forEach((candidate) => {
         if (!isVisible(candidate))
@@ -53,7 +47,7 @@ function findVisibleGameElements() {
         const appId = appIdFrom(candidate);
         if (!appId)
             return;
-        const target = candidate.closest("a, [class*='LibraryTile'], [class*='GameTile'], [class*='Capsule']") || candidate;
+        const target = candidate.matches("a") ? candidate : candidate.closest("a") || candidate;
         const elements = games.get(appId) || [];
         if (!elements.includes(target))
             elements.push(target);
@@ -138,13 +132,20 @@ function startLibraryBadges() {
 }
 function Content() {
     const [stats, setStats] = SP_REACT.useState();
+    const [statusError, setStatusError] = SP_REACT.useState();
     const refreshStats = async () => {
-        setStats(await getCacheStats());
+        try {
+            setStats(await getCacheStats());
+            setStatusError(undefined);
+        }
+        catch (error) {
+            setStatusError(error instanceof Error ? error.message : String(error));
+        }
     };
     SP_REACT.useEffect(() => {
         void refreshStats();
     }, []);
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.fresh_entries}/${stats.entries} cached games active — cache expires after ${stats.ttl_days} days.` : "Loading cache status…" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }, children: "Clear and refresh cache" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.fresh_entries}/${stats.entries} cached games active — cache expires after ${stats.ttl_days} days.` : "Loading cache status…" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} game loaded into memory; ${stats.fresh_entries} entry is current (${stats.ttl_days}-day cache).` : "Loading cache status..." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }, children: "Clear and refresh cache" }) })] });
 }
 var index = DFL.definePlugin(() => {
     const stopLibraryBadges = startLibraryBadges();
