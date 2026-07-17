@@ -118,7 +118,7 @@ class Plugin:
             await self._save_cache()
         return {"success": True, "support": results, "cached_for_days": 30}
 
-    async def clear_cache(self) -> dict[str, Any]:
+    async def clear_controller_cache(self) -> dict[str, Any]:
         async with self._lock:
             removed = len(self._cache)
             self._cache = {}

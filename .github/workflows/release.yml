@@ -16,16 +16,16 @@ jobs:
       - name: Forrás letöltése
         uses: actions/checkout@v4
 
-      - name: Node.js beállítása
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-
       - name: pnpm beállítása
         uses: pnpm/action-setup@v4
         with:
           version: 11.9.0
+
+      - name: Node.js beállítása
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
 
       - name: Függőségek telepítése
         run: pnpm install --frozen-lockfile

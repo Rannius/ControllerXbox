@@ -18,12 +18,16 @@ type CacheStats = {
 };
 
 const getControllerSupport = callable<[appIds: string[]], SupportResponse>("get_controller_support");
-const clearCache = callable<[], { success: boolean; removed: number }>("clear_cache");
+const clearCache = callable<[], { success: boolean; removed: number }>("clear_controller_cache");
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
 
 function appIdFrom(element: Element): string | undefined {
-  const attributes = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id"];
-  const related = [element, element.closest("a")].filter((item): item is Element => item !== null);
+  const attributes = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id", "data-ds-appid"];
+  const related = [
+    element,
+    element.closest("a"),
+    element.closest("[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid]"),
+  ].filter((item): item is Element => item !== null);
   for (const item of related) {
     for (const attribute of attributes) {
       const match = item.getAttribute(attribute)?.match(/\d+/);
@@ -41,14 +45,14 @@ function isVisible(element: Element): boolean {
 
 function findVisibleGameElements(): Map<string, Element[]> {
   const candidates = document.querySelectorAll(
-    "[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], a[href*='/app/'], a[href*='steam://rungameid/']",
+    "[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid], a[href*='/app/'], a[href*='steam://rungameid/']",
   );
   const games = new Map<string, Element[]>();
   candidates.forEach((candidate) => {
     if (!isVisible(candidate)) return;
     const appId = appIdFrom(candidate);
     if (!appId) return;
-    const target = candidate.matches("a") ? candidate : candidate.closest("a") || candidate;
+    const target = candidate.closest("a, [class*='LibraryTile'], [class*='GameTile'], [class*='Capsule']") || candidate;
     const elements = games.get(appId) || [];
     if (!elements.includes(target)) elements.push(target);
     games.set(appId, elements);
@@ -154,7 +158,8 @@ function Content() {
       window.dispatchEvent(new Event(REFRESH_EVENT));
       await refreshStats();
     } catch (error) {
-      setNotice("A cache törlése nem sikerült. Nézd meg a Decky naplóját.");
+      const details = error instanceof Error ? error.message : String(error);
+      setNotice(`A cache törlése nem sikerült: ${details}`);
       console.error("ControllerXbox cache clear failed", error);
     } finally {
       setClearing(false);
