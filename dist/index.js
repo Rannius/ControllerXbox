@@ -44,6 +44,15 @@ function withBackendTimeout(request) {
 function withSteamTabTimeout(request) {
     return withTimeout(request, STEAM_TAB_TIMEOUT_MS, "A Steam Könyvtár lapja 8 másodpercen belül nem válaszolt. A hibanaplóba került a hiba.");
 }
+async function enableRemoteDebugging() {
+    const deckyBackend = globalThis.DeckyBackend;
+    if (!deckyBackend?.call) {
+        throw new Error("A Decky rendszer API-ja nem érhető el, ezért a Steam hozzáférés nem indítható el.");
+    }
+    const result = await withTimeout(Promise.resolve(deckyBackend.call("utilities/allow_remote_debugging")), BACKEND_TIMEOUT_MS, "A Decky nem indította el időben a Steam hozzáférési szolgáltatást.");
+    if (result === false)
+        throw new Error("A Decky elutasította a Steam hozzáférési szolgáltatás indítását.");
+}
 function errorMessage(error) {
     if (error instanceof Error)
         return `${error.name}: ${error.message}`;
@@ -334,6 +343,28 @@ function Content() {
             setStarting(false);
         }
     };
+    const enableSteamAccessAndCheck = async () => {
+        setStarting(true);
+        setStatusError(undefined);
+        setRunStatus("Steam hozzáférés engedélyezése folyamatban...");
+        let enabled = false;
+        try {
+            await enableRemoteDebugging();
+            enabled = true;
+            toaster.toast({ title: "Xbox Controller Check", body: "Steam hozzáférés engedélyezve. Az ellenőrzés indul." });
+            setRunStatus("Steam hozzáférés engedélyezve. A Steam felületének indulására várok...");
+            await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+        }
+        catch (error) {
+            const message = rememberError("Steam hozzáférés engedélyezése", error);
+            setRunStatus(`Steam hozzáférési hiba: ${message}`);
+        }
+        finally {
+            setStarting(false);
+        }
+        if (enabled)
+            await startCheck();
+    };
     const clearAndRefresh = async () => {
         setStatusError(undefined);
         setStarting(true);
@@ -351,7 +382,7 @@ function Content() {
         setStarting(false);
         await startCheck();
     };
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00E9k \u2713 Xbox jelv\u00E9ny a Steam \u00C1ruh\u00E1z szerint teljes kontroller-t\u00E1mogat\u00E1ssal rendelkez\u0151 j\u00E1t\u00E9kokat jel\u00F6li." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: runStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} játék van memóriában; ${stats.fresh_entries} bejegyzés friss (${stats.ttl_days} napos cache).` : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} látható játék ellenőrizve; ${libraryCheck.supported} támogatott, ${libraryCheck.badged} kék jelvény kihelyezve.` : "A játék-számláló az indítás után jelenik meg." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Hiba: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: startCheck, children: starting ? "Ellenőrzés folyamatban..." : "Ellenőrzés indítása" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00E9k \u2713 Xbox jelv\u00E9ny a Steam \u00C1ruh\u00E1z szerint teljes kontroller-t\u00E1mogat\u00E1ssal rendelkez\u0151 j\u00E1t\u00E9kokat jel\u00F6li." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: runStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} játék van memóriában; ${stats.fresh_entries} bejegyzés friss (${stats.ttl_days} napos cache).` : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} látható játék ellenőrizve; ${libraryCheck.supported} támogatott, ${libraryCheck.badged} kék jelvény kihelyezve.` : "A játék-számláló az indítás után jelenik meg." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Hiba: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: enableSteamAccessAndCheck, children: "Steam hozz\u00E1f\u00E9r\u00E9s enged\u00E9lyez\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: startCheck, children: starting ? "Ellenőrzés folyamatban..." : "Ellenőrzés indítása" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
 }
 var index = DFL.definePlugin(() => ({
     name: "Xbox Controller Check",

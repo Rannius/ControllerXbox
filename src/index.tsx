@@ -22,6 +22,10 @@ const clearCache = callable<[], { success: boolean; removed: number }>("clear_ca
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
 const getBackendDiagnostics = callable<[], BackendDiagnostics>("get_backend_diagnostics");
 
+type DeckyBackendApi = {
+  call: (route: string, ...args: unknown[]) => Promise<unknown> | unknown;
+};
+
 function withTimeout<T>(request: Promise<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
   return Promise.race([
     request,
@@ -37,6 +41,19 @@ function withBackendTimeout<T>(request: Promise<T>): Promise<T> {
 
 function withSteamTabTimeout<T>(request: Promise<T>): Promise<T> {
   return withTimeout(request, STEAM_TAB_TIMEOUT_MS, "A Steam Könyvtár lapja 8 másodpercen belül nem válaszolt. A hibanaplóba került a hiba.");
+}
+
+async function enableRemoteDebugging(): Promise<void> {
+  const deckyBackend = (globalThis as unknown as { DeckyBackend?: DeckyBackendApi }).DeckyBackend;
+  if (!deckyBackend?.call) {
+    throw new Error("A Decky rendszer API-ja nem érhető el, ezért a Steam hozzáférés nem indítható el.");
+  }
+  const result = await withTimeout(
+    Promise.resolve(deckyBackend.call("utilities/allow_remote_debugging")),
+    BACKEND_TIMEOUT_MS,
+    "A Decky nem indította el időben a Steam hozzáférési szolgáltatást.",
+  );
+  if (result === false) throw new Error("A Decky elutasította a Steam hozzáférési szolgáltatás indítását.");
 }
 
 function errorMessage(error: unknown): string {
@@ -323,6 +340,25 @@ function Content() {
       setStarting(false);
     }
   };
+  const enableSteamAccessAndCheck = async () => {
+    setStarting(true);
+    setStatusError(undefined);
+    setRunStatus("Steam hozzáférés engedélyezése folyamatban...");
+    let enabled = false;
+    try {
+      await enableRemoteDebugging();
+      enabled = true;
+      toaster.toast({ title: "Xbox Controller Check", body: "Steam hozzáférés engedélyezve. Az ellenőrzés indul." });
+      setRunStatus("Steam hozzáférés engedélyezve. A Steam felületének indulására várok...");
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 1_500));
+    } catch (error) {
+      const message = rememberError("Steam hozzáférés engedélyezése", error);
+      setRunStatus(`Steam hozzáférési hiba: ${message}`);
+    } finally {
+      setStarting(false);
+    }
+    if (enabled) await startCheck();
+  };
   const clearAndRefresh = async () => {
     setStatusError(undefined);
     setStarting(true);
@@ -346,6 +382,7 @@ function Content() {
     <PanelSectionRow><div>{libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} látható játék ellenőrizve; ${libraryCheck.supported} támogatott, ${libraryCheck.badged} kék jelvény kihelyezve.` : "A játék-számláló az indítás után jelenik meg."}</div></PanelSectionRow>
     {statusError && <PanelSectionRow><div>Hiba: {statusError}</div></PanelSectionRow>}
     <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hibanapló: {diagnosticLog}</div></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={starting} onClick={enableSteamAccessAndCheck}>Steam hozzáférés engedélyezése</ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={starting} onClick={startCheck}>{starting ? "Ellenőrzés folyamatban..." : "Ellenőrzés indítása"}</ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={starting} onClick={clearAndRefresh}>Cache törlése és újraellenőrzés</ButtonItem></PanelSectionRow>
   </PanelSection>;
