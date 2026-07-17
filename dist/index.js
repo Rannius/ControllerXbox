@@ -1,2 +1,139 @@
-"use strict";var e=require("react/jsx-runtime"),t=require("@decky/ui"),n=require("@decky/api"),o=require("react");const r="controller-xbox-badge",i="controller-xbox-home-badge",c=n.callable("get_controller_support"),a=n.callable("clear_cache"),s=n.callable("get_cache_stats");function l(){const e=document.querySelectorAll("[data-appid], [data-gameid], a[href*='/app/']"),t=new Map;return e.forEach(e=>{if(!function(e){const t=e.getBoundingClientRect();return t.width>40&&t.height>40&&t.bottom>0&&t.top<window.innerHeight&&t.right>0&&t.left<window.innerWidth}(e))return;const n=function(e){const t=["data-appid","data-gameid"];for(const n of t){const t=e.getAttribute(n),o=t?.match(/\d+/);if(o)return o[0]}const n=e.getAttribute("href")||e.closest("a")?.getAttribute("href")||"";return n.match(/\/app\/(\d+)/)?.[1]}(e);if(!n)return;const o=e.matches("a")?e:e.closest("a")||e,r=t.get(n)||[];r.includes(o)||r.push(o),t.set(n,r)}),t}function d(e){if(e.querySelector(`:scope > .${r}`))return;const t=e;"static"===getComputedStyle(t).position&&(t.style.position="relative");const n=document.createElement("span");n.className=r,n.textContent="✓ Xbox",n.title="Steam: Full Controller Support",t.appendChild(n)}function u(){const e=function(){const e=document.createElement("style");return e.textContent=`\n    .${r}, #${i} { background:#107cde; color:#fff; font-weight:700; border-radius:4px; box-shadow:0 1px 4px #0009; font-family:Arial,sans-serif; z-index:20; }\n    .${r} { position:absolute; top:6px; right:6px; padding:3px 6px; font-size:12px; line-height:14px; pointer-events:none; }\n    #${i} { display:inline-block; margin:8px 16px; padding:5px 9px; font-size:14px; }\n  `,document.head.appendChild(e),()=>e.remove()}();let t,n=!1;const o=async()=>{if(n)return;const e=l();if(function(e){const t=document.getElementById(i),n=/library\/home/.test(location.hash)||/library\/home/.test(location.pathname);if(!e||!n||t)return;const o=document.querySelector("[class*='Home'], [class*='home']");if(!o)return;const r=document.createElement("div");r.id=i,r.textContent="✓ Xbox — Full Controller Support",o.prepend(r)}(e.size>0),e.size)try{const t=await c([...e.keys()]);if(n||!t.success)return;Object.entries(t.support||{}).forEach(([t,n])=>{n&&e.get(t)?.forEach(d)})}catch(e){console.debug("ControllerXbox lookup failed",e)}},a=()=>{window.clearTimeout(t),t=window.setTimeout(o,250)},s=new MutationObserver(a);return s.observe(document.body,{childList:!0,subtree:!0}),window.addEventListener("scroll",a,!0),window.addEventListener("hashchange",a),a(),()=>{n=!0,s.disconnect(),window.removeEventListener("scroll",a,!0),window.removeEventListener("hashchange",a),window.clearTimeout(t),document.querySelectorAll(`.${r}, #${i}`).forEach(e=>e.remove()),e()}}function h(){const[r,i]=o.useState(),c=async()=>{i(await s())};return o.useEffect(()=>{c()},[]),e.jsxs(t.PanelSection,{title:"Xbox Controller Check",children:[e.jsx(t.PanelSectionRow,{children:e.jsx("div",{children:"Blue ✓ Xbox badges mark games whose Steam Store listing has official Full Controller Support."})}),e.jsx(t.PanelSectionRow,{children:e.jsx("div",{children:r?`${r.fresh_entries}/${r.entries} cached games active — cache expires after ${r.ttl_days} days.`:"Loading cache status…"})}),e.jsx(t.PanelSectionRow,{children:e.jsx(t.ButtonItem,{layout:"below",onClick:async()=>{const e=await a();n.toaster.toast({title:"Xbox Controller Check",body:`${e.removed} cached entries cleared.`}),await c()},children:"Clear and refresh cache"})})]})}var p=t.definePlugin(()=>{const n=u();return{name:"Xbox Controller Check",titleView:e.jsx("div",{className:t.staticClasses.Title,children:"Xbox Controller Check"}),content:e.jsx(h,{}),icon:e.jsx("span",{children:"✓"}),onDismount:n}});module.exports=p;
+const manifest = {"name":"ControllerXbox"};
+const API_VERSION = 2;
+const internalAPIConnection = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit;
+if (!internalAPIConnection) {
+    throw new Error('[@decky/api]: Failed to connect to the loader as as the loader API was not initialized. This is likely a bug in Decky Loader.');
+}
+let api;
+try {
+    api = internalAPIConnection.connect(API_VERSION, manifest.name);
+}
+catch {
+    api = internalAPIConnection.connect(1, manifest.name);
+    console.warn(`[@decky/api] Requested API version ${API_VERSION} but the running loader only supports version 1. Some features may not work.`);
+}
+if (api._version != API_VERSION) {
+    console.warn(`[@decky/api] Requested API version ${API_VERSION} but the running loader only supports version ${api._version}. Some features may not work.`);
+}
+const callable = api.callable;
+const toaster = api.toaster;
+
+const BADGE_CLASS = "controller-xbox-badge";
+const HOME_BADGE_ID = "controller-xbox-home-badge";
+const getControllerSupport = callable("get_controller_support");
+const clearCache = callable("clear_cache");
+const getCacheStats = callable("get_cache_stats");
+function appIdFrom(element) {
+    const attributes = ["data-appid", "data-gameid"];
+    for (const attribute of attributes) {
+        const value = element.getAttribute(attribute);
+        const match = value?.match(/\d+/);
+        if (match)
+            return match[0];
+    }
+    const href = element.getAttribute("href") || element.closest("a")?.getAttribute("href") || "";
+    return href.match(/\/app\/(\d+)/)?.[1];
+}
+function isVisible(element) {
+    const box = element.getBoundingClientRect();
+    return box.width > 40 && box.height > 40 && box.bottom > 0 && box.top < window.innerHeight && box.right > 0 && box.left < window.innerWidth;
+}
+function findVisibleGameElements() {
+    const candidates = document.querySelectorAll("[data-appid], [data-gameid], a[href*='/app/']");
+    const games = new Map();
+    candidates.forEach((candidate) => {
+        if (!isVisible(candidate))
+            return;
+        const appId = appIdFrom(candidate);
+        if (!appId)
+            return;
+        const target = candidate.matches("a") ? candidate : candidate.closest("a") || candidate;
+        const elements = games.get(appId) || [];
+        if (!elements.includes(target))
+            elements.push(target);
+        games.set(appId, elements);
+    });
+    return games;
+}
+function addBadge(target) {
+    if (target.querySelector(`:scope > .${BADGE_CLASS}`))
+        return;
+    const htmlTarget = target;
+    if (getComputedStyle(htmlTarget).position === "static")
+        htmlTarget.style.position = "relative";
+    const badge = document.createElement("span");
+    badge.className = BADGE_CLASS;
+    badge.textContent = "✓ Xbox";
+    badge.title = "Steam: Full Controller Support";
+    htmlTarget.appendChild(badge);
+}
+function syncHomeLabel(hasGames) {
+    const old = document.getElementById(HOME_BADGE_ID);
+    const isHome = /library\/home/.test(location.hash) || /library\/home/.test(location.pathname);
+    if (!hasGames || !isHome || old)
+        return;
+    const root = document.querySelector("[class*='Home'], [class*='home']");
+    if (!root)
+        return;
+    const label = document.createElement("div");
+    label.id = HOME_BADGE_ID;
+    label.textContent = "✓ Xbox — Full Controller Support";
+    root.prepend(label);
+}
+function installStyles() {
+    const style = document.createElement("style");
+    style.textContent = `
+    .${BADGE_CLASS}, #${HOME_BADGE_ID} { background:#107cde; color:#fff; font-weight:700; border-radius:4px; box-shadow:0 1px 4px #0009; font-family:Arial,sans-serif; z-index:20; }
+    .${BADGE_CLASS} { position:absolute; top:6px; right:6px; padding:3px 6px; font-size:12px; line-height:14px; pointer-events:none; }
+    #${HOME_BADGE_ID} { display:inline-block; margin:8px 16px; padding:5px 9px; font-size:14px; }
+  `;
+    document.head.appendChild(style);
+    return () => style.remove();
+}
+function startLibraryBadges() {
+    const removeStyles = installStyles();
+    let timer;
+    let disposed = false;
+    const refresh = async () => {
+        if (disposed)
+            return;
+        const games = findVisibleGameElements();
+        syncHomeLabel(games.size > 0);
+        if (!games.size)
+            return;
+        try {
+            const response = await getControllerSupport([...games.keys()]);
+            if (disposed || !response.success)
+                return;
+            Object.entries(response.support || {}).forEach(([appId, supported]) => {
+                if (supported)
+                    games.get(appId)?.forEach(addBadge);
+            });
+        }
+        catch (error) {
+            console.debug("ControllerXbox lookup failed", error);
+        }
+    };
+    const schedule = () => { window.clearTimeout(timer); timer = window.setTimeout(refresh, 250); };
+    const observer = new MutationObserver(schedule);
+    observer.observe(document.body, { childList: true, subtree: true });
+    window.addEventListener("scroll", schedule, true);
+    window.addEventListener("hashchange", schedule);
+    schedule();
+    return () => { disposed = true; observer.disconnect(); window.removeEventListener("scroll", schedule, true); window.removeEventListener("hashchange", schedule); window.clearTimeout(timer); document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove()); removeStyles(); };
+}
+function Content() {
+    const [stats, setStats] = SP_REACT.useState();
+    const refreshStats = async () => {
+        setStats(await getCacheStats());
+    };
+    SP_REACT.useEffect(() => { void refreshStats(); }, []);
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.fresh_entries}/${stats.entries} cached games active — cache expires after ${stats.ttl_days} days.` : "Loading cache status…" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }, children: "Clear and refresh cache" }) })] });
+}
+var index = DFL.definePlugin(() => {
+    const stopLibraryBadges = startLibraryBadges();
+    return { name: "Xbox Controller Check", titleView: SP_JSX.jsx("div", { className: DFL.staticClasses.Title, children: "Xbox Controller Check" }), content: SP_JSX.jsx(Content, {}), icon: SP_JSX.jsx("span", { children: "\u2713" }), onDismount: stopLibraryBadges };
+});
+
+export { index as default };
 //# sourceMappingURL=index.js.map

@@ -2,6 +2,7 @@
   "name": "controller-xbox",
   "version": "1.0.0",
   "description": "Decky Loader badge for Steam games with Full Controller Support",
+  "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "rollup -c",
@@ -10,6 +11,7 @@
   "keywords": ["decky", "steam-deck", "controller"],
   "license": "MIT",
   "devDependencies": {
+    "@decky/rollup": "^1.0.2",
     "@rollup/plugin-commonjs": "^28.0.2",
     "@rollup/plugin-node-resolve": "^16.0.0",
     "@rollup/plugin-typescript": "^12.1.2",
