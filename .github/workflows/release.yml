@@ -34,7 +34,8 @@ jobs:
         run: pnpm run build
 
       - name: Kiadási verzió ellenőrzése
-        run: test "v$(node -p \"require('./package.json').version\")" = "${GITHUB_REF_NAME}"
+        run: |
+          node -e 'const version = "v" + require("./package.json").version; if (version !== process.env.GITHUB_REF_NAME) { console.error("Verzióeltérés: " + version + " != " + process.env.GITHUB_REF_NAME); process.exit(1); }'
 
       - name: Decky telepítő ZIP készítése
         shell: bash
