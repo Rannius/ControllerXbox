@@ -137,3 +137,12 @@ class Plugin:
         async with self._lock:
             fresh = sum(1 for entry in self._cache.values() if isinstance(entry, dict) and self._is_fresh(entry, now))
             return {"success": True, "entries": len(self._cache), "fresh_entries": fresh, "ttl_days": 30}
+
+    async def get_backend_diagnostics(self) -> dict[str, Any]:
+        """Network-free health check for the manual frontend start button."""
+        stats = await self.get_cache_stats()
+        return {
+            **stats,
+            "backend": "ready",
+            "settings_directory": str(self._cache_path.parent),
+        }

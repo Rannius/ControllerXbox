@@ -12,10 +12,12 @@ const APP_ID_SELECTOR = "[data-appid], [data-gameid], [data-detailed-appid], [da
 type SupportResponse = { success: boolean; support?: Record<string, boolean> };
 type CacheStats = { entries: number; fresh_entries: number; ttl_days: number };
 type LibraryCheck = { visible: number; checked: number; supported: number };
+type BackendDiagnostics = CacheStats & { success: boolean; backend: string; settings_directory: string };
 
 const getControllerSupport = callable<[appIds: string[]], SupportResponse>("get_controller_support");
 const clearCache = callable<[], { success: boolean; removed: number }>("clear_cache");
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
+const getBackendDiagnostics = callable<[], BackendDiagnostics>("get_backend_diagnostics");
 
 function withBackendTimeout<T>(request: Promise<T>): Promise<T> {
   return Promise.race([
@@ -96,6 +98,7 @@ function startLibraryBadges(): () => void {
   const removeStyles = installStyles();
   let timer: number | undefined;
   let disposed = false;
+  let enabled = false;
   let lastCheckSignature = "";
   const refresh = async () => {
     if (disposed) return;
@@ -129,17 +132,21 @@ function startLibraryBadges(): () => void {
       console.debug("ControllerXbox lookup failed", error);
     }
   };
-  const schedule = () => { window.clearTimeout(timer); timer = window.setTimeout(refresh, 250); };
+  const schedule = () => {
+    if (!enabled) return;
+    window.clearTimeout(timer);
+    timer = window.setTimeout(refresh, 250);
+  };
   const observer = new MutationObserver(schedule);
   observer.observe(document.body, { childList: true, subtree: true });
   window.addEventListener("scroll", schedule, true);
   window.addEventListener("hashchange", schedule);
   const refreshNow = () => {
+    enabled = true;
     document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove());
     schedule();
   };
   window.addEventListener(REFRESH_EVENT, refreshNow);
-  schedule();
   return () => {
     disposed = true;
     observer.disconnect();
@@ -156,6 +163,8 @@ function Content() {
   const [stats, setStats] = useState<CacheStats>();
   const [libraryCheck, setLibraryCheck] = useState<LibraryCheck>();
   const [statusError, setStatusError] = useState<string>();
+  const [runStatus, setRunStatus] = useState("Kesz az ellenorzes inditasara.");
+  const [starting, setStarting] = useState(false);
   const refreshStats = async () => {
     try {
       setStats(await withBackendTimeout(getCacheStats()));
@@ -165,7 +174,6 @@ function Content() {
     }
   };
   useEffect(() => {
-    void refreshStats();
     const onCacheChanged = (event: Event) => {
       const detail = (event as CustomEvent<LibraryCheck>).detail;
       if (detail) setLibraryCheck(detail);
@@ -174,12 +182,43 @@ function Content() {
     window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
     return () => window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
   }, []);
+  const startCheck = async () => {
+    setStarting(true);
+    setStatusError(undefined);
+    setRunStatus("Backend ellenorzese es a lathato jatekok vizsgalata folyamatban...");
+    try {
+      const diagnostics = await withBackendTimeout(getBackendDiagnostics());
+      setStats(diagnostics);
+      setRunStatus(`Backend rendben. Cache mappa: ${diagnostics.settings_directory}`);
+      window.dispatchEvent(new Event(REFRESH_EVENT));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatusError(message);
+      setRunStatus(`Backend hiba: ${message}`);
+    } finally {
+      setStarting(false);
+    }
+  };
+  const clearAndRefresh = async () => {
+    setStatusError(undefined);
+    try {
+      const response = await withBackendTimeout(clearCache());
+      toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` });
+      await startCheck();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setStatusError(message);
+      setRunStatus(`Cache hiba: ${message}`);
+    }
+  };
   return <PanelSection title="Xbox Controller Check">
     <PanelSectionRow><div>Blue ✓ Xbox badges mark games whose Steam Store listing has official Full Controller Support.</div></PanelSectionRow>
-    <PanelSectionRow><div>{stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "Cache status betoltese..."}</div></PanelSectionRow>
-    <PanelSectionRow><div>{libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} lathato jatek ellenorizve; ${libraryCheck.supported} kapott Xbox jelvenyt.` : "A lathato jatekok ellenorzese meg nem indult el."}</div></PanelSectionRow>
+    <PanelSectionRow><div>{runStatus}</div></PanelSectionRow>
+    <PanelSectionRow><div>{stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "A cache szamlalo az inditas utan jelenik meg."}</div></PanelSectionRow>
+    <PanelSectionRow><div>{libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} lathato jatek ellenorizve; ${libraryCheck.supported} kapott Xbox jelvenyt.` : "A jatek-szamlalo az inditas utan jelenik meg."}</div></PanelSectionRow>
     {statusError && <PanelSectionRow><div>Cache status error: {statusError}</div></PanelSectionRow>}
-    <PanelSectionRow><ButtonItem layout="below" onClick={async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); window.dispatchEvent(new Event(REFRESH_EVENT)); await refreshStats(); }}>Clear and refresh cache</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={starting} onClick={startCheck}>{starting ? "Ellenorzes folyamatban..." : "Ellenorzes inditasa"}</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={starting} onClick={clearAndRefresh}>Cache torlese es ujraellenorzes</ButtonItem></PanelSectionRow>
   </PanelSection>;
 }
 

@@ -28,6 +28,7 @@ const APP_ID_SELECTOR = "[data-appid], [data-gameid], [data-detailed-appid], [da
 const getControllerSupport = callable("get_controller_support");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
+const getBackendDiagnostics = callable("get_backend_diagnostics");
 function withBackendTimeout(request) {
     return Promise.race([
         request,
@@ -108,6 +109,7 @@ function startLibraryBadges() {
     const removeStyles = installStyles();
     let timer;
     let disposed = false;
+    let enabled = false;
     let lastCheckSignature = "";
     const refresh = async () => {
         if (disposed)
@@ -145,17 +147,22 @@ function startLibraryBadges() {
             console.debug("ControllerXbox lookup failed", error);
         }
     };
-    const schedule = () => { window.clearTimeout(timer); timer = window.setTimeout(refresh, 250); };
+    const schedule = () => {
+        if (!enabled)
+            return;
+        window.clearTimeout(timer);
+        timer = window.setTimeout(refresh, 250);
+    };
     const observer = new MutationObserver(schedule);
     observer.observe(document.body, { childList: true, subtree: true });
     window.addEventListener("scroll", schedule, true);
     window.addEventListener("hashchange", schedule);
     const refreshNow = () => {
+        enabled = true;
         document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove());
         schedule();
     };
     window.addEventListener(REFRESH_EVENT, refreshNow);
-    schedule();
     return () => {
         disposed = true;
         observer.disconnect();
@@ -171,6 +178,8 @@ function Content() {
     const [stats, setStats] = SP_REACT.useState();
     const [libraryCheck, setLibraryCheck] = SP_REACT.useState();
     const [statusError, setStatusError] = SP_REACT.useState();
+    const [runStatus, setRunStatus] = SP_REACT.useState("Kesz az ellenorzes inditasara.");
+    const [starting, setStarting] = SP_REACT.useState(false);
     const refreshStats = async () => {
         try {
             setStats(await withBackendTimeout(getCacheStats()));
@@ -181,7 +190,6 @@ function Content() {
         }
     };
     SP_REACT.useEffect(() => {
-        void refreshStats();
         const onCacheChanged = (event) => {
             const detail = event.detail;
             if (detail)
@@ -191,7 +199,39 @@ function Content() {
         window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
         return () => window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
     }, []);
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "Cache status betoltese..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} lathato jatek ellenorizve; ${libraryCheck.supported} kapott Xbox jelvenyt.` : "A lathato jatekok ellenorzese meg nem indult el." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); window.dispatchEvent(new Event(REFRESH_EVENT)); await refreshStats(); }, children: "Clear and refresh cache" }) })] });
+    const startCheck = async () => {
+        setStarting(true);
+        setStatusError(undefined);
+        setRunStatus("Backend ellenorzese es a lathato jatekok vizsgalata folyamatban...");
+        try {
+            const diagnostics = await withBackendTimeout(getBackendDiagnostics());
+            setStats(diagnostics);
+            setRunStatus(`Backend rendben. Cache mappa: ${diagnostics.settings_directory}`);
+            window.dispatchEvent(new Event(REFRESH_EVENT));
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setStatusError(message);
+            setRunStatus(`Backend hiba: ${message}`);
+        }
+        finally {
+            setStarting(false);
+        }
+    };
+    const clearAndRefresh = async () => {
+        setStatusError(undefined);
+        try {
+            const response = await withBackendTimeout(clearCache());
+            toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` });
+            await startCheck();
+        }
+        catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            setStatusError(message);
+            setRunStatus(`Cache hiba: ${message}`);
+        }
+    };
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: runStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "A cache szamlalo az inditas utan jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} lathato jatek ellenorizve; ${libraryCheck.supported} kapott Xbox jelvenyt.` : "A jatek-szamlalo az inditas utan jelenik meg." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: startCheck, children: starting ? "Ellenorzes folyamatban..." : "Ellenorzes inditasa" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: clearAndRefresh, children: "Cache torlese es ujraellenorzes" }) })] });
 }
 var index = DFL.definePlugin(() => {
     const stopLibraryBadges = startLibraryBadges();
