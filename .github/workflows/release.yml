@@ -44,7 +44,16 @@ jobs:
           cp -R dist/. package/ControllerXbox/dist/
           cp main.py package.json plugin.json README.md LICENSE package/ControllerXbox/
           cd package
-          zip -r "../release/ControllerXbox-v${VERSION}.zip" ControllerXbox
+          zip "../release/ControllerXbox-v${VERSION}.zip" \
+            ControllerXbox/.gitignore \
+            ControllerXbox/LICENSE \
+            ControllerXbox/README.md \
+            ControllerXbox/main.py \
+            ControllerXbox/package.json \
+            ControllerXbox/plugin.json \
+            ControllerXbox/pnpm-lock.yaml \
+            ControllerXbox/dist/index.js \
+            ControllerXbox/dist/index.js.map
 
       - name: GitHub Release létrehozása
         env:
