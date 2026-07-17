@@ -80,27 +80,29 @@ function patchLibraryAppRoute(): () => void {
     const routeProps = findInReactTree(tree, (node: any) => node?.renderFunc);
     if (!routeProps) return tree;
 
+    let appId: number | undefined;
     const patchHandler = createReactTreePatcher([
       (renderTree: any) => {
         const children = findInReactTree(renderTree, (node: any) => node?.props?.children?.props?.overview)?.props?.children;
-        return typeof children === "object" ? children : null;
+        const overview = children?.props?.overview;
+        if (typeof overview?.appid !== "number") return null;
+        appId = overview.appid;
+        return children;
       },
     ], (_: Array<Record<string, unknown>>, result?: ReactElement) => {
       if (!result) return result;
-      type ParentElement = ReactElement<{ children: Array<ReactElement<{ id?: string; overview?: { appid?: number } }>>; className: string }>;
+      type ParentElement = ReactElement<{ children: Array<ReactElement<{ id?: string; overview?: unknown; onShowLaunchingDetails?: unknown }>>; className: string }>;
       const parent = findInReactTree(
         result,
         (node: ParentElement) => Array.isArray(node?.props?.children) && typeof node?.props?.className === "string" && node.props.className.includes(appDetailsClasses.InnerContainer),
       ) as ParentElement;
       if (!parent?.props?.children) return result;
-
-      const appPanel = parent.props.children.find((child) => typeof child?.props?.overview?.appid === "number");
-      const appId = appPanel?.props?.overview?.appid;
-      if (!appPanel || typeof appId !== "number") return result;
+      if (typeof appId !== "number") return result;
       if (parent.props.children.some((child) => child?.props?.id === "controller-xbox-badge-anchor")) return result;
 
-      const appPanelIndex = parent.props.children.indexOf(appPanel);
-      parent.props.children.splice(Math.max(0, appPanelIndex), 0, <XboxBadgeAnchor key="controller-xbox-badge-anchor" appId={appId} />);
+      const appPanelIndex = parent.props.children.findIndex((child) => child?.props?.overview && child?.props?.onShowLaunchingDetails);
+      const insertAt = appPanelIndex < 0 ? parent.props.children.length : Math.max(0, appPanelIndex - 1);
+      parent.props.children.splice(insertAt, 0, <XboxBadgeAnchor key="controller-xbox-badge-anchor" appId={appId} />);
       return result;
     });
     afterPatch(routeProps, "renderFunc", patchHandler);

@@ -85,10 +85,15 @@ function patchLibraryAppRoute() {
         const routeProps = DFL.findInReactTree(tree, (node) => node?.renderFunc);
         if (!routeProps)
             return tree;
+        let appId;
         const patchHandler = DFL.createReactTreePatcher([
             (renderTree) => {
                 const children = DFL.findInReactTree(renderTree, (node) => node?.props?.children?.props?.overview)?.props?.children;
-                return typeof children === "object" ? children : null;
+                const overview = children?.props?.overview;
+                if (typeof overview?.appid !== "number")
+                    return null;
+                appId = overview.appid;
+                return children;
             },
         ], (_, result) => {
             if (!result)
@@ -96,14 +101,13 @@ function patchLibraryAppRoute() {
             const parent = DFL.findInReactTree(result, (node) => Array.isArray(node?.props?.children) && typeof node?.props?.className === "string" && node.props.className.includes(DFL.appDetailsClasses.InnerContainer));
             if (!parent?.props?.children)
                 return result;
-            const appPanel = parent.props.children.find((child) => typeof child?.props?.overview?.appid === "number");
-            const appId = appPanel?.props?.overview?.appid;
-            if (!appPanel || typeof appId !== "number")
+            if (typeof appId !== "number")
                 return result;
             if (parent.props.children.some((child) => child?.props?.id === "controller-xbox-badge-anchor"))
                 return result;
-            const appPanelIndex = parent.props.children.indexOf(appPanel);
-            parent.props.children.splice(Math.max(0, appPanelIndex), 0, SP_JSX.jsx(XboxBadgeAnchor, { appId: appId }, "controller-xbox-badge-anchor"));
+            const appPanelIndex = parent.props.children.findIndex((child) => child?.props?.overview && child?.props?.onShowLaunchingDetails);
+            const insertAt = appPanelIndex < 0 ? parent.props.children.length : Math.max(0, appPanelIndex - 1);
+            parent.props.children.splice(insertAt, 0, SP_JSX.jsx(XboxBadgeAnchor, { appId: appId }, "controller-xbox-badge-anchor"));
             return result;
         });
         DFL.afterPatch(routeProps, "renderFunc", patchHandler);
