@@ -24,7 +24,6 @@ STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=eng
 class Plugin:
     def __init__(self) -> None:
         self._cache: dict[str, dict[str, Any]] = {}
-        self._session_loaded_app_ids: set[str] = set()
         self._cache_path = Path(decky.DECKY_PLUGIN_SETTINGS_DIR) / "controller-support-cache.json"
         self._lock = asyncio.Lock()
 
@@ -111,18 +110,16 @@ class Plugin:
             for app_id, support in zip(missing, fetched):
                 if support is not None:
                     self._cache[app_id] = {"full_controller_support": support, "checked_at": now}
-                    self._session_loaded_app_ids.add(app_id)
                     results[app_id] = support
                     changed = True
         if changed:
             await self._save_cache()
         return {"success": True, "support": results, "cached_for_days": 30}
 
-    async def clear_controller_cache(self) -> dict[str, Any]:
+    async def clear_cache(self) -> dict[str, Any]:
         async with self._lock:
             removed = len(self._cache)
             self._cache = {}
-            self._session_loaded_app_ids = set()
             try:
                 await asyncio.to_thread(self._cache_path.unlink, missing_ok=True)
             except OSError as error:
@@ -133,17 +130,4 @@ class Plugin:
         now = time.time()
         async with self._lock:
             fresh = sum(1 for entry in self._cache.values() if isinstance(entry, dict) and self._is_fresh(entry, now))
-            full_controller_supported = sum(
-                1
-                for entry in self._cache.values()
-                if isinstance(entry, dict) and entry.get("full_controller_support") is True
-            )
-            return {
-                "success": True,
-                "entries": len(self._cache),
-                "memory_entries": len(self._cache),
-                "session_loaded_entries": len(self._session_loaded_app_ids),
-                "full_controller_supported_entries": full_controller_supported,
-                "fresh_entries": fresh,
-                "ttl_days": 30,
-            }
+            return {"success": True, "entries": len(self._cache), "fresh_entries": fresh, "ttl_days": 30}

@@ -4,21 +4,11 @@ import { useEffect, useState } from "react";
 
 const BADGE_CLASS = "controller-xbox-badge";
 const HOME_BADGE_ID = "controller-xbox-home-badge";
-const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
-const REFRESH_EVENT = "controller-xbox-refresh";
-
 type SupportResponse = { success: boolean; support?: Record<string, boolean> };
-type CacheStats = {
-  entries: number;
-  memory_entries: number;
-  session_loaded_entries: number;
-  full_controller_supported_entries: number;
-  fresh_entries: number;
-  ttl_days: number;
-};
+type CacheStats = { entries: number; fresh_entries: number; ttl_days: number };
 
 const getControllerSupport = callable<[appIds: string[]], SupportResponse>("get_controller_support");
-const clearCache = callable<[], { success: boolean; removed: number }>("clear_controller_cache");
+const clearCache = callable<[], { success: boolean; removed: number }>("clear_cache");
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
 
 function appIdFrom(element: Element): string | undefined {
@@ -109,25 +99,21 @@ function startLibraryBadges(): () => void {
       Object.entries(response.support || {}).forEach(([appId, supported]) => {
         if (supported) games.get(appId)?.forEach(addBadge);
       });
-      window.dispatchEvent(new Event(CACHE_CHANGED_EVENT));
     } catch (error) {
       console.debug("ControllerXbox lookup failed", error);
     }
   };
   const schedule = () => { window.clearTimeout(timer); timer = window.setTimeout(refresh, 250); };
-  const refreshNow = () => { document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove()); schedule(); };
   const observer = new MutationObserver(schedule);
   observer.observe(document.body, { childList: true, subtree: true });
   window.addEventListener("scroll", schedule, true);
   window.addEventListener("hashchange", schedule);
-  window.addEventListener(REFRESH_EVENT, refreshNow);
   schedule();
   return () => {
     disposed = true;
     observer.disconnect();
     window.removeEventListener("scroll", schedule, true);
     window.removeEventListener("hashchange", schedule);
-    window.removeEventListener(REFRESH_EVENT, refreshNow);
     window.clearTimeout(timer);
     document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove());
     removeStyles();
@@ -136,41 +122,16 @@ function startLibraryBadges(): () => void {
 
 function Content() {
   const [stats, setStats] = useState<CacheStats>();
-  const [notice, setNotice] = useState<string>();
-  const [clearing, setClearing] = useState(false);
   const refreshStats = async () => {
-    try { setStats(await getCacheStats()); } catch (error) { console.debug("ControllerXbox stats failed", error); }
+    setStats(await getCacheStats());
   };
   useEffect(() => {
     void refreshStats();
-    window.addEventListener(CACHE_CHANGED_EVENT, refreshStats);
-    return () => window.removeEventListener(CACHE_CHANGED_EVENT, refreshStats);
   }, []);
-  const clearAndRefresh = async () => {
-    setClearing(true);
-    setNotice("Cache törlése folyamatban…");
-    try {
-      const response = await clearCache();
-      const message = `${response.removed} cache-bejegyzés törölve. A látható játékok adatai most újratöltődnek.`;
-      setNotice(message);
-      try { toaster.toast({ title: "Xbox Controller Check", body: message }); } catch (error) { console.debug("ControllerXbox toast failed", error); }
-      window.dispatchEvent(new Event(CACHE_CHANGED_EVENT));
-      window.dispatchEvent(new Event(REFRESH_EVENT));
-      await refreshStats();
-    } catch (error) {
-      const details = error instanceof Error ? error.message : String(error);
-      setNotice(`A cache törlése nem sikerült: ${details}`);
-      console.error("ControllerXbox cache clear failed", error);
-    } finally {
-      setClearing(false);
-    }
-  };
   return <PanelSection title="Xbox Controller Check">
     <PanelSectionRow><div>Blue ✓ Xbox badges mark games whose Steam Store listing has official Full Controller Support.</div></PanelSectionRow>
-    <PanelSectionRow><div>{stats ? `${stats.memory_entries} játék van memóriában; ebből ${stats.full_controller_supported_entries} kapott Full Controller Support jelölést. Ebben az indításban ${stats.session_loaded_entries} játék töltődött be.` : "Cache állapot betöltése…"}</div></PanelSectionRow>
-    <PanelSectionRow><div>{stats ? `${stats.fresh_entries}/${stats.entries} bejegyzés friss (${stats.ttl_days} napos érvényesség).` : ""}</div></PanelSectionRow>
-    {notice && <PanelSectionRow><div>{notice}</div></PanelSectionRow>}
-    <PanelSectionRow><ButtonItem layout="below" disabled={clearing} onClick={clearAndRefresh}>{clearing ? "Cache törlése…" : "Cache törlése és frissítése"}</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div>{stats ? `${stats.fresh_entries}/${stats.entries} cached games active — cache expires after ${stats.ttl_days} days.` : "Loading cache status…"}</div></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }}>Clear and refresh cache</ButtonItem></PanelSectionRow>
   </PanelSection>;
 }
 
