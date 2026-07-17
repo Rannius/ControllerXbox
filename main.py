@@ -5,6 +5,7 @@ Steam Store appdetails endpoint is public and does not require an API key.
 """
 
 import asyncio
+import functools
 import json
 import os
 import tempfile
@@ -12,7 +13,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 import decky
 
@@ -23,7 +24,7 @@ STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=eng
 
 class Plugin:
     def __init__(self) -> None:
-        self._cache: dict[str, dict[str, Any]] = {}
+        self._cache: Dict[str, Dict[str, Any]] = {}
         # Recent Decky versions expose the settings directory as
         # ``decky_SETTINGS_DIR``.  Keep the older name as a fallback so a
         # manually installed plugin works on both Loader generations.
@@ -42,7 +43,7 @@ class Plugin:
 
     async def _load_cache(self) -> None:
         try:
-            contents = await asyncio.to_thread(self._cache_path.read_text, encoding="utf-8")
+            contents = await self._run_blocking(lambda: self._cache_path.read_text(encoding="utf-8"))
             parsed = json.loads(contents)
             if isinstance(parsed, dict):
                 self._cache = parsed
@@ -54,7 +55,12 @@ class Plugin:
     async def _save_cache(self) -> None:
         async with self._lock:
             payload = json.dumps(self._cache, separators=(",", ":"))
-            await asyncio.to_thread(self._write_cache_atomically, payload)
+            await self._run_blocking(self._write_cache_atomically, payload)
+
+    async def _run_blocking(self, function: Any, *args: Any) -> Any:
+        """Run blocking file and network operations on Python 3.8 and newer."""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, functools.partial(function, *args))
 
     def _write_cache_atomically(self, payload: str) -> None:
         self._cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -68,16 +74,16 @@ class Plugin:
                 os.unlink(temporary_path)
 
     @staticmethod
-    def _valid_app_ids(app_ids: Any) -> list[str]:
+    def _valid_app_ids(app_ids: Any) -> List[str]:
         if not isinstance(app_ids, list):
             return []
         return list(dict.fromkeys(str(app_id) for app_id in app_ids if str(app_id).isdigit()))[:100]
 
     @staticmethod
-    def _is_fresh(entry: dict[str, Any], now: float) -> bool:
+    def _is_fresh(entry: Dict[str, Any], now: float) -> bool:
         return isinstance(entry.get("checked_at"), (int, float)) and now - entry["checked_at"] < CACHE_TTL_SECONDS
 
-    def _fetch_support(self, app_id: str) -> bool | None:
+    def _fetch_support(self, app_id: str) -> Optional[bool]:
         request = urllib.request.Request(
             STORE_URL.format(app_id=app_id),
             headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"},
@@ -95,12 +101,12 @@ class Plugin:
             decky.logger.debug("Steam lookup failed for %s: %s", app_id, error)
             return None
 
-    async def get_controller_support(self, app_ids: Any) -> dict[str, Any]:
+    async def get_controller_support(self, app_ids: Any) -> Dict[str, Any]:
         """Return official Full Controller Support data for the supplied visible app IDs."""
         requested = self._valid_app_ids(app_ids)
         now = time.time()
-        results: dict[str, bool] = {}
-        missing: list[str] = []
+        results: Dict[str, bool] = {}
+        missing: List[str] = []
 
         async with self._lock:
             for app_id in requested:
@@ -110,7 +116,7 @@ class Plugin:
                 else:
                     missing.append(app_id)
 
-        fetched = await asyncio.gather(*(asyncio.to_thread(self._fetch_support, app_id) for app_id in missing))
+        fetched = await asyncio.gather(*(self._run_blocking(self._fetch_support, app_id) for app_id in missing))
         changed = False
         async with self._lock:
             for app_id, support in zip(missing, fetched):
@@ -122,23 +128,29 @@ class Plugin:
             await self._save_cache()
         return {"success": True, "support": results, "cached_for_days": 30}
 
-    async def clear_cache(self) -> dict[str, Any]:
+    def _delete_cache_file(self) -> None:
+        try:
+            self._cache_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    async def clear_cache(self) -> Dict[str, Any]:
         async with self._lock:
             removed = len(self._cache)
             self._cache = {}
             try:
-                await asyncio.to_thread(self._cache_path.unlink, missing_ok=True)
+                await self._run_blocking(self._delete_cache_file)
             except OSError as error:
                 decky.logger.warning("Could not remove controller cache: %s", error)
         return {"success": True, "removed": removed}
 
-    async def get_cache_stats(self) -> dict[str, Any]:
+    async def get_cache_stats(self) -> Dict[str, Any]:
         now = time.time()
         async with self._lock:
             fresh = sum(1 for entry in self._cache.values() if isinstance(entry, dict) and self._is_fresh(entry, now))
             return {"success": True, "entries": len(self._cache), "fresh_entries": fresh, "ttl_days": 30}
 
-    async def get_backend_diagnostics(self) -> dict[str, Any]:
+    async def get_backend_diagnostics(self) -> Dict[str, Any]:
         """Network-free health check for the manual frontend start button."""
         stats = await self.get_cache_stats()
         return {
