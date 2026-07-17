@@ -46,6 +46,7 @@ jobs:
           python3 - <<'PY'
           import os
           from pathlib import Path
+          import struct
           import zipfile
 
           version = os.environ["VERSION"]
@@ -72,6 +73,19 @@ jobs:
                   info.external_attr = 0
                   info.compress_type = zipfile.ZIP_DEFLATED
                   archive.writestr(info, Path(relative).read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+          data = bytearray(output.read_bytes())
+          offset = 0
+          while True:
+              offset = data.find(b"PK\x01\x02", offset)
+              if offset < 0:
+                  break
+              struct.pack_into("<H", data, offset + 4, 20)
+              struct.pack_into("<H", data, offset + 6, 20)
+              struct.pack_into("<H", data, offset + 8, 0)
+              struct.pack_into("<I", data, offset + 38, 0)
+              name_length, extra_length, comment_length = struct.unpack_from("<HHH", data, offset + 28)
+              offset += 46 + name_length + extra_length + comment_length
+          output.write_bytes(data)
           with zipfile.ZipFile(output) as archive:
               assert archive.namelist() == [f"{root}/{relative}" for relative in files]
               for entry in archive.infolist():
