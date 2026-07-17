@@ -37,6 +37,19 @@ function withBackendTimeout(request) {
         }),
     ]);
 }
+function errorMessage(error) {
+    if (error instanceof Error)
+        return `${error.name}: ${error.message}`;
+    try {
+        const serialized = JSON.stringify(error);
+        if (serialized && serialized !== "{}")
+            return serialized;
+    }
+    catch {
+        // Fall through to the string representation below.
+    }
+    return String(error);
+}
 function appIdFrom(element) {
     const related = [element, element.closest("a"), element.closest(APP_ID_SELECTOR)].filter((item) => item !== null);
     for (const item of related) {
@@ -180,13 +193,20 @@ function Content() {
     const [statusError, setStatusError] = SP_REACT.useState();
     const [runStatus, setRunStatus] = SP_REACT.useState("Kesz az ellenorzes inditasara.");
     const [starting, setStarting] = SP_REACT.useState(false);
+    const [diagnosticLog, setDiagnosticLog] = SP_REACT.useState("Nincs rogzitett hiba.");
+    const rememberError = (where, error) => {
+        const message = errorMessage(error);
+        setStatusError(message);
+        setDiagnosticLog(`${where}: ${message}`);
+        return message;
+    };
     const refreshStats = async () => {
         try {
             setStats(await withBackendTimeout(getCacheStats()));
             setStatusError(undefined);
         }
         catch (error) {
-            setStatusError(error instanceof Error ? error.message : String(error));
+            rememberError("Cache status", error);
         }
     };
     SP_REACT.useEffect(() => {
@@ -210,8 +230,7 @@ function Content() {
             window.dispatchEvent(new Event(REFRESH_EVENT));
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            setStatusError(message);
+            const message = rememberError("Backend onellenorzes", error);
             setRunStatus(`Backend hiba: ${message}`);
         }
         finally {
@@ -226,12 +245,11 @@ function Content() {
             await startCheck();
         }
         catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            setStatusError(message);
+            const message = rememberError("Cache torles", error);
             setRunStatus(`Cache hiba: ${message}`);
         }
     };
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: runStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "A cache szamlalo az inditas utan jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} lathato jatek ellenorizve; ${libraryCheck.supported} kapott Xbox jelvenyt.` : "A jatek-szamlalo az inditas utan jelenik meg." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: startCheck, children: starting ? "Ellenorzes folyamatban..." : "Ellenorzes inditasa" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: clearAndRefresh, children: "Cache torlese es ujraellenorzes" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: runStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "A cache szamlalo az inditas utan jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} lathato jatek ellenorizve; ${libraryCheck.supported} kapott Xbox jelvenyt.` : "A jatek-szamlalo az inditas utan jelenik meg." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanaplo: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: startCheck, children: starting ? "Ellenorzes folyamatban..." : "Ellenorzes inditasa" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: starting, onClick: clearAndRefresh, children: "Cache torlese es ujraellenorzes" }) })] });
 }
 var index = DFL.definePlugin(() => {
     const stopLibraryBadges = startLibraryBadges();

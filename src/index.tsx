@@ -28,6 +28,17 @@ function withBackendTimeout<T>(request: Promise<T>): Promise<T> {
   ]);
 }
 
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized && serialized !== "{}") return serialized;
+  } catch {
+    // Fall through to the string representation below.
+  }
+  return String(error);
+}
+
 function appIdFrom(element: Element): string | undefined {
   const related = [element, element.closest("a"), element.closest(APP_ID_SELECTOR)].filter((item): item is Element => item !== null);
   for (const item of related) {
@@ -165,12 +176,19 @@ function Content() {
   const [statusError, setStatusError] = useState<string>();
   const [runStatus, setRunStatus] = useState("Kesz az ellenorzes inditasara.");
   const [starting, setStarting] = useState(false);
+  const [diagnosticLog, setDiagnosticLog] = useState("Nincs rogzitett hiba.");
+  const rememberError = (where: string, error: unknown) => {
+    const message = errorMessage(error);
+    setStatusError(message);
+    setDiagnosticLog(`${where}: ${message}`);
+    return message;
+  };
   const refreshStats = async () => {
     try {
       setStats(await withBackendTimeout(getCacheStats()));
       setStatusError(undefined);
     } catch (error) {
-      setStatusError(error instanceof Error ? error.message : String(error));
+      rememberError("Cache status", error);
     }
   };
   useEffect(() => {
@@ -192,8 +210,7 @@ function Content() {
       setRunStatus(`Backend rendben. Cache mappa: ${diagnostics.settings_directory}`);
       window.dispatchEvent(new Event(REFRESH_EVENT));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setStatusError(message);
+      const message = rememberError("Backend onellenorzes", error);
       setRunStatus(`Backend hiba: ${message}`);
     } finally {
       setStarting(false);
@@ -206,8 +223,7 @@ function Content() {
       toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` });
       await startCheck();
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setStatusError(message);
+      const message = rememberError("Cache torles", error);
       setRunStatus(`Cache hiba: ${message}`);
     }
   };
@@ -217,6 +233,7 @@ function Content() {
     <PanelSectionRow><div>{stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "A cache szamlalo az inditas utan jelenik meg."}</div></PanelSectionRow>
     <PanelSectionRow><div>{libraryCheck ? `${libraryCheck.checked}/${libraryCheck.visible} lathato jatek ellenorizve; ${libraryCheck.supported} kapott Xbox jelvenyt.` : "A jatek-szamlalo az inditas utan jelenik meg."}</div></PanelSectionRow>
     {statusError && <PanelSectionRow><div>Cache status error: {statusError}</div></PanelSectionRow>}
+    <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hibanaplo: {diagnosticLog}</div></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={starting} onClick={startCheck}>{starting ? "Ellenorzes folyamatban..." : "Ellenorzes inditasa"}</ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={starting} onClick={clearAndRefresh}>Cache torlese es ujraellenorzes</ButtonItem></PanelSectionRow>
   </PanelSection>;
