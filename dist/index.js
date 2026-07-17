@@ -20,18 +20,29 @@ const toaster = api.toaster;
 const executeInTab = api.executeInTab;
 
 const BACKEND_TIMEOUT_MS = 8_000;
+const STEAM_TAB_TIMEOUT_MS = 8_000;
 const STEAM_TAB_NAME = "Steam";
+const BADGE_CLASS = "controller-xbox-badge";
+const BADGE_STYLE_ID = "controller-xbox-badge-style";
+const APP_ID_ATTRIBUTES = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id", "data-ds-appid"];
+const APP_ID_SELECTOR = "[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], [data-ds-appid], [id*='app_'], [id*='app-'], [id*='game_'], [id*='game-'], [class*='app_'], [class*='app-'], [class*='game_'], [class*='game-'], a[href*='/app/'], a[href*='steam://rungameid/'], [href*='games/details/'], [href*='library/app/'], [src*='/apps/'], [data-src*='/apps/'], [style*='/apps/']";
 const getControllerSupport = callable("get_controller_support");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
 const getBackendDiagnostics = callable("get_backend_diagnostics");
-function withBackendTimeout(request) {
+function withTimeout(request, timeoutMs, timeoutMessage) {
     return Promise.race([
         request,
         new Promise((_, reject) => {
-            window.setTimeout(() => reject(new Error("A Decky backend 8 másodpercen belül nem válaszolt.")), BACKEND_TIMEOUT_MS);
+            window.setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
         }),
     ]);
+}
+function withBackendTimeout(request) {
+    return withTimeout(request, BACKEND_TIMEOUT_MS, "A Decky backend 8 másodpercen belül nem válaszolt.");
+}
+function withSteamTabTimeout(request) {
+    return withTimeout(request, STEAM_TAB_TIMEOUT_MS, "A Steam Könyvtár lapja 8 másodpercen belül nem válaszolt. A hibanaplóba került a hiba.");
 }
 function errorMessage(error) {
     if (error instanceof Error)
@@ -45,6 +56,86 @@ function errorMessage(error) {
         // Fall through to the string representation below.
     }
     return String(error);
+}
+function isVisible(element) {
+    const box = element.getBoundingClientRect();
+    return box.width > 40 && box.height > 40 && box.bottom > 0 && box.top < window.innerHeight && box.right > 0 && box.left < window.innerWidth;
+}
+function appIdFromUrl(value) {
+    return value.match(/(?:\/(?:app|apps)\/|games\/details\/|library\/app\/|steam:\/\/(?:rungameid|nav\/games\/details)\/)(\d+)/)?.[1];
+}
+function appIdFromElement(element) {
+    const related = [element, element.closest("a"), element.parentElement];
+    for (const item of related) {
+        if (!item)
+            continue;
+        for (const attribute of APP_ID_ATTRIBUTES) {
+            const match = item.getAttribute(attribute)?.match(/\d+/);
+            if (match)
+                return match[0];
+        }
+        const idMatch = (item.id || "").match(/(?:app|game)[_-](\d+)/i);
+        if (idMatch)
+            return idMatch[1];
+        const className = typeof item.className === "string" ? item.className : "";
+        const classMatch = className.match(/(?:^|\s)(?:app|game)[_-](\d+)/i);
+        if (classMatch)
+            return classMatch[1];
+        for (const attribute of ["href", "src", "data-src", "style"]) {
+            const appId = appIdFromUrl(item.getAttribute(attribute) || "");
+            if (appId)
+                return appId;
+        }
+    }
+    return undefined;
+}
+function badgeTarget(element) {
+    return element.closest("[class*='LibraryTile'], [class*='GameTile'], [class*='Capsule'], [class*='AppPortrait'], [class*='app_portrait'], a") || element.closest("a") || element.parentElement || element;
+}
+function findVisibleGameElements() {
+    const candidates = document.querySelectorAll(APP_ID_SELECTOR);
+    const games = new Map();
+    candidates.forEach((candidate) => {
+        if (!isVisible(candidate))
+            return;
+        const appId = appIdFromElement(candidate);
+        if (!appId)
+            return;
+        const target = badgeTarget(candidate);
+        const targets = games.get(appId) || [];
+        if (!targets.includes(target))
+            targets.push(target);
+        games.set(appId, targets);
+    });
+    return { games, candidates: candidates.length };
+}
+function applyBadgesToCurrentDocument(games, support) {
+    if (!document.getElementById(BADGE_STYLE_ID)) {
+        const style = document.createElement("style");
+        style.id = BADGE_STYLE_ID;
+        style.textContent = "." + BADGE_CLASS + "{position:absolute;top:6px;left:6px;z-index:9999;padding:3px 6px;border-radius:4px;background:#107cde;color:#fff;font:700 12px/14px Arial,sans-serif;box-shadow:0 1px 4px #0009;pointer-events:none}";
+        document.head.appendChild(style);
+    }
+    document.querySelectorAll("." + BADGE_CLASS).forEach((badge) => badge.remove());
+    const badgedTargets = new Set();
+    for (const [appId, targets] of games) {
+        if (!support[appId])
+            continue;
+        for (const target of targets) {
+            if (badgedTargets.has(target))
+                continue;
+            badgedTargets.add(target);
+            const htmlTarget = target;
+            if (getComputedStyle(htmlTarget).position === "static")
+                htmlTarget.style.position = "relative";
+            const badge = document.createElement("span");
+            badge.className = BADGE_CLASS;
+            badge.textContent = "✓ Xbox";
+            badge.title = "Steam: Full Controller Support";
+            htmlTarget.appendChild(badge);
+        }
+    }
+    return badgedTargets.size;
 }
 /*
  * The Decky quick-access panel has its own document.  These scripts deliberately
@@ -134,7 +225,7 @@ function steamBadgeCode(support) {
   })()`;
 }
 async function runInSteamTab(code) {
-    const response = await executeInTab(STEAM_TAB_NAME, false, code);
+    const response = await withSteamTabTimeout(executeInTab(STEAM_TAB_NAME, false, code));
     if (!response.success) {
         throw new Error(`A Steam lap kódja sikertelen volt: ${errorMessage(response.result)}`);
     }
@@ -148,16 +239,38 @@ async function runInSteamTab(code) {
     }
     return response.result;
 }
-async function checkSteamLibrary() {
+async function fetchControllerSupport(ids) {
+    const response = await withBackendTimeout(getControllerSupport(ids));
+    if (!response.success)
+        throw new Error("A Decky backend nem adott sikeres ellenőrzési választ.");
+    return response.support || {};
+}
+async function checkSteamLibrary(onProgress) {
+    const local = findVisibleGameElements();
+    const localIds = [...local.games.keys()];
+    const localProbe = { ids: localIds, candidates: local.candidates, location: window.location.href };
+    if (localIds.length > 0) {
+        onProgress("A Steam Könyvtár közvetlen keresése " + localIds.length + " játékot talált. Steam Áruház-adatok lekérése...");
+        const support = await fetchControllerSupport(localIds);
+        const badged = applyBadgesToCurrentDocument(local.games, support);
+        return {
+            check: {
+                visible: localIds.length,
+                checked: Object.keys(support).length,
+                supported: Object.values(support).filter(Boolean).length,
+                badged,
+            },
+            probe: localProbe,
+        };
+    }
+    onProgress("A közvetlen Steam Könyvtár-keresés 0 játékot talált (" + local.candidates + " jelölt elem). A Decky Steam-lap kapcsolatának ellenőrzése folyamatban...");
     const probe = await runInSteamTab(STEAM_LIBRARY_PROBE_CODE);
     const ids = Array.isArray(probe.ids) ? [...new Set(probe.ids.filter((id) => /^\d+$/.test(id)))] : [];
     if (ids.length === 0) {
         return { check: { visible: 0, checked: 0, supported: 0, badged: 0 }, probe };
     }
-    const response = await withBackendTimeout(getControllerSupport(ids));
-    if (!response.success)
-        throw new Error("A Decky backend nem adott sikeres ellenőrzési választ.");
-    const support = response.support || {};
+    onProgress("A Decky Steam-lap kapcsolata " + ids.length + " játékot talált. Steam Áruház-adatok lekérése...");
+    const support = await fetchControllerSupport(ids);
     const badgeResult = await runInSteamTab(steamBadgeCode(support));
     return {
         check: {
@@ -202,7 +315,7 @@ function Content() {
             const diagnostics = await withBackendTimeout(getBackendDiagnostics());
             setStats(diagnostics);
             setRunStatus("Steam Könyvtár vizsgálata folyamatban...");
-            const result = await checkSteamLibrary();
+            const result = await checkSteamLibrary(setRunStatus);
             setLibraryCheck(result.check);
             await refreshStats();
             if (result.check.visible === 0) {
