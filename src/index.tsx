@@ -4,12 +4,22 @@ import { useEffect, useState } from "react";
 
 const BADGE_CLASS = "controller-xbox-badge";
 const HOME_BADGE_ID = "controller-xbox-home-badge";
+const BACKEND_TIMEOUT_MS = 8_000;
 type SupportResponse = { success: boolean; support?: Record<string, boolean> };
 type CacheStats = { entries: number; fresh_entries: number; ttl_days: number };
 
 const getControllerSupport = callable<[appIds: string[]], SupportResponse>("get_controller_support");
 const clearCache = callable<[], { success: boolean; removed: number }>("clear_cache");
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
+
+function withBackendTimeout<T>(request: Promise<T>): Promise<T> {
+  return Promise.race([
+    request,
+    new Promise<never>((_, reject) => {
+      window.setTimeout(() => reject(new Error("A Decky backend 8 masodpercen belul nem valaszolt.")), BACKEND_TIMEOUT_MS);
+    }),
+  ]);
+}
 
 function appIdFrom(element: Element): string | undefined {
   const attributes = ["data-appid", "data-gameid"];
@@ -117,7 +127,7 @@ function Content() {
   const [statusError, setStatusError] = useState<string>();
   const refreshStats = async () => {
     try {
-      setStats(await getCacheStats());
+      setStats(await withBackendTimeout(getCacheStats()));
       setStatusError(undefined);
     } catch (error) {
       setStatusError(error instanceof Error ? error.message : String(error));
@@ -128,8 +138,7 @@ function Content() {
   }, []);
   return <PanelSection title="Xbox Controller Check">
     <PanelSectionRow><div>Blue ✓ Xbox badges mark games whose Steam Store listing has official Full Controller Support.</div></PanelSectionRow>
-    <PanelSectionRow><div>{stats ? `${stats.fresh_entries}/${stats.entries} cached games active — cache expires after ${stats.ttl_days} days.` : "Loading cache status…"}</div></PanelSectionRow>
-    <PanelSectionRow><div>{stats ? `${stats.entries} game loaded into memory; ${stats.fresh_entries} entry is current (${stats.ttl_days}-day cache).` : "Loading cache status..."}</div></PanelSectionRow>
+    <PanelSectionRow><div>{stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "Cache status betoltese..."}</div></PanelSectionRow>
     {statusError && <PanelSectionRow><div>Cache status error: {statusError}</div></PanelSectionRow>}
     <PanelSectionRow><ButtonItem layout="below" onClick={async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }}>Clear and refresh cache</ButtonItem></PanelSectionRow>
   </PanelSection>;

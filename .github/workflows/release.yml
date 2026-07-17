@@ -42,7 +42,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           mkdir -p package/ControllerXbox/dist release
           cp -R dist/. package/ControllerXbox/dist/
-          cp main.py package.json plugin.json README.md LICENSE package/ControllerXbox/
+          cp .gitignore main.py package.json plugin.json README.md LICENSE package/ControllerXbox/
           cd package
           zip "../release/ControllerXbox-v${VERSION}.zip" \
             ControllerXbox/.gitignore \

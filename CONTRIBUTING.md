@@ -9,3 +9,7 @@ Minden Git commit üzenetét kizárólag magyar nyelven kell megírni. Ezek a Gi
 Minden új GitHub Release a projekt teljes, stabil biztonsági mentése és egyben visszaállítási pont. A kiadás a szerveren lévő kód állapotát rögzíti, ezért hiba esetén ebből kell rollbackelni.
 
 Éles szerveren közvetlen, GitHub Release nélküli módosítás nem megengedett. Minden éles változtatást előbb a repóban kell commitolni, majd GitHub Release-en keresztül kiadni.
+
+## Decky ZIP csomagolasi szabaly
+
+A kiadhato Decky ZIP-ekben a `ControllerXbox/` gyokermappa es a fajlok sorrendje kotott: `.gitignore`, `LICENSE`, `README.md`, `main.py`, `package.json`, `plugin.json`, `pnpm-lock.yaml`, `dist/index.js`, `dist/index.js.map`. Kiadás előtt a ZIP fajlsorrendjet, tomoriteset es metaadatait a mukodo `ControllerXbox-v1.0.0.zip`-hez kell hasonlitani. Rekurziv vagy fajlrendszer szerinti ZIP-keszites tilos.

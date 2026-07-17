@@ -20,9 +20,18 @@ const toaster = api.toaster;
 
 const BADGE_CLASS = "controller-xbox-badge";
 const HOME_BADGE_ID = "controller-xbox-home-badge";
+const BACKEND_TIMEOUT_MS = 8_000;
 const getControllerSupport = callable("get_controller_support");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
+function withBackendTimeout(request) {
+    return Promise.race([
+        request,
+        new Promise((_, reject) => {
+            window.setTimeout(() => reject(new Error("A Decky backend 8 masodpercen belul nem valaszolt.")), BACKEND_TIMEOUT_MS);
+        }),
+    ]);
+}
 function appIdFrom(element) {
     const attributes = ["data-appid", "data-gameid"];
     for (const attribute of attributes) {
@@ -135,7 +144,7 @@ function Content() {
     const [statusError, setStatusError] = SP_REACT.useState();
     const refreshStats = async () => {
         try {
-            setStats(await getCacheStats());
+            setStats(await withBackendTimeout(getCacheStats()));
             setStatusError(undefined);
         }
         catch (error) {
@@ -145,7 +154,7 @@ function Content() {
     SP_REACT.useEffect(() => {
         void refreshStats();
     }, []);
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.fresh_entries}/${stats.entries} cached games active — cache expires after ${stats.ttl_days} days.` : "Loading cache status…" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} game loaded into memory; ${stats.fresh_entries} entry is current (${stats.ttl_days}-day cache).` : "Loading cache status..." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }, children: "Clear and refresh cache" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Blue \u2713 Xbox badges mark games whose Steam Store listing has official Full Controller Support." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? `${stats.entries} jatek van memoriaban; ${stats.fresh_entries} bejegyzes friss (${stats.ttl_days} napos cache).` : "Cache status betoltese..." }) }), statusError && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { children: ["Cache status error: ", statusError] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }, children: "Clear and refresh cache" }) })] });
 }
 var index = DFL.definePlugin(() => {
     const stopLibraryBadges = startLibraryBadges();

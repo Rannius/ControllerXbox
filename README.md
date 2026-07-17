@@ -17,3 +17,7 @@ Install Node.js and pnpm, then run `pnpm install` and `pnpm build`. Copy the res
 Pushing a version tag such as `v1.0.2` starts the release workflow. It builds a fresh Decky-installable ZIP, creates a GitHub Release, and attaches that ZIP as the immutable backup for that version.
 
 Developer-mode ZIP installations do not receive automatic in-Decky updates. For the Decky **Update** button and managed automatic updates, the plugin must be accepted into the official Decky Plugin Store (the Decky plugin database). After it has been approved there, each published store version is offered by Decky as an update.
+
+## Decky ZIP packaging contract
+
+Every installable ZIP must contain exactly one `ControllerXbox/` root directory. Its entries must be written in this fixed order: `.gitignore`, `LICENSE`, `README.md`, `main.py`, `package.json`, `plugin.json`, `pnpm-lock.yaml`, `dist/index.js`, and `dist/index.js.map`. The ZIP layout, entry order, compression method, and metadata must be checked against the working `ControllerXbox-v1.0.0.zip` before publishing. A recursive or filesystem-order ZIP command is prohibited because it caused Decky to install the archive without listing the plugin.
