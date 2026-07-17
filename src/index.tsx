@@ -2,25 +2,36 @@ import { ButtonItem, definePlugin, PanelSection, PanelSectionRow, staticClasses 
 import { callable, toaster } from "@decky/api";
 import { useEffect, useState } from "react";
 
-const PLUGIN_NAME = "ControllerXbox";
 const BADGE_CLASS = "controller-xbox-badge";
 const HOME_BADGE_ID = "controller-xbox-home-badge";
+const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
+const REFRESH_EVENT = "controller-xbox-refresh";
 
 type SupportResponse = { success: boolean; support?: Record<string, boolean> };
-type CacheStats = { entries: number; fresh_entries: number; ttl_days: number };
+type CacheStats = {
+  entries: number;
+  memory_entries: number;
+  session_loaded_entries: number;
+  full_controller_supported_entries: number;
+  fresh_entries: number;
+  ttl_days: number;
+};
+
 const getControllerSupport = callable<[appIds: string[]], SupportResponse>("get_controller_support");
 const clearCache = callable<[], { success: boolean; removed: number }>("clear_cache");
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
 
 function appIdFrom(element: Element): string | undefined {
-  const attributes = ["data-appid", "data-gameid"];
-  for (const attribute of attributes) {
-    const value = element.getAttribute(attribute);
-    const match = value?.match(/\d+/);
-    if (match) return match[0];
+  const attributes = ["data-appid", "data-gameid", "data-detailed-appid", "data-app-id"];
+  const related = [element, element.closest("a")].filter((item): item is Element => item !== null);
+  for (const item of related) {
+    for (const attribute of attributes) {
+      const match = item.getAttribute(attribute)?.match(/\d+/);
+      if (match) return match[0];
+    }
   }
   const href = element.getAttribute("href") || element.closest("a")?.getAttribute("href") || "";
-  return href.match(/\/app\/(\d+)/)?.[1];
+  return href.match(/(?:\/app\/|steam:\/\/rungameid\/)(\d+)/)?.[1];
 }
 
 function isVisible(element: Element): boolean {
@@ -29,7 +40,9 @@ function isVisible(element: Element): boolean {
 }
 
 function findVisibleGameElements(): Map<string, Element[]> {
-  const candidates = document.querySelectorAll("[data-appid], [data-gameid], a[href*='/app/']");
+  const candidates = document.querySelectorAll(
+    "[data-appid], [data-gameid], [data-detailed-appid], [data-app-id], a[href*='/app/'], a[href*='steam://rungameid/']",
+  );
   const games = new Map<string, Element[]>();
   candidates.forEach((candidate) => {
     if (!isVisible(candidate)) return;
@@ -49,7 +62,7 @@ function addBadge(target: Element): void {
   if (getComputedStyle(htmlTarget).position === "static") htmlTarget.style.position = "relative";
   const badge = document.createElement("span");
   badge.className = BADGE_CLASS;
-  badge.textContent = "✓ Xbox";
+  badge.textContent = "\u2713 Xbox";
   badge.title = "Steam: Full Controller Support";
   htmlTarget.appendChild(badge);
 }
@@ -62,7 +75,7 @@ function syncHomeLabel(hasGames: boolean): void {
   if (!root) return;
   const label = document.createElement("div");
   label.id = HOME_BADGE_ID;
-  label.textContent = "✓ Xbox — Full Controller Support";
+  label.textContent = "\u2713 Xbox — Full Controller Support";
   root.prepend(label);
 }
 
@@ -92,27 +105,67 @@ function startLibraryBadges(): () => void {
       Object.entries(response.support || {}).forEach(([appId, supported]) => {
         if (supported) games.get(appId)?.forEach(addBadge);
       });
-    } catch (error) { console.debug("ControllerXbox lookup failed", error); }
+      window.dispatchEvent(new Event(CACHE_CHANGED_EVENT));
+    } catch (error) {
+      console.debug("ControllerXbox lookup failed", error);
+    }
   };
   const schedule = () => { window.clearTimeout(timer); timer = window.setTimeout(refresh, 250); };
+  const refreshNow = () => { document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove()); schedule(); };
   const observer = new MutationObserver(schedule);
   observer.observe(document.body, { childList: true, subtree: true });
   window.addEventListener("scroll", schedule, true);
   window.addEventListener("hashchange", schedule);
+  window.addEventListener(REFRESH_EVENT, refreshNow);
   schedule();
-  return () => { disposed = true; observer.disconnect(); window.removeEventListener("scroll", schedule, true); window.removeEventListener("hashchange", schedule); window.clearTimeout(timer); document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove()); removeStyles(); };
+  return () => {
+    disposed = true;
+    observer.disconnect();
+    window.removeEventListener("scroll", schedule, true);
+    window.removeEventListener("hashchange", schedule);
+    window.removeEventListener(REFRESH_EVENT, refreshNow);
+    window.clearTimeout(timer);
+    document.querySelectorAll(`.${BADGE_CLASS}, #${HOME_BADGE_ID}`).forEach((node) => node.remove());
+    removeStyles();
+  };
 }
 
 function Content() {
   const [stats, setStats] = useState<CacheStats>();
+  const [notice, setNotice] = useState<string>();
+  const [clearing, setClearing] = useState(false);
   const refreshStats = async () => {
-    setStats(await getCacheStats());
+    try { setStats(await getCacheStats()); } catch (error) { console.debug("ControllerXbox stats failed", error); }
   };
-  useEffect(() => { void refreshStats(); }, []);
+  useEffect(() => {
+    void refreshStats();
+    window.addEventListener(CACHE_CHANGED_EVENT, refreshStats);
+    return () => window.removeEventListener(CACHE_CHANGED_EVENT, refreshStats);
+  }, []);
+  const clearAndRefresh = async () => {
+    setClearing(true);
+    setNotice("Cache törlése folyamatban…");
+    try {
+      const response = await clearCache();
+      const message = `${response.removed} cache-bejegyzés törölve. A látható játékok adatai most újratöltődnek.`;
+      setNotice(message);
+      try { toaster.toast({ title: "Xbox Controller Check", body: message }); } catch (error) { console.debug("ControllerXbox toast failed", error); }
+      window.dispatchEvent(new Event(CACHE_CHANGED_EVENT));
+      window.dispatchEvent(new Event(REFRESH_EVENT));
+      await refreshStats();
+    } catch (error) {
+      setNotice("A cache törlése nem sikerült. Nézd meg a Decky naplóját.");
+      console.error("ControllerXbox cache clear failed", error);
+    } finally {
+      setClearing(false);
+    }
+  };
   return <PanelSection title="Xbox Controller Check">
     <PanelSectionRow><div>Blue ✓ Xbox badges mark games whose Steam Store listing has official Full Controller Support.</div></PanelSectionRow>
-    <PanelSectionRow><div>{stats ? `${stats.fresh_entries}/${stats.entries} cached games active — cache expires after ${stats.ttl_days} days.` : "Loading cache status…"}</div></PanelSectionRow>
-    <PanelSectionRow><ButtonItem layout="below" onClick={async () => { const response = await clearCache(); toaster.toast({ title: "Xbox Controller Check", body: `${response.removed} cached entries cleared.` }); await refreshStats(); }}>Clear and refresh cache</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div>{stats ? `${stats.memory_entries} játék van memóriában; ebből ${stats.full_controller_supported_entries} kapott Full Controller Support jelölést. Ebben az indításban ${stats.session_loaded_entries} játék töltődött be.` : "Cache állapot betöltése…"}</div></PanelSectionRow>
+    <PanelSectionRow><div>{stats ? `${stats.fresh_entries}/${stats.entries} bejegyzés friss (${stats.ttl_days} napos érvényesség).` : ""}</div></PanelSectionRow>
+    {notice && <PanelSectionRow><div>{notice}</div></PanelSectionRow>}
+    <PanelSectionRow><ButtonItem layout="below" disabled={clearing} onClick={clearAndRefresh}>{clearing ? "Cache törlése…" : "Cache törlése és frissítése"}</ButtonItem></PanelSectionRow>
   </PanelSection>;
 }
 
