@@ -1,9 +1,10 @@
-import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
+import { afterPatch, appDetailsClasses, basicAppDetailsSectionStylerClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, Focusable, joinClassNames, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
 import { callable, RoutePatch, routerHook, toaster } from "@decky/api";
 import { ReactElement, useEffect, useState } from "react";
 
 const BACKEND_TIMEOUT_MS = 8_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
+const DETAIL_STATUS_EVENT = "controller-xbox-detail-status";
 
 type SupportResponse = { success: boolean; support?: Record<string, boolean> };
 type CacheStats = { entries: number; fresh_entries: number; ttl_days: number };
@@ -38,6 +39,10 @@ function notifyCacheChanged(): void {
   window.dispatchEvent(new Event(CACHE_CHANGED_EVENT));
 }
 
+function notifyDetailStatus(message: string): void {
+  window.dispatchEvent(new CustomEvent<string>(DETAIL_STATUS_EVENT, { detail: message }));
+}
+
 function XboxBadge({ appId }: { appId: number }) {
   const [supported, setSupported] = useState<boolean>();
 
@@ -47,9 +52,12 @@ function XboxBadge({ appId }: { appId: number }) {
       try {
         const response = await withBackendTimeout(getControllerSupport([String(appId)]));
         if (disposed) return;
-        setSupported(Boolean(response.success && response.support?.[String(appId)]));
+        const hasSupport = Boolean(response.success && response.support?.[String(appId)]);
+        setSupported(hasSupport);
+        notifyDetailStatus("Játékadatlap patch aktív. AppID: " + String(appId) + ". Steam teljes kontroller-támogatás: " + (hasSupport ? "igen." : "nem."));
         notifyCacheChanged();
       } catch (error) {
+        if (!disposed) notifyDetailStatus("Játékadatlap ellenőrzési hiba (AppID " + String(appId) + "): " + errorMessage(error));
         console.debug("ControllerXbox app-detail lookup failed", error);
       }
     };
@@ -62,10 +70,10 @@ function XboxBadge({ appId }: { appId: number }) {
   }, [appId]);
 
   if (!supported) return null;
-  return <div className="controller-xbox-badge-container">
+  return <Focusable className={joinClassNames(basicAppDetailsSectionStylerClasses.AppButtons, "controller-xbox-badge-container")}>
     <style>{".controller-xbox-badge-container{position:absolute;top:2.8vw;right:16px;z-index:50;pointer-events:none}.controller-xbox-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:5px;background:#107cde;color:#fff;box-shadow:0 1px 4px #0009;font:700 13px/16px Arial,sans-serif}"}</style>
     <span className="controller-xbox-badge" title="Steam: Full Controller Support">✓ Xbox</span>
-  </div>;
+  </Focusable>;
 }
 
 function XboxBadgeAnchor({ appId }: { appId: number }) {
@@ -128,8 +136,16 @@ function Content() {
   useEffect(() => {
     void refreshStats();
     const onCacheChanged = () => void refreshStats();
+    const onDetailStatus = (event: Event) => {
+      const detail = (event as CustomEvent<string>).detail;
+      if (detail) setStatus(detail);
+    };
     window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
-    return () => window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
+    window.addEventListener(DETAIL_STATUS_EVENT, onDetailStatus);
+    return () => {
+      window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
+      window.removeEventListener(DETAIL_STATUS_EVENT, onDetailStatus);
+    };
   }, []);
 
   const clearAndRefresh = async () => {

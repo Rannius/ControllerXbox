@@ -21,6 +21,7 @@ const toaster = api.toaster;
 
 const BACKEND_TIMEOUT_MS = 8_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
+const DETAIL_STATUS_EVENT = "controller-xbox-detail-status";
 const getControllerSupport = callable("get_controller_support");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
@@ -49,6 +50,9 @@ function errorMessage(error) {
 function notifyCacheChanged() {
     window.dispatchEvent(new Event(CACHE_CHANGED_EVENT));
 }
+function notifyDetailStatus(message) {
+    window.dispatchEvent(new CustomEvent(DETAIL_STATUS_EVENT, { detail: message }));
+}
 function XboxBadge({ appId }) {
     const [supported, setSupported] = SP_REACT.useState();
     SP_REACT.useEffect(() => {
@@ -58,10 +62,14 @@ function XboxBadge({ appId }) {
                 const response = await withBackendTimeout(getControllerSupport([String(appId)]));
                 if (disposed)
                     return;
-                setSupported(Boolean(response.success && response.support?.[String(appId)]));
+                const hasSupport = Boolean(response.success && response.support?.[String(appId)]);
+                setSupported(hasSupport);
+                notifyDetailStatus("Játékadatlap patch aktív. AppID: " + String(appId) + ". Steam teljes kontroller-támogatás: " + (hasSupport ? "igen." : "nem."));
                 notifyCacheChanged();
             }
             catch (error) {
+                if (!disposed)
+                    notifyDetailStatus("Játékadatlap ellenőrzési hiba (AppID " + String(appId) + "): " + errorMessage(error));
                 console.debug("ControllerXbox app-detail lookup failed", error);
             }
         };
@@ -74,7 +82,7 @@ function XboxBadge({ appId }) {
     }, [appId]);
     if (!supported)
         return null;
-    return SP_JSX.jsxs("div", { className: "controller-xbox-badge-container", children: [SP_JSX.jsx("style", { children: ".controller-xbox-badge-container{position:absolute;top:2.8vw;right:16px;z-index:50;pointer-events:none}.controller-xbox-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:5px;background:#107cde;color:#fff;box-shadow:0 1px 4px #0009;font:700 13px/16px Arial,sans-serif}" }), SP_JSX.jsx("span", { className: "controller-xbox-badge", title: "Steam: Full Controller Support", children: "\u2713 Xbox" })] });
+    return SP_JSX.jsxs(DFL.Focusable, { className: DFL.joinClassNames(DFL.basicAppDetailsSectionStylerClasses.AppButtons, "controller-xbox-badge-container"), children: [SP_JSX.jsx("style", { children: ".controller-xbox-badge-container{position:absolute;top:2.8vw;right:16px;z-index:50;pointer-events:none}.controller-xbox-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:5px;background:#107cde;color:#fff;box-shadow:0 1px 4px #0009;font:700 13px/16px Arial,sans-serif}" }), SP_JSX.jsx("span", { className: "controller-xbox-badge", title: "Steam: Full Controller Support", children: "\u2713 Xbox" })] });
 }
 function XboxBadgeAnchor({ appId }) {
     return SP_JSX.jsx("div", { id: "controller-xbox-badge-anchor", style: { position: "static", height: 0 }, children: SP_JSX.jsx(XboxBadge, { appId: appId }) });
@@ -131,8 +139,17 @@ function Content() {
     SP_REACT.useEffect(() => {
         void refreshStats();
         const onCacheChanged = () => void refreshStats();
+        const onDetailStatus = (event) => {
+            const detail = event.detail;
+            if (detail)
+                setStatus(detail);
+        };
         window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
-        return () => window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
+        window.addEventListener(DETAIL_STATUS_EVENT, onDetailStatus);
+        return () => {
+            window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
+            window.removeEventListener(DETAIL_STATUS_EVENT, onDetailStatus);
+        };
     }, []);
     const clearAndRefresh = async () => {
         setWorking(true);
