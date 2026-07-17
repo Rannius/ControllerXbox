@@ -19,6 +19,7 @@ import decky
 
 
 CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+CACHE_SCHEMA_VERSION = 2
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
 
 
@@ -81,7 +82,11 @@ class Plugin:
 
     @staticmethod
     def _is_fresh(entry: Dict[str, Any], now: float) -> bool:
-        return isinstance(entry.get("checked_at"), (int, float)) and now - entry["checked_at"] < CACHE_TTL_SECONDS
+        return (
+            entry.get("schema_version") == CACHE_SCHEMA_VERSION
+            and isinstance(entry.get("checked_at"), (int, float))
+            and now - entry["checked_at"] < CACHE_TTL_SECONDS
+        )
 
     def _fetch_support(self, app_id: str) -> Optional[bool]:
         request = urllib.request.Request(
@@ -94,9 +99,13 @@ class Plugin:
             app = result.get(app_id, {})
             if not app.get("success"):
                 return None
-            categories = app.get("data", {}).get("categories", [])
-            # Steam category 28 is the Store's official "Full controller support".
-            return any(category.get("id") == 28 for category in categories if isinstance(category, dict))
+            app_data = app.get("data", {})
+            categories = app_data.get("categories", [])
+            # Steam category 28 and controller_support=full both represent the
+            # Store's official Full Controller Support flag.  Keep both checks:
+            # Steam has returned either representation for different app pages.
+            category_support = any(str(category.get("id")) == "28" for category in categories if isinstance(category, dict))
+            return category_support or app_data.get("controller_support") == "full"
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
             decky.logger.debug("Steam lookup failed for %s: %s", app_id, error)
             return None
@@ -121,7 +130,11 @@ class Plugin:
         async with self._lock:
             for app_id, support in zip(missing, fetched):
                 if support is not None:
-                    self._cache[app_id] = {"full_controller_support": support, "checked_at": now}
+                    self._cache[app_id] = {
+                        "schema_version": CACHE_SCHEMA_VERSION,
+                        "full_controller_support": support,
+                        "checked_at": now,
+                    }
                     results[app_id] = support
                     changed = True
         if changed:
