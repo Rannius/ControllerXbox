@@ -225,14 +225,30 @@ function findTileMemo(webpackRequire) {
         }
         if (!source.includes("LibraryItemIcons") || !source.includes("BIsModOrShortcut") || !source.includes("BIsMusicAlbum"))
             continue;
-        let exports;
+        let moduleValue;
         try {
-            exports = webpackRequire(id);
+            moduleValue = webpackRequire(id);
         }
         catch {
             continue;
         }
-        for (const value of Object.values(exports)) {
+        if ((typeof moduleValue !== "object" || moduleValue === null) && typeof moduleValue !== "function")
+            continue;
+        let exportKeys;
+        try {
+            exportKeys = Object.keys(moduleValue);
+        }
+        catch {
+            continue;
+        }
+        for (const key of exportKeys) {
+            let value;
+            try {
+                value = moduleValue[key];
+            }
+            catch {
+                continue;
+            }
             const memo = value;
             if (memo?.$$typeof === reactMemo && typeof memo.type === "function")
                 return memo;
@@ -242,17 +258,41 @@ function findTileMemo(webpackRequire) {
 }
 function resolveTileIconRowClass(webpackRequire) {
     for (const id of Object.keys(webpackRequire.m)) {
-        let exports;
+        let source = "";
         try {
-            exports = webpackRequire(id);
+            source = String(webpackRequire.m[id]);
         }
         catch {
             continue;
         }
-        for (const candidate of [exports, exports.default]) {
+        if (!source.includes("LibraryItemIcons"))
+            continue;
+        let moduleValue;
+        try {
+            moduleValue = webpackRequire(id);
+        }
+        catch {
+            continue;
+        }
+        if ((typeof moduleValue !== "object" || moduleValue === null) && typeof moduleValue !== "function")
+            continue;
+        let defaultExport;
+        try {
+            defaultExport = moduleValue.default;
+        }
+        catch {
+            defaultExport = undefined;
+        }
+        for (const candidate of [moduleValue, defaultExport]) {
             if (!candidate || typeof candidate !== "object")
                 continue;
-            const libraryItemIcons = candidate.LibraryItemIcons;
+            let libraryItemIcons;
+            try {
+                libraryItemIcons = candidate.LibraryItemIcons;
+            }
+            catch {
+                continue;
+            }
             if (typeof libraryItemIcons === "string")
                 return libraryItemIcons;
         }
@@ -260,42 +300,49 @@ function resolveTileIconRowClass(webpackRequire) {
     return "";
 }
 function patchLibraryTiles() {
-    const webpackRequire = getWebpackRequire();
-    const memo = webpackRequire ? findTileMemo(webpackRequire) : null;
-    tileIconRowClass = webpackRequire ? resolveTileIconRowClass(webpackRequire) : "";
-    if (!memo || !tileIconRowClass) {
-        notifyTileStatus("A Steam könyvtári csempekomponens nem található; a jelölés nem aktív.");
-        console.warn("ControllerXbox library tile component was not found");
+    try {
+        const webpackRequire = getWebpackRequire();
+        const memo = webpackRequire ? findTileMemo(webpackRequire) : null;
+        tileIconRowClass = webpackRequire ? resolveTileIconRowClass(webpackRequire) : "";
+        if (!memo || !tileIconRowClass) {
+            notifyTileStatus("A Steam könyvtári csempekomponens nem található; a jelölés nem aktív.");
+            console.warn("ControllerXbox library tile component was not found");
+            return () => { };
+        }
+        tileMemo = memo;
+        const current = memo.type;
+        originalTileType = memo.__controllerXboxOriginalType ?? (current.__controllerXboxWrapper ? null : current);
+        if (!originalTileType) {
+            notifyTileStatus("A könyvtári csempe patch korábbi példánya nem állítható helyre.");
+            return () => { };
+        }
+        memo.__controllerXboxOriginalType = originalTileType;
+        const wrapper = wrappedTileType;
+        wrapper.__controllerXboxWrapper = true;
+        wrapper.__controllerXboxMemo = memo;
+        memo.type = wrapper;
+        notifyTileStatus("A könyvtári csempejelölés aktív. Nyisd meg vagy frissítsd a Könyvtárat.");
+        return () => {
+            if (tileMemo?.type === wrapper && originalTileType)
+                tileMemo.type = originalTileType;
+            if (tileMemo?.type !== wrapper)
+                delete tileMemo?.__controllerXboxOriginalType;
+            tileMemo = null;
+            originalTileType = null;
+            tileIconRowClass = "";
+            supportListeners.clear();
+            visibleAppIds.clear();
+            pendingAppIds.clear();
+            if (batchTimer !== undefined)
+                window.clearTimeout(batchTimer);
+            batchTimer = undefined;
+        };
+    }
+    catch (error) {
+        notifyTileStatus("A könyvtári csempejelölés biztonságosan leállt: " + errorMessage(error));
+        console.error("ControllerXbox library tile patch failed", error);
         return () => { };
     }
-    tileMemo = memo;
-    const current = memo.type;
-    originalTileType = memo.__controllerXboxOriginalType ?? (current.__controllerXboxWrapper ? null : current);
-    if (!originalTileType) {
-        notifyTileStatus("A könyvtári csempe patch korábbi példánya nem állítható helyre.");
-        return () => { };
-    }
-    memo.__controllerXboxOriginalType = originalTileType;
-    const wrapper = wrappedTileType;
-    wrapper.__controllerXboxWrapper = true;
-    wrapper.__controllerXboxMemo = memo;
-    memo.type = wrapper;
-    notifyTileStatus("A könyvtári csempejelölés aktív. Nyisd meg vagy frissítsd a Könyvtárat.");
-    return () => {
-        if (tileMemo?.type === wrapper && originalTileType)
-            tileMemo.type = originalTileType;
-        if (tileMemo?.type !== wrapper)
-            delete tileMemo?.__controllerXboxOriginalType;
-        tileMemo = null;
-        originalTileType = null;
-        tileIconRowClass = "";
-        supportListeners.clear();
-        visibleAppIds.clear();
-        pendingAppIds.clear();
-        if (batchTimer !== undefined)
-            window.clearTimeout(batchTimer);
-        batchTimer = undefined;
-    };
 }
 function Content() {
     const [stats, setStats] = SP_REACT.useState();
