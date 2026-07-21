@@ -152,12 +152,12 @@ function XboxTileBadge({ appId }: { appId: number }) {
     supported: {
       symbol: "✓",
       background: "#107cde",
-      title: "Steam: teljes kontroller-támogatás",
+      title: "Steam: részleges vagy teljes kontroller-támogatás",
     },
     unsupported: {
       symbol: "×",
       background: "#a52a2a",
-      title: "Steam: nincs teljes kontroller-támogatás",
+      title: "Steam: nincs kontroller-támogatás",
     },
     unavailable: {
       symbol: "?",
@@ -396,7 +396,7 @@ function Content() {
   };
 
   return <PanelSection title="Xbox Controller Check">
-    <PanelSectionRow><div>A könyvtári bélyegképek jelölése: kék ✓ = teljes támogatás; piros × = nincs teljes támogatás; narancssárga ? = nincs Steam-adat; szürke … = ellenőrzés alatt.</div></PanelSectionRow>
+    <PanelSectionRow><div>A könyvtári bélyegképek jelölése: kék ✓ = részleges vagy teljes kontroller-támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat; szürke … = ellenőrzés alatt.</div></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..."}</div></PanelSectionRow>
     <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hibanapló: {diagnosticLog}</div></PanelSectionRow>

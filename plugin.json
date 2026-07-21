@@ -5,7 +5,7 @@
   "flags": [],
   "publish": {
     "tags": ["controller", "library", "accessibility"],
-    "description": "Shows an Xbox controller badge on Steam library games with Full Controller Support.",
+    "description": "Shows an Xbox controller badge on Steam library games with partial or full controller support.",
     "image": ""
   }
 }

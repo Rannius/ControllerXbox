@@ -25,7 +25,7 @@ except ImportError:
 
 
 CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
-CACHE_SCHEMA_VERSION = 3
+CACHE_SCHEMA_VERSION = 4
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
 
 
@@ -118,18 +118,18 @@ class Plugin:
                 return None
             app_data = app.get("data", {})
             categories = app_data.get("categories", [])
-            # Steam category 28 and controller_support=full both represent the
-            # Store's official Full Controller Support flag.  Keep both checks:
-            # Steam has returned either representation for different app pages.
-            category_support = any(str(category.get("id")) == "28" for category in categories if isinstance(category, dict))
+            # Category 18 is Partial Controller Support and category 28 is
+            # Full Controller Support. Both mean that the game can be played
+            # with a controller, which is the compatibility this plugin marks.
+            category_support = any(str(category.get("id")) in {"18", "28"} for category in categories if isinstance(category, dict))
             controller_support = str(app_data.get("controller_support", "")).lower()
-            return category_support or controller_support == "full"
+            return category_support or controller_support in {"partial", "full"}
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
             decky.logger.debug("Steam lookup failed for %s: %s", app_id, error)
             return None
 
     async def get_controller_support(self, app_ids: Any) -> Dict[str, Any]:
-        """Return official Full Controller Support data for the supplied visible app IDs."""
+        """Return official partial or full controller support for the supplied app IDs."""
         requested = self._valid_app_ids(app_ids)
         now = time.time()
         results: Dict[str, bool] = {}
@@ -140,7 +140,7 @@ class Plugin:
             for app_id in requested:
                 entry = self._cache.get(app_id)
                 if isinstance(entry, dict) and self._is_fresh(entry, now):
-                    results[app_id] = bool(entry.get("full_controller_support"))
+                    results[app_id] = bool(entry.get("controller_compatible"))
                 else:
                     missing.append(app_id)
 
@@ -151,7 +151,7 @@ class Plugin:
                 if support is not None:
                     self._cache[app_id] = {
                         "schema_version": CACHE_SCHEMA_VERSION,
-                        "full_controller_support": support,
+                        "controller_compatible": support,
                         "checked_at": now,
                     }
                     results[app_id] = support

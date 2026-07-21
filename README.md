@@ -1,6 +1,6 @@
 # Xbox Controller Check
 
-A Decky Loader plugin for Steam Deck. It adds a blue **✓ Xbox** badge to visible Steam Library game tiles and the Library Home screen when Steam Store officially lists the game as **Full Controller Support**.
+A Decky Loader plugin for Steam Deck. It marks visible Steam Library game tiles when the Steam Store officially lists the game with **Partial Controller Support** or **Full Controller Support**.
 
 ## Privacy and cache
 
