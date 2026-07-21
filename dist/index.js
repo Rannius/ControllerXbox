@@ -65,11 +65,12 @@ function publishSupportState() {
     for (const listener of supportListeners)
         listener();
     const visible = Array.from(visibleAppIds.keys());
-    const checked = visible.filter((id) => supportStates.get(id) === "supported" || supportStates.get(id) === "unsupported").length;
-    const supported = visible.filter((id) => supportStates.get(id) === "supported").length;
+    const checked = visible.filter((id) => ["full", "partial", "unsupported"].includes(supportStates.get(id) ?? "")).length;
+    const full = visible.filter((id) => supportStates.get(id) === "full").length;
+    const partial = visible.filter((id) => supportStates.get(id) === "partial").length;
     const unavailable = visible.filter((id) => supportStates.get(id) === "unavailable").length;
     notifyTileStatus("Látható játékok ellenőrzése: " + String(checked) + "/" + String(visible.length) +
-        ". Xbox-kompatibilis: " + String(supported) +
+        ". Teljes támogatás: " + String(full) + ". Részleges támogatás: " + String(partial) +
         (unavailable ? ". Nem sikerült lekérdezni: " + String(unavailable) + "." : "."));
 }
 async function flushSupportBatch() {
@@ -81,9 +82,16 @@ async function flushSupportBatch() {
     try {
         const response = await withBackendTimeout(getControllerSupport(appIds));
         for (const appId of appIds) {
+            const level = response.levels?.[appId];
             const value = response.support?.[appId];
-            if (value === true)
-                supportStates.set(appId, "supported");
+            if (level === "full")
+                supportStates.set(appId, "full");
+            else if (level === "partial")
+                supportStates.set(appId, "partial");
+            else if (level === "none")
+                supportStates.set(appId, "unsupported");
+            else if (value === true)
+                supportStates.set(appId, "full");
             else if (value === false)
                 supportStates.set(appId, "unsupported");
             else
@@ -115,6 +123,12 @@ function resetVisibleSupport() {
         queueSupportLookup(appId);
     publishSupportState();
 }
+function ControllerIcon({ level, appId }) {
+    const halfClipId = "controller-xbox-half-" + String(appId);
+    const controllerPath = "M5.4 5.5h13.2c1.5 0 2.8 1 3.2 2.5l1.1 5c.4 1.8-.9 3.5-2.7 3.5-.8 0-1.5-.3-2-.9L15.6 13H8.4l-2.6 2.6c-.5.6-1.2.9-2 .9-1.8 0-3.1-1.7-2.7-3.5l1.1-5c.4-1.5 1.7-2.5 3.2-2.5Z";
+    const partial = level === "partial";
+    return SP_JSX.jsxs("svg", { width: "24", height: "20", viewBox: "0 0 24 22", "aria-hidden": "true", children: [partial && SP_JSX.jsx("defs", { children: SP_JSX.jsx("clipPath", { id: halfClipId, children: SP_JSX.jsx("rect", { x: "0", y: "0", width: "12", height: "22" }) }) }), SP_JSX.jsx("path", { d: controllerPath, fill: partial ? "none" : "currentColor", stroke: "currentColor", strokeWidth: "1.4" }), partial && SP_JSX.jsx("path", { d: controllerPath, fill: "currentColor", clipPath: "url(#" + halfClipId + ")" }), SP_JSX.jsx("path", { d: "M5.4 9.7h3.2M7 8.1v3.2", fill: "none", stroke: "#107cde", strokeWidth: "1.25", strokeLinecap: "round" }), SP_JSX.jsx("circle", { cx: "17.1", cy: "8.7", r: ".9", fill: partial ? "currentColor" : "#107cde" }), SP_JSX.jsx("circle", { cx: "19.2", cy: "10.7", r: ".9", fill: partial ? "currentColor" : "#107cde" })] });
+}
 function XboxTileBadge({ appId }) {
     const appIdText = String(appId);
     const [state, setState] = SP_REACT.useState(() => supportStates.get(appIdText) ?? "loading");
@@ -135,10 +149,15 @@ function XboxTileBadge({ appId }) {
         };
     }, [appIdText]);
     const appearance = {
-        supported: {
-            symbol: "✓",
+        full: {
+            symbol: "",
             background: "#107cde",
-            title: "Steam: részleges vagy teljes kontroller-támogatás",
+            title: "Steam: teljes kontroller-támogatás",
+        },
+        partial: {
+            symbol: "",
+            background: "#107cde",
+            title: "Steam: részleges kontroller-támogatás",
         },
         unsupported: {
             symbol: "×",
@@ -157,6 +176,7 @@ function XboxTileBadge({ appId }) {
         },
     };
     const badge = appearance[state];
+    const controllerLevel = state === "full" || state === "partial" ? state : null;
     return SP_JSX.jsx("span", { title: badge.title, style: {
             position: "absolute",
             top: "6px",
@@ -165,7 +185,7 @@ function XboxTileBadge({ appId }) {
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
-            minWidth: "24px",
+            minWidth: controllerLevel ? "32px" : "24px",
             height: "24px",
             padding: "0 5px",
             borderRadius: "12px",
@@ -174,7 +194,7 @@ function XboxTileBadge({ appId }) {
             boxShadow: "0 1px 5px rgba(0,0,0,.85)",
             font: "bold 17px/24px Arial, sans-serif",
             pointerEvents: "none",
-        }, children: badge.symbol });
+        }, children: controllerLevel ? SP_JSX.jsx(ControllerIcon, { level: controllerLevel, appId: appId }) : badge.symbol });
 }
 function appendBadgeToTile(result, appId) {
     const row = DFL.findInReactTree(result, (node) => {
@@ -430,7 +450,7 @@ function Content() {
             setWorking(false);
         }
     };
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00F6nyvt\u00E1ri b\u00E9lyegk\u00E9pek jel\u00F6l\u00E9se: k\u00E9k \u2713 = r\u00E9szleges vagy teljes kontroller-t\u00E1mogat\u00E1s; piros \u00D7 = nincs t\u00E1mogat\u00E1s; narancss\u00E1rga ? = nincs Steam-adat; sz\u00FCrke \u2026 = ellen\u0151rz\u00E9s alatt." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00F6nyvt\u00E1ri b\u00E9lyegk\u00E9pek jel\u00F6l\u00E9se: teli kontroller = teljes t\u00E1mogat\u00E1s; f\u00E9lig kit\u00F6lt\u00F6tt kontroller = r\u00E9szleges t\u00E1mogat\u00E1s; piros \u00D7 = nincs t\u00E1mogat\u00E1s; narancss\u00E1rga ? = nincs Steam-adat." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
 }
 var index = DFL.definePlugin(() => {
     const removeTilePatch = patchLibraryTiles();

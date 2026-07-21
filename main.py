@@ -25,7 +25,7 @@ except ImportError:
 
 
 CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
-CACHE_SCHEMA_VERSION = 4
+CACHE_SCHEMA_VERSION = 5
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
 
 
@@ -94,7 +94,7 @@ class Plugin:
             and now - entry["checked_at"] < CACHE_TTL_SECONDS
         )
 
-    def _fetch_support(self, app_id: str) -> Optional[bool]:
+    def _fetch_support(self, app_id: str) -> Optional[str]:
         request = urllib.request.Request(
             STORE_URL.format(app_id=app_id),
             headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"},
@@ -118,12 +118,13 @@ class Plugin:
                 return None
             app_data = app.get("data", {})
             categories = app_data.get("categories", [])
-            # Category 18 is Partial Controller Support and category 28 is
-            # Full Controller Support. Both mean that the game can be played
-            # with a controller, which is the compatibility this plugin marks.
-            category_support = any(str(category.get("id")) in {"18", "28"} for category in categories if isinstance(category, dict))
+            category_ids = {str(category.get("id")) for category in categories if isinstance(category, dict)}
             controller_support = str(app_data.get("controller_support", "")).lower()
-            return category_support or controller_support in {"partial", "full"}
+            if "28" in category_ids or controller_support == "full":
+                return "full"
+            if "18" in category_ids or controller_support == "partial":
+                return "partial"
+            return "none"
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
             decky.logger.debug("Steam lookup failed for %s: %s", app_id, error)
             return None
@@ -133,6 +134,7 @@ class Plugin:
         requested = self._valid_app_ids(app_ids)
         now = time.time()
         results: Dict[str, bool] = {}
+        levels: Dict[str, str] = {}
         missing: List[str] = []
         unavailable: List[str] = []
 
@@ -140,21 +142,27 @@ class Plugin:
             for app_id in requested:
                 entry = self._cache.get(app_id)
                 if isinstance(entry, dict) and self._is_fresh(entry, now):
-                    results[app_id] = bool(entry.get("controller_compatible"))
+                    level = entry.get("controller_support_level")
+                    if level in {"full", "partial", "none"}:
+                        levels[app_id] = level
+                        results[app_id] = level != "none"
+                    else:
+                        missing.append(app_id)
                 else:
                     missing.append(app_id)
 
         fetched = await asyncio.gather(*(self._run_blocking(self._fetch_support, app_id) for app_id in missing))
         changed = False
         async with self._lock:
-            for app_id, support in zip(missing, fetched):
-                if support is not None:
+            for app_id, level in zip(missing, fetched):
+                if level is not None:
                     self._cache[app_id] = {
                         "schema_version": CACHE_SCHEMA_VERSION,
-                        "controller_compatible": support,
+                        "controller_support_level": level,
                         "checked_at": now,
                     }
-                    results[app_id] = support
+                    levels[app_id] = level
+                    results[app_id] = level != "none"
                     changed = True
                 else:
                     unavailable.append(app_id)
@@ -163,6 +171,7 @@ class Plugin:
         return {
             "success": True,
             "support": results,
+            "levels": levels,
             "unavailable": unavailable,
             "cached_for_days": 30,
         }

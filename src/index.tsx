@@ -10,11 +10,12 @@ const BADGE_KEY = "controller-xbox-tile-badge";
 type SupportResponse = {
   success: boolean;
   support?: Record<string, boolean>;
+  levels?: Record<string, "full" | "partial" | "none">;
   unavailable?: string[];
 };
 type CacheStats = { entries: number; fresh_entries: number; ttl_days: number };
 type BackendDiagnostics = CacheStats & { success: boolean; backend: string; settings_directory: string };
-type BadgeState = "loading" | "supported" | "unsupported" | "unavailable";
+type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 
 type TileOverview = {
   appid: number;
@@ -81,12 +82,13 @@ function notifyTileStatus(message: string): void {
 function publishSupportState(): void {
   for (const listener of supportListeners) listener();
   const visible = Array.from(visibleAppIds.keys());
-  const checked = visible.filter((id) => supportStates.get(id) === "supported" || supportStates.get(id) === "unsupported").length;
-  const supported = visible.filter((id) => supportStates.get(id) === "supported").length;
+  const checked = visible.filter((id) => ["full", "partial", "unsupported"].includes(supportStates.get(id) ?? "")).length;
+  const full = visible.filter((id) => supportStates.get(id) === "full").length;
+  const partial = visible.filter((id) => supportStates.get(id) === "partial").length;
   const unavailable = visible.filter((id) => supportStates.get(id) === "unavailable").length;
   notifyTileStatus(
     "Látható játékok ellenőrzése: " + String(checked) + "/" + String(visible.length) +
-    ". Xbox-kompatibilis: " + String(supported) +
+    ". Teljes támogatás: " + String(full) + ". Részleges támogatás: " + String(partial) +
     (unavailable ? ". Nem sikerült lekérdezni: " + String(unavailable) + "." : "."),
   );
 }
@@ -100,8 +102,12 @@ async function flushSupportBatch(): Promise<void> {
   try {
     const response = await withBackendTimeout(getControllerSupport(appIds));
     for (const appId of appIds) {
+      const level = response.levels?.[appId];
       const value = response.support?.[appId];
-      if (value === true) supportStates.set(appId, "supported");
+      if (level === "full") supportStates.set(appId, "full");
+      else if (level === "partial") supportStates.set(appId, "partial");
+      else if (level === "none") supportStates.set(appId, "unsupported");
+      else if (value === true) supportStates.set(appId, "full");
       else if (value === false) supportStates.set(appId, "unsupported");
       else supportStates.set(appId, "unavailable");
     }
@@ -129,6 +135,20 @@ function resetVisibleSupport(): void {
   publishSupportState();
 }
 
+function ControllerIcon({ level, appId }: { level: "full" | "partial"; appId: number }) {
+  const halfClipId = "controller-xbox-half-" + String(appId);
+  const controllerPath = "M5.4 5.5h13.2c1.5 0 2.8 1 3.2 2.5l1.1 5c.4 1.8-.9 3.5-2.7 3.5-.8 0-1.5-.3-2-.9L15.6 13H8.4l-2.6 2.6c-.5.6-1.2.9-2 .9-1.8 0-3.1-1.7-2.7-3.5l1.1-5c.4-1.5 1.7-2.5 3.2-2.5Z";
+  const partial = level === "partial";
+  return <svg width="24" height="20" viewBox="0 0 24 22" aria-hidden="true">
+    {partial && <defs><clipPath id={halfClipId}><rect x="0" y="0" width="12" height="22" /></clipPath></defs>}
+    <path d={controllerPath} fill={partial ? "none" : "currentColor"} stroke="currentColor" strokeWidth="1.4" />
+    {partial && <path d={controllerPath} fill="currentColor" clipPath={"url(#" + halfClipId + ")"} />}
+    <path d="M5.4 9.7h3.2M7 8.1v3.2" fill="none" stroke="#107cde" strokeWidth="1.25" strokeLinecap="round" />
+    <circle cx="17.1" cy="8.7" r=".9" fill={partial ? "currentColor" : "#107cde"} />
+    <circle cx="19.2" cy="10.7" r=".9" fill={partial ? "currentColor" : "#107cde"} />
+  </svg>;
+}
+
 function XboxTileBadge({ appId }: { appId: number }) {
   const appIdText = String(appId);
   const [state, setState] = useState<BadgeState>(() => supportStates.get(appIdText) ?? "loading");
@@ -149,10 +169,15 @@ function XboxTileBadge({ appId }: { appId: number }) {
   }, [appIdText]);
 
   const appearance: Record<BadgeState, { symbol: string; background: string; title: string }> = {
-    supported: {
-      symbol: "✓",
+    full: {
+      symbol: "",
       background: "#107cde",
-      title: "Steam: részleges vagy teljes kontroller-támogatás",
+      title: "Steam: teljes kontroller-támogatás",
+    },
+    partial: {
+      symbol: "",
+      background: "#107cde",
+      title: "Steam: részleges kontroller-támogatás",
     },
     unsupported: {
       symbol: "×",
@@ -171,6 +196,7 @@ function XboxTileBadge({ appId }: { appId: number }) {
     },
   };
   const badge = appearance[state];
+  const controllerLevel = state === "full" || state === "partial" ? state : null;
   return <span
     title={badge.title}
     style={{
@@ -181,7 +207,7 @@ function XboxTileBadge({ appId }: { appId: number }) {
       display: "inline-flex",
       alignItems: "center",
       justifyContent: "center",
-      minWidth: "24px",
+      minWidth: controllerLevel ? "32px" : "24px",
       height: "24px",
       padding: "0 5px",
       borderRadius: "12px",
@@ -191,7 +217,7 @@ function XboxTileBadge({ appId }: { appId: number }) {
       font: "bold 17px/24px Arial, sans-serif",
       pointerEvents: "none",
     }}
-  >{badge.symbol}</span>;
+  >{controllerLevel ? <ControllerIcon level={controllerLevel} appId={appId} /> : badge.symbol}</span>;
 }
 
 function appendBadgeToTile(result: ReactElement, appId: number): ReactElement {
@@ -396,7 +422,7 @@ function Content() {
   };
 
   return <PanelSection title="Xbox Controller Check">
-    <PanelSectionRow><div>A könyvtári bélyegképek jelölése: kék ✓ = részleges vagy teljes kontroller-támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat; szürke … = ellenőrzés alatt.</div></PanelSectionRow>
+    <PanelSectionRow><div>A könyvtári bélyegképek jelölése: teli kontroller = teljes támogatás; félig kitöltött kontroller = részleges támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat.</div></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..."}</div></PanelSectionRow>
     <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hibanapló: {diagnosticLog}</div></PanelSectionRow>
