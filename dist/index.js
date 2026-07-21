@@ -16,21 +16,29 @@ if (api._version != API_VERSION) {
     console.warn(`[@decky/api] Requested API version ${API_VERSION} but the running loader only supports version ${api._version}. Some features may not work.`);
 }
 const callable = api.callable;
-const routerHook = api.routerHook;
 const toaster = api.toaster;
 
-const BACKEND_TIMEOUT_MS = 8_000;
+const BACKEND_TIMEOUT_MS = 15_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
-const DETAIL_STATUS_EVENT = "controller-xbox-detail-status";
+const TILE_STATUS_EVENT = "controller-xbox-tile-status";
+const BADGE_KEY = "controller-xbox-tile-badge";
 const getControllerSupport = callable("get_controller_support");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
 const getBackendDiagnostics = callable("get_backend_diagnostics");
+const supportStates = new Map();
+const visibleAppIds = new Map();
+const supportListeners = new Set();
+const pendingAppIds = new Set();
+let batchTimer;
+let tileMemo = null;
+let originalTileType = null;
+let tileIconRowClass = "";
 function withBackendTimeout(request) {
     return Promise.race([
         request,
         new Promise((_, reject) => {
-            window.setTimeout(() => reject(new Error("A Decky backend 8 másodpercen belül nem válaszolt.")), BACKEND_TIMEOUT_MS);
+            window.setTimeout(() => reject(new Error("A Decky backend 15 másodpercen belül nem válaszolt.")), BACKEND_TIMEOUT_MS);
         }),
     ]);
 }
@@ -50,82 +58,248 @@ function errorMessage(error) {
 function notifyCacheChanged() {
     window.dispatchEvent(new Event(CACHE_CHANGED_EVENT));
 }
-function notifyDetailStatus(message) {
-    window.dispatchEvent(new CustomEvent(DETAIL_STATUS_EVENT, { detail: message }));
+function notifyTileStatus(message) {
+    window.dispatchEvent(new CustomEvent(TILE_STATUS_EVENT, { detail: message }));
 }
-function XboxBadge({ appId }) {
-    const [supported, setSupported] = SP_REACT.useState();
+function publishSupportState() {
+    for (const listener of supportListeners)
+        listener();
+    const visible = Array.from(visibleAppIds.keys());
+    const checked = visible.filter((id) => supportStates.get(id) === "supported" || supportStates.get(id) === "unsupported").length;
+    const supported = visible.filter((id) => supportStates.get(id) === "supported").length;
+    const unavailable = visible.filter((id) => supportStates.get(id) === "unavailable").length;
+    notifyTileStatus("Látható játékok ellenőrzése: " + String(checked) + "/" + String(visible.length) +
+        ". Xbox-kompatibilis: " + String(supported) +
+        (unavailable ? ". Nem sikerült lekérdezni: " + String(unavailable) + "." : "."));
+}
+async function flushSupportBatch() {
+    batchTimer = undefined;
+    const appIds = Array.from(pendingAppIds);
+    pendingAppIds.clear();
+    if (!appIds.length)
+        return;
+    try {
+        const response = await withBackendTimeout(getControllerSupport(appIds));
+        for (const appId of appIds) {
+            const value = response.support?.[appId];
+            if (value === true)
+                supportStates.set(appId, "supported");
+            else if (value === false)
+                supportStates.set(appId, "unsupported");
+            else
+                supportStates.set(appId, "unavailable");
+        }
+    }
+    catch (error) {
+        for (const appId of appIds)
+            supportStates.set(appId, "unavailable");
+        notifyTileStatus("A kompatibilitási adatok lekérése sikertelen: " + errorMessage(error));
+        console.warn("ControllerXbox tile lookup failed", error);
+    }
+    publishSupportState();
+    notifyCacheChanged();
+}
+function queueSupportLookup(appId) {
+    const current = supportStates.get(appId);
+    if (current && current !== "unavailable")
+        return;
+    supportStates.set(appId, "loading");
+    pendingAppIds.add(appId);
+    if (batchTimer === undefined)
+        batchTimer = window.setTimeout(() => void flushSupportBatch(), 120);
+}
+function resetVisibleSupport() {
+    supportStates.clear();
+    pendingAppIds.clear();
+    for (const appId of visibleAppIds.keys())
+        queueSupportLookup(appId);
+    publishSupportState();
+}
+function XboxTileBadge({ appId }) {
+    const appIdText = String(appId);
+    const [state, setState] = SP_REACT.useState(() => supportStates.get(appIdText) ?? "loading");
     SP_REACT.useEffect(() => {
-        let disposed = false;
-        const refresh = async () => {
-            try {
-                const response = await withBackendTimeout(getControllerSupport([String(appId)]));
-                if (disposed)
-                    return;
-                const hasSupport = Boolean(response.success && response.support?.[String(appId)]);
-                setSupported(hasSupport);
-                notifyDetailStatus("Játékadatlap patch aktív. AppID: " + String(appId) + ". Steam teljes kontroller-támogatás: " + (hasSupport ? "igen." : "nem."));
-                notifyCacheChanged();
-            }
-            catch (error) {
-                if (!disposed)
-                    notifyDetailStatus("Játékadatlap ellenőrzési hiba (AppID " + String(appId) + "): " + errorMessage(error));
-                console.debug("ControllerXbox app-detail lookup failed", error);
-            }
-        };
-        void refresh();
-        window.addEventListener(CACHE_CHANGED_EVENT, refresh);
+        visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
+        const listener = () => setState(supportStates.get(appIdText) ?? "loading");
+        supportListeners.add(listener);
+        queueSupportLookup(appIdText);
+        publishSupportState();
         return () => {
-            disposed = true;
-            window.removeEventListener(CACHE_CHANGED_EVENT, refresh);
+            supportListeners.delete(listener);
+            const remaining = (visibleAppIds.get(appIdText) ?? 1) - 1;
+            if (remaining > 0)
+                visibleAppIds.set(appIdText, remaining);
+            else
+                visibleAppIds.delete(appIdText);
+            publishSupportState();
         };
-    }, [appId]);
-    if (!supported)
+    }, [appIdText]);
+    if (state !== "supported")
         return null;
-    return SP_JSX.jsxs(DFL.Focusable, { className: DFL.joinClassNames(DFL.basicAppDetailsSectionStylerClasses.AppButtons, "controller-xbox-badge-container"), children: [SP_JSX.jsx("style", { children: ".controller-xbox-badge-container{position:absolute;top:2.8vw;right:16px;z-index:50;pointer-events:none}.controller-xbox-badge{display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:5px;background:#107cde;color:#fff;box-shadow:0 1px 4px #0009;font:700 13px/16px Arial,sans-serif}" }), SP_JSX.jsx("span", { className: "controller-xbox-badge", title: "Steam: Full Controller Support", children: "\u2713 Xbox" })] });
+    return SP_JSX.jsx("span", { title: "Steam: teljes kontroller-t\u00E1mogat\u00E1s", style: {
+            position: "absolute",
+            top: "6px",
+            left: "6px",
+            zIndex: 100,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            minWidth: "24px",
+            height: "24px",
+            padding: "0 5px",
+            borderRadius: "12px",
+            background: "#107cde",
+            color: "white",
+            boxShadow: "0 1px 5px rgba(0,0,0,.85)",
+            font: "bold 17px/24px Arial, sans-serif",
+            pointerEvents: "none",
+        }, children: "\u2713" });
 }
-function XboxBadgeAnchor({ appId }) {
-    return SP_JSX.jsx("div", { id: "controller-xbox-badge-anchor", style: { position: "static", height: 0 }, children: SP_JSX.jsx(XboxBadge, { appId: appId }) });
-}
-function patchLibraryAppRoute() {
-    const route = "/library/app/:appid";
-    const routePatch = routerHook.addPatch(route, (tree) => {
-        const routeProps = DFL.findInReactTree(tree, (node) => node?.renderFunc);
-        if (!routeProps)
-            return tree;
-        let appId;
-        const patchHandler = DFL.createReactTreePatcher([
-            (renderTree) => {
-                const children = DFL.findInReactTree(renderTree, (node) => node?.props?.children?.props?.overview)?.props?.children;
-                const overview = children?.props?.overview;
-                if (typeof overview?.appid !== "number")
-                    return null;
-                appId = overview.appid;
-                return children;
-            },
-        ], (_, result) => {
-            if (!result)
-                return result;
-            const parent = DFL.findInReactTree(result, (node) => Array.isArray(node?.props?.children) && typeof node?.props?.className === "string" && node.props.className.includes(DFL.appDetailsClasses.InnerContainer));
-            if (!parent?.props?.children)
-                return result;
-            if (typeof appId !== "number")
-                return result;
-            if (parent.props.children.some((child) => child?.props?.id === "controller-xbox-badge-anchor"))
-                return result;
-            const appPanelIndex = parent.props.children.findIndex((child) => child?.props?.overview && child?.props?.onShowLaunchingDetails);
-            const insertAt = appPanelIndex < 0 ? parent.props.children.length : Math.max(0, appPanelIndex - 1);
-            parent.props.children.splice(insertAt, 0, SP_JSX.jsx(XboxBadgeAnchor, { appId: appId }, "controller-xbox-badge-anchor"));
-            return result;
-        });
-        DFL.afterPatch(routeProps, "renderFunc", patchHandler);
-        return tree;
+function appendBadgeToTile(result, appId) {
+    const row = DFL.findInReactTree(result, (node) => {
+        const className = node?.props?.className;
+        return typeof className === "string" && className.includes(tileIconRowClass);
     });
-    return () => routerHook.removePatch(route, routePatch);
+    const props = row?.props;
+    if (!props)
+        return result;
+    const existing = Array.isArray(props.children) ? props.children : [props.children];
+    if (existing.some((child) => child?.key === BADGE_KEY))
+        return result;
+    const badge = SP_REACT.createElement(XboxTileBadge, { key: BADGE_KEY, appId });
+    if (Array.isArray(props.children))
+        props.children.push(badge);
+    else if (props.children !== undefined && props.children !== null)
+        props.children = [props.children, badge];
+    else
+        props.children = [badge];
+    return result;
+}
+function resolveOriginalTileType(self) {
+    const candidates = [
+        wrappedTileType.__controllerXboxMemo?.__controllerXboxOriginalType,
+        self?.__controllerXboxOriginalType,
+        originalTileType,
+        tileMemo?.__controllerXboxOriginalType,
+    ];
+    return candidates.find((candidate) => typeof candidate === "function" && candidate !== wrappedTileType) ?? null;
+}
+function wrappedTileType(...args) {
+    const original = resolveOriginalTileType(this);
+    if (!original)
+        return SP_REACT.createElement("div");
+    const result = original.apply(this, args);
+    try {
+        const app = args[0]?.app;
+        if (!app || !Number.isInteger(app.appid) || app.appid <= 0 || app.BIsModOrShortcut?.())
+            return result;
+        return appendBadgeToTile(result, app.appid);
+    }
+    catch (error) {
+        console.debug("ControllerXbox tile injection skipped", error);
+        return result;
+    }
+}
+function getWebpackRequire() {
+    const chunk = window.webpackChunksteamui;
+    if (!Array.isArray(chunk))
+        return null;
+    let webpackRequire;
+    try {
+        chunk.push([["controller_xbox_" + String(Date.now())], {}, (value) => { webpackRequire = value; }]);
+    }
+    catch {
+        return null;
+    }
+    return webpackRequire?.m ? webpackRequire : null;
+}
+function findTileMemo(webpackRequire) {
+    const reactMemo = Symbol.for("react.memo");
+    for (const id of Object.keys(webpackRequire.m)) {
+        let source = "";
+        try {
+            source = String(webpackRequire.m[id]);
+        }
+        catch {
+            continue;
+        }
+        if (!source.includes("LibraryItemIcons") || !source.includes("BIsModOrShortcut") || !source.includes("BIsMusicAlbum"))
+            continue;
+        let exports;
+        try {
+            exports = webpackRequire(id);
+        }
+        catch {
+            continue;
+        }
+        for (const value of Object.values(exports)) {
+            const memo = value;
+            if (memo?.$$typeof === reactMemo && typeof memo.type === "function")
+                return memo;
+        }
+    }
+    return null;
+}
+function resolveTileIconRowClass(webpackRequire) {
+    for (const id of Object.keys(webpackRequire.m)) {
+        let exports;
+        try {
+            exports = webpackRequire(id);
+        }
+        catch {
+            continue;
+        }
+        for (const candidate of [exports, exports.default]) {
+            if (!candidate || typeof candidate !== "object")
+                continue;
+            const libraryItemIcons = candidate.LibraryItemIcons;
+            if (typeof libraryItemIcons === "string")
+                return libraryItemIcons;
+        }
+    }
+    return "";
+}
+function patchLibraryTiles() {
+    const webpackRequire = getWebpackRequire();
+    const memo = webpackRequire ? findTileMemo(webpackRequire) : null;
+    tileIconRowClass = webpackRequire ? resolveTileIconRowClass(webpackRequire) : "";
+    if (!memo || !tileIconRowClass) {
+        notifyTileStatus("A Steam könyvtári csempekomponens nem található; a jelölés nem aktív.");
+        console.warn("ControllerXbox library tile component was not found");
+        return () => { };
+    }
+    tileMemo = memo;
+    const current = memo.type;
+    originalTileType = memo.__controllerXboxOriginalType ?? (current.__controllerXboxWrapper ? null : current);
+    if (!originalTileType) {
+        notifyTileStatus("A könyvtári csempe patch korábbi példánya nem állítható helyre.");
+        return () => { };
+    }
+    memo.__controllerXboxOriginalType = originalTileType;
+    const wrapper = wrappedTileType;
+    wrapper.__controllerXboxWrapper = true;
+    wrapper.__controllerXboxMemo = memo;
+    memo.type = wrapper;
+    notifyTileStatus("A könyvtári csempejelölés aktív. Nyisd meg vagy frissítsd a Könyvtárat.");
+    return () => {
+        if (tileMemo?.type === wrapper && originalTileType)
+            tileMemo.type = originalTileType;
+        if (tileMemo?.type !== wrapper)
+            delete tileMemo?.__controllerXboxOriginalType;
+        tileMemo = null;
+        originalTileType = null;
+        tileIconRowClass = "";
+        supportListeners.clear();
+        visibleAppIds.clear();
+        pendingAppIds.clear();
+        if (batchTimer !== undefined)
+            window.clearTimeout(batchTimer);
+        batchTimer = undefined;
+    };
 }
 function Content() {
     const [stats, setStats] = SP_REACT.useState();
-    const [status, setStatus] = SP_REACT.useState("Nyiss meg egy játék adatlapját a Könyvtárban; a jelvény ott automatikusan megjelenik.");
+    const [status, setStatus] = SP_REACT.useState("A könyvtári csempejelölés indul. Nyisd meg vagy frissítsd a Könyvtárat.");
     const [diagnosticLog, setDiagnosticLog] = SP_REACT.useState("Nincs rögzített hiba.");
     const [working, setWorking] = SP_REACT.useState(false);
     const refreshStats = async () => {
@@ -139,16 +313,16 @@ function Content() {
     SP_REACT.useEffect(() => {
         void refreshStats();
         const onCacheChanged = () => void refreshStats();
-        const onDetailStatus = (event) => {
+        const onTileStatus = (event) => {
             const detail = event.detail;
             if (detail)
                 setStatus(detail);
         };
         window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
-        window.addEventListener(DETAIL_STATUS_EVENT, onDetailStatus);
+        window.addEventListener(TILE_STATUS_EVENT, onTileStatus);
         return () => {
             window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
-            window.removeEventListener(DETAIL_STATUS_EVENT, onDetailStatus);
+            window.removeEventListener(TILE_STATUS_EVENT, onTileStatus);
         };
     }, []);
     const clearAndRefresh = async () => {
@@ -157,9 +331,9 @@ function Content() {
         try {
             const response = await withBackendTimeout(clearCache());
             toaster.toast({ title: "Xbox Controller Check", body: String(response.removed) + " gyorsítótár-bejegyzés törölve." });
+            resetVisibleSupport();
             notifyCacheChanged();
             await refreshStats();
-            setStatus("Kész. Nyisd meg újra a játék adatlapját a friss ellenőrzéshez.");
             setDiagnosticLog("Nincs rögzített hiba.");
         }
         catch (error) {
@@ -176,7 +350,7 @@ function Content() {
         try {
             const diagnostics = await withBackendTimeout(getBackendDiagnostics());
             setStats(diagnostics);
-            setStatus("Backend rendben. Nyiss meg egy játék adatlapját; a kék ✓ Xbox jelvény a jobb felső részen jelenik meg.");
+            resetVisibleSupport();
             setDiagnosticLog("Nincs rögzített hiba.");
         }
         catch (error) {
@@ -188,16 +362,16 @@ function Content() {
             setWorking(false);
         }
     };
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A MoonDeckhez hasonl\u00F3, Steam-adatlapba illesztett k\u00E9k \u2713 Xbox jelv\u00E9ny." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "Backend ellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s friss\u00EDt\u00E9s" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00E9k \u2713 k\u00F6zvetlen\u00FCl a kompatibilis j\u00E1t\u00E9kok k\u00F6nyvt\u00E1ri b\u00E9lyegk\u00E9p\u00E9nek bal fels\u0151 sark\u00E1ban jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
 }
 var index = DFL.definePlugin(() => {
-    const removeLibraryPatch = patchLibraryAppRoute();
+    const removeTilePatch = patchLibraryTiles();
     return {
         name: "Xbox Controller Check",
         titleView: SP_JSX.jsx("div", { className: DFL.staticClasses.Title, children: "Xbox Controller Check" }),
         content: SP_JSX.jsx(Content, {}),
         icon: SP_JSX.jsx("span", { children: "\u2713" }),
-        onDismount: removeLibraryPatch,
+        onDismount: removeTilePatch,
     };
 });
 

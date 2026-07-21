@@ -8,6 +8,7 @@ import asyncio
 import functools
 import json
 import os
+import ssl
 import tempfile
 import time
 import urllib.error
@@ -17,9 +18,14 @@ from typing import Any, Dict, List, Optional
 
 import decky
 
+try:
+    import certifi
+except ImportError:
+    certifi = None
+
 
 CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
-CACHE_SCHEMA_VERSION = 2
+CACHE_SCHEMA_VERSION = 3
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
 
 
@@ -94,7 +100,18 @@ class Plugin:
             headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"},
         )
         try:
-            with urllib.request.urlopen(request, timeout=10) as response:
+            ssl_context = ssl.create_default_context(cafile=certifi.where()) if certifi else ssl.create_default_context()
+            try:
+                response_stream = urllib.request.urlopen(request, timeout=10, context=ssl_context)
+            except urllib.error.URLError as error:
+                # Some Decky Python environments do not expose SteamOS's CA
+                # bundle. Only retry certificate-verification failures; this
+                # endpoint contains public compatibility metadata and no user
+                # credentials or private data.
+                if not isinstance(error.reason, ssl.SSLCertVerificationError):
+                    raise
+                response_stream = urllib.request.urlopen(request, timeout=10, context=ssl._create_unverified_context())
+            with response_stream as response:
                 result = json.load(response)
             app = result.get(app_id, {})
             if not app.get("success"):
@@ -105,7 +122,8 @@ class Plugin:
             # Store's official Full Controller Support flag.  Keep both checks:
             # Steam has returned either representation for different app pages.
             category_support = any(str(category.get("id")) == "28" for category in categories if isinstance(category, dict))
-            return category_support or app_data.get("controller_support") == "full"
+            controller_support = str(app_data.get("controller_support", "")).lower()
+            return category_support or controller_support == "full"
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
             decky.logger.debug("Steam lookup failed for %s: %s", app_id, error)
             return None
@@ -116,6 +134,7 @@ class Plugin:
         now = time.time()
         results: Dict[str, bool] = {}
         missing: List[str] = []
+        unavailable: List[str] = []
 
         async with self._lock:
             for app_id in requested:
@@ -137,9 +156,16 @@ class Plugin:
                     }
                     results[app_id] = support
                     changed = True
+                else:
+                    unavailable.append(app_id)
         if changed:
             await self._save_cache()
-        return {"success": True, "support": results, "cached_for_days": 30}
+        return {
+            "success": True,
+            "support": results,
+            "unavailable": unavailable,
+            "cached_for_days": 30,
+        }
 
     def _delete_cache_file(self) -> None:
         try:
