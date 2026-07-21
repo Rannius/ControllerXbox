@@ -148,9 +148,31 @@ function XboxTileBadge({ appId }: { appId: number }) {
     };
   }, [appIdText]);
 
-  if (state !== "supported") return null;
+  const appearance: Record<BadgeState, { symbol: string; background: string; title: string }> = {
+    supported: {
+      symbol: "✓",
+      background: "#107cde",
+      title: "Steam: teljes kontroller-támogatás",
+    },
+    unsupported: {
+      symbol: "×",
+      background: "#a52a2a",
+      title: "Steam: nincs teljes kontroller-támogatás",
+    },
+    unavailable: {
+      symbol: "?",
+      background: "#d97706",
+      title: "A Steam kompatibilitási adata nem érhető el",
+    },
+    loading: {
+      symbol: "…",
+      background: "#5f6b78",
+      title: "A kompatibilitás ellenőrzése folyamatban van",
+    },
+  };
+  const badge = appearance[state];
   return <span
-    title="Steam: teljes kontroller-támogatás"
+    title={badge.title}
     style={{
       position: "absolute",
       top: "6px",
@@ -163,13 +185,13 @@ function XboxTileBadge({ appId }: { appId: number }) {
       height: "24px",
       padding: "0 5px",
       borderRadius: "12px",
-      background: "#107cde",
+      background: badge.background,
       color: "white",
       boxShadow: "0 1px 5px rgba(0,0,0,.85)",
       font: "bold 17px/24px Arial, sans-serif",
       pointerEvents: "none",
     }}
-  >✓</span>;
+  >{badge.symbol}</span>;
 }
 
 function appendBadgeToTile(result: ReactElement, appId: number): ReactElement {
@@ -374,7 +396,7 @@ function Content() {
   };
 
   return <PanelSection title="Xbox Controller Check">
-    <PanelSectionRow><div>A kék ✓ közvetlenül a kompatibilis játékok könyvtári bélyegképének bal felső sarkában jelenik meg.</div></PanelSectionRow>
+    <PanelSectionRow><div>A könyvtári bélyegképek jelölése: kék ✓ = teljes támogatás; piros × = nincs teljes támogatás; narancssárga ? = nincs Steam-adat; szürke … = ellenőrzés alatt.</div></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..."}</div></PanelSectionRow>
     <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hibanapló: {diagnosticLog}</div></PanelSectionRow>

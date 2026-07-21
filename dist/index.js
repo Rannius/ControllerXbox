@@ -134,9 +134,30 @@ function XboxTileBadge({ appId }) {
             publishSupportState();
         };
     }, [appIdText]);
-    if (state !== "supported")
-        return null;
-    return SP_JSX.jsx("span", { title: "Steam: teljes kontroller-t\u00E1mogat\u00E1s", style: {
+    const appearance = {
+        supported: {
+            symbol: "✓",
+            background: "#107cde",
+            title: "Steam: teljes kontroller-támogatás",
+        },
+        unsupported: {
+            symbol: "×",
+            background: "#a52a2a",
+            title: "Steam: nincs teljes kontroller-támogatás",
+        },
+        unavailable: {
+            symbol: "?",
+            background: "#d97706",
+            title: "A Steam kompatibilitási adata nem érhető el",
+        },
+        loading: {
+            symbol: "…",
+            background: "#5f6b78",
+            title: "A kompatibilitás ellenőrzése folyamatban van",
+        },
+    };
+    const badge = appearance[state];
+    return SP_JSX.jsx("span", { title: badge.title, style: {
             position: "absolute",
             top: "6px",
             left: "6px",
@@ -148,12 +169,12 @@ function XboxTileBadge({ appId }) {
             height: "24px",
             padding: "0 5px",
             borderRadius: "12px",
-            background: "#107cde",
+            background: badge.background,
             color: "white",
             boxShadow: "0 1px 5px rgba(0,0,0,.85)",
             font: "bold 17px/24px Arial, sans-serif",
             pointerEvents: "none",
-        }, children: "\u2713" });
+        }, children: badge.symbol });
 }
 function appendBadgeToTile(result, appId) {
     const row = DFL.findInReactTree(result, (node) => {
@@ -409,7 +430,7 @@ function Content() {
             setWorking(false);
         }
     };
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00E9k \u2713 k\u00F6zvetlen\u00FCl a kompatibilis j\u00E1t\u00E9kok k\u00F6nyvt\u00E1ri b\u00E9lyegk\u00E9p\u00E9nek bal fels\u0151 sark\u00E1ban jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00F6nyvt\u00E1ri b\u00E9lyegk\u00E9pek jel\u00F6l\u00E9se: k\u00E9k \u2713 = teljes t\u00E1mogat\u00E1s; piros \u00D7 = nincs teljes t\u00E1mogat\u00E1s; narancss\u00E1rga ? = nincs Steam-adat; sz\u00FCrke \u2026 = ellen\u0151rz\u00E9s alatt." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
 }
 var index = DFL.definePlugin(() => {
     const removeTilePatch = patchLibraryTiles();
