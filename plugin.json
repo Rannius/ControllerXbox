@@ -5,7 +5,7 @@
   "flags": [],
   "publish": {
     "tags": ["controller", "library", "accessibility"],
-    "description": "Shows an Xbox controller badge on Steam library games with partial or full controller support.",
+    "description": "Shows controller support and GeForce NOW availability badges on Steam library games.",
     "image": ""
   }
 }

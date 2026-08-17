@@ -19,14 +19,17 @@ const callable = api.callable;
 const toaster = api.toaster;
 
 const BACKEND_TIMEOUT_MS = 15_000;
+const GFN_BACKEND_TIMEOUT_MS = 60_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
 const TILE_STATUS_EVENT = "controller-xbox-tile-status";
 const BADGE_KEY = "controller-xbox-tile-badge";
 const getControllerSupport = callable("get_controller_support");
+const getGfnAvailability = callable("get_gfn_availability");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
 const getBackendDiagnostics = callable("get_backend_diagnostics");
 const supportStates = new Map();
+const gfnStates = new Map();
 const visibleAppIds = new Map();
 const supportListeners = new Set();
 const pendingAppIds = new Set();
@@ -34,11 +37,11 @@ let batchTimer;
 let tileMemo = null;
 let originalTileType = null;
 let tileIconRowClass = "";
-function withBackendTimeout(request) {
+function withBackendTimeout(request, timeoutMs = BACKEND_TIMEOUT_MS) {
     return Promise.race([
         request,
         new Promise((_, reject) => {
-            window.setTimeout(() => reject(new Error("A Decky backend 15 másodpercen belül nem válaszolt.")), BACKEND_TIMEOUT_MS);
+            window.setTimeout(() => reject(new Error("A Decky backend " + String(timeoutMs / 1000) + " másodpercen belül nem válaszolt.")), timeoutMs);
         }),
     ]);
 }
@@ -69,9 +72,14 @@ function publishSupportState() {
     const full = visible.filter((id) => supportStates.get(id) === "full").length;
     const partial = visible.filter((id) => supportStates.get(id) === "partial").length;
     const unavailable = visible.filter((id) => supportStates.get(id) === "unavailable").length;
+    const gfnChecked = visible.filter((id) => ["available", "not_available"].includes(gfnStates.get(id) ?? "")).length;
+    const gfnAvailable = visible.filter((id) => gfnStates.get(id) === "available").length;
+    const gfnUnavailable = visible.filter((id) => gfnStates.get(id) === "unavailable").length;
     notifyTileStatus("Látható játékok ellenőrzése: " + String(checked) + "/" + String(visible.length) +
         ". Teljes támogatás: " + String(full) + ". Részleges támogatás: " + String(partial) +
-        (unavailable ? ". Nem sikerült lekérdezni: " + String(unavailable) + "." : "."));
+        (unavailable ? ". Kontrolleradat-hiba: " + String(unavailable) + "." : ".") +
+        " GFN: " + String(gfnAvailable) + "/" + String(gfnChecked) +
+        (gfnUnavailable ? ". GFN-adathiba: " + String(gfnUnavailable) + "." : "."));
 }
 async function flushSupportBatch() {
     batchTimer = undefined;
@@ -79,8 +87,12 @@ async function flushSupportBatch() {
     pendingAppIds.clear();
     if (!appIds.length)
         return;
-    try {
-        const response = await withBackendTimeout(getControllerSupport(appIds));
+    const [supportResult, gfnResult] = await Promise.allSettled([
+        withBackendTimeout(getControllerSupport(appIds)),
+        withBackendTimeout(getGfnAvailability(appIds), GFN_BACKEND_TIMEOUT_MS),
+    ]);
+    if (supportResult.status === "fulfilled") {
+        const response = supportResult.value;
         for (const appId of appIds) {
             const level = response.levels?.[appId];
             const value = response.support?.[appId];
@@ -98,26 +110,48 @@ async function flushSupportBatch() {
                 supportStates.set(appId, "unavailable");
         }
     }
-    catch (error) {
+    else {
         for (const appId of appIds)
             supportStates.set(appId, "unavailable");
-        notifyTileStatus("A kompatibilitási adatok lekérése sikertelen: " + errorMessage(error));
-        console.warn("ControllerXbox tile lookup failed", error);
+        console.warn("ControllerXbox controller lookup failed", supportResult.reason);
+    }
+    if (gfnResult.status === "fulfilled" && gfnResult.value.success) {
+        const response = gfnResult.value;
+        for (const appId of appIds) {
+            const value = response.availability?.[appId];
+            if (value === true)
+                gfnStates.set(appId, "available");
+            else if (value === false)
+                gfnStates.set(appId, "not_available");
+            else
+                gfnStates.set(appId, "unavailable");
+        }
+    }
+    else {
+        for (const appId of appIds)
+            gfnStates.set(appId, "unavailable");
+        const error = gfnResult.status === "rejected" ? gfnResult.reason : gfnResult.value.error;
+        console.warn("ControllerXbox GeForce NOW lookup failed", error);
     }
     publishSupportState();
     notifyCacheChanged();
 }
 function queueSupportLookup(appId) {
-    const current = supportStates.get(appId);
-    if (current && current !== "unavailable")
+    const controllerReady = Boolean(supportStates.get(appId) && supportStates.get(appId) !== "unavailable");
+    const gfnReady = Boolean(gfnStates.get(appId) && gfnStates.get(appId) !== "unavailable");
+    if (controllerReady && gfnReady)
         return;
-    supportStates.set(appId, "loading");
+    if (!controllerReady)
+        supportStates.set(appId, "loading");
+    if (!gfnReady)
+        gfnStates.set(appId, "loading");
     pendingAppIds.add(appId);
     if (batchTimer === undefined)
         batchTimer = window.setTimeout(() => void flushSupportBatch(), 120);
 }
 function resetVisibleSupport() {
     supportStates.clear();
+    gfnStates.clear();
     pendingAppIds.clear();
     for (const appId of visibleAppIds.keys())
         queueSupportLookup(appId);
@@ -129,25 +163,7 @@ function ControllerIcon({ level, appId }) {
     const partial = level === "partial";
     return SP_JSX.jsxs("svg", { width: "24", height: "20", viewBox: "0 0 24 22", "aria-hidden": "true", children: [partial && SP_JSX.jsx("defs", { children: SP_JSX.jsx("clipPath", { id: halfClipId, children: SP_JSX.jsx("rect", { x: "0", y: "0", width: "12", height: "22" }) }) }), SP_JSX.jsx("path", { d: controllerPath, fill: partial ? "none" : "currentColor", stroke: "currentColor", strokeWidth: "1.4" }), partial && SP_JSX.jsx("path", { d: controllerPath, fill: "currentColor", clipPath: "url(#" + halfClipId + ")" }), SP_JSX.jsx("path", { d: "M5.4 9.7h3.2M7 8.1v3.2", fill: "none", stroke: "#107cde", strokeWidth: "1.25", strokeLinecap: "round" }), SP_JSX.jsx("circle", { cx: "17.1", cy: "8.7", r: ".9", fill: partial ? "currentColor" : "#107cde" }), SP_JSX.jsx("circle", { cx: "19.2", cy: "10.7", r: ".9", fill: partial ? "currentColor" : "#107cde" })] });
 }
-function XboxTileBadge({ appId }) {
-    const appIdText = String(appId);
-    const [state, setState] = SP_REACT.useState(() => supportStates.get(appIdText) ?? "loading");
-    SP_REACT.useEffect(() => {
-        visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
-        const listener = () => setState(supportStates.get(appIdText) ?? "loading");
-        supportListeners.add(listener);
-        queueSupportLookup(appIdText);
-        publishSupportState();
-        return () => {
-            supportListeners.delete(listener);
-            const remaining = (visibleAppIds.get(appIdText) ?? 1) - 1;
-            if (remaining > 0)
-                visibleAppIds.set(appIdText, remaining);
-            else
-                visibleAppIds.delete(appIdText);
-            publishSupportState();
-        };
-    }, [appIdText]);
+function ControllerBadge({ state, appId }) {
     const appearance = {
         full: {
             symbol: "",
@@ -178,10 +194,6 @@ function XboxTileBadge({ appId }) {
     const badge = appearance[state];
     const controllerLevel = state === "full" || state === "partial" ? state : null;
     return SP_JSX.jsx("span", { title: badge.title, style: {
-            position: "absolute",
-            top: "6px",
-            left: "6px",
-            zIndex: 100,
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
@@ -195,6 +207,84 @@ function XboxTileBadge({ appId }) {
             font: "bold 17px/24px Arial, sans-serif",
             pointerEvents: "none",
         }, children: controllerLevel ? SP_JSX.jsx(ControllerIcon, { level: controllerLevel, appId: appId }) : badge.symbol });
+}
+function GfnBadge({ state }) {
+    const appearance = {
+        available: {
+            label: "GFN",
+            background: "#76b900",
+            color: "#ffffff",
+            title: "A játék elérhető a GeForce NOW kínálatában",
+        },
+        not_available: {
+            label: "GFN",
+            background: "#59616a",
+            color: "#d7dce1",
+            title: "A játék nem található a GeForce NOW kínálatában",
+        },
+        unavailable: {
+            label: "GFN?",
+            background: "#d97706",
+            color: "#ffffff",
+            title: "A GeForce NOW katalógus nem érhető el",
+        },
+        loading: {
+            label: "GFN…",
+            background: "#5f6b78",
+            color: "#ffffff",
+            title: "A GeForce NOW katalógus ellenőrzése folyamatban van",
+        },
+    };
+    const badge = appearance[state];
+    return SP_JSX.jsx("span", { title: badge.title, style: {
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            minWidth: "34px",
+            height: "24px",
+            padding: "0 5px",
+            borderRadius: "5px",
+            background: badge.background,
+            color: badge.color,
+            boxShadow: "0 1px 5px rgba(0,0,0,.85)",
+            font: "italic 900 10px/24px Arial, sans-serif",
+            letterSpacing: "-.3px",
+            pointerEvents: "none",
+        }, children: badge.label });
+}
+function XboxTileBadge({ appId }) {
+    const appIdText = String(appId);
+    const [state, setState] = SP_REACT.useState(() => supportStates.get(appIdText) ?? "loading");
+    const [gfnState, setGfnState] = SP_REACT.useState(() => gfnStates.get(appIdText) ?? "loading");
+    SP_REACT.useEffect(() => {
+        visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
+        const listener = () => {
+            setState(supportStates.get(appIdText) ?? "loading");
+            setGfnState(gfnStates.get(appIdText) ?? "loading");
+        };
+        supportListeners.add(listener);
+        queueSupportLookup(appIdText);
+        publishSupportState();
+        return () => {
+            supportListeners.delete(listener);
+            const remaining = (visibleAppIds.get(appIdText) ?? 1) - 1;
+            if (remaining > 0)
+                visibleAppIds.set(appIdText, remaining);
+            else
+                visibleAppIds.delete(appIdText);
+            publishSupportState();
+        };
+    }, [appIdText]);
+    return SP_JSX.jsxs("span", { style: {
+            position: "absolute",
+            top: "6px",
+            left: "6px",
+            zIndex: 100,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "4px",
+            pointerEvents: "none",
+        }, children: [SP_JSX.jsx(ControllerBadge, { state: state, appId: appId }), SP_JSX.jsx(GfnBadge, { state: gfnState })] });
 }
 function appendBadgeToTile(result, appId) {
     const row = DFL.findInReactTree(result, (node) => {
@@ -372,6 +462,8 @@ function patchLibraryTiles() {
             originalTileType = null;
             tileIconRowClass = "";
             supportListeners.clear();
+            supportStates.clear();
+            gfnStates.clear();
             visibleAppIds.clear();
             pendingAppIds.clear();
             if (batchTimer !== undefined)
@@ -418,7 +510,10 @@ function Content() {
         setStatus("Cache törlése folyamatban...");
         try {
             const response = await withBackendTimeout(clearCache());
-            toaster.toast({ title: "Xbox Controller Check", body: String(response.removed) + " gyorsítótár-bejegyzés törölve." });
+            toaster.toast({
+                title: "Xbox Controller Check",
+                body: String(response.removed) + " kontrollerbejegyzés és " + String(response.gfn_removed ?? 0) + " GFN-AppID törölve.",
+            });
             resetVisibleSupport();
             notifyCacheChanged();
             await refreshStats();
@@ -450,7 +545,7 @@ function Content() {
             setWorking(false);
         }
     };
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00F6nyvt\u00E1ri b\u00E9lyegk\u00E9pek jel\u00F6l\u00E9se: teli kontroller = teljes t\u00E1mogat\u00E1s; f\u00E9lig kit\u00F6lt\u00F6tt kontroller = r\u00E9szleges t\u00E1mogat\u00E1s; piros \u00D7 = nincs t\u00E1mogat\u00E1s; narancss\u00E1rga ? = nincs Steam-adat." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00F6nyvt\u00E1ri b\u00E9lyegk\u00E9pek jel\u00F6l\u00E9se: teli kontroller = teljes t\u00E1mogat\u00E1s; f\u00E9lig kit\u00F6lt\u00F6tt kontroller = r\u00E9szleges t\u00E1mogat\u00E1s; piros \u00D7 = nincs t\u00E1mogat\u00E1s; narancss\u00E1rga ? = nincs Steam-adat." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "GeForce NOW: z\u00F6ld GFN = j\u00E1tszhat\u00F3; sz\u00FCrke GFN = nincs a katal\u00F3gusban; narancss\u00E1rga GFN? = a katal\u00F3gus nem \u00E9rhet\u0151 el." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? "GFN-katalógus: " + String(stats.gfn_catalog_entries ?? 0) + " Steam AppID; " + (stats.gfn_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A GFN-katalógus állapotának betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
 }
 var index = DFL.definePlugin(() => {
     const removeTilePatch = patchLibraryTiles();

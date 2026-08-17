@@ -1,12 +1,12 @@
 # Xbox Controller Check
 
-A Decky Loader plugin for Steam Deck. It marks visible Steam Library game tiles when the Steam Store officially lists the game with **Partial Controller Support** or **Full Controller Support**.
+A Decky Loader plugin for Steam Deck. It marks visible Steam Library game tiles with their Steam controller-support level and GeForce NOW availability.
 
 ## Privacy and cache
 
-Only app IDs present on the current visible screen are sent to Steam's public `appdetails` endpoint. No account, library, playtime, or other personal data is collected or transmitted. Results are cached locally for 30 days. The Decky quick-access menu offers **Clear and refresh cache** at any time.
+Only app IDs present on the current visible screen are sent to Steam's public `appdetails` endpoint. The public NVIDIA GeForce NOW catalog is downloaded without sending the user's library or app IDs to NVIDIA; Steam AppID matching happens locally. No account, library, playtime, or other personal data is collected. Controller results are cached for 30 days and the GFN catalog is checked every 24 hours while remaining available as a stale fallback if a refresh fails. The Decky quick-access menu offers **Clear and refresh cache** at any time.
 
-The badge means Steam indicates the game can be downloaded, launched, and played through exclusively with a controller, whether through Steam Input or native gamepad support.
+The controller badge reflects Steam's partial or full controller-support category. The adjacent green or gray GFN badge reflects whether the Steam AppID exists in NVIDIA's public GeForce NOW catalog.
 
 ## Development
 
