@@ -1,5 +1,5 @@
-import { ButtonItem, definePlugin, findInReactTree, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
-import { callable, toaster } from "@decky/api";
+import { ButtonItem, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
+import { callable, fetchNoCors, toaster } from "@decky/api";
 import { createElement, ReactElement, useEffect, useState } from "react";
 
 const BACKEND_TIMEOUT_MS = 15_000;
@@ -7,6 +7,8 @@ const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
 const TILE_STATUS_EVENT = "controller-xbox-tile-status";
 const BADGE_KEY = "controller-xbox-tile-badge";
+const STORE_DEBUGGER_URL = "http://localhost:8080/json";
+const STORE_SCAN_INTERVAL_MS = 1_500;
 
 type SupportResponse = {
   success: boolean;
@@ -62,6 +64,21 @@ type WebpackRequire = {
   (id: string): unknown;
   m: Record<string, unknown>;
 };
+type StoreDebuggerTab = {
+  url: string;
+  webSocketDebuggerUrl: string;
+};
+type StorePageScan = {
+  url?: string;
+  appIds?: string[];
+};
+type StoreRuntimeResponse = {
+  id?: number;
+  result?: { result?: { value?: unknown } };
+  error?: unknown;
+  method?: string;
+  params?: { frame?: { url?: string } };
+};
 
 const getControllerSupport = callable<[appIds: string[]], SupportResponse>("get_controller_support");
 const getGfnAvailability = callable<[appIds: string[]], GfnResponse>("get_gfn_availability");
@@ -80,6 +97,18 @@ let batchTimer: number | undefined;
 let tileMemo: TileMemo | null = null;
 let originalTileType: TileRender | null = null;
 let tileIconRowClass = "";
+let storeWebSocket: WebSocket | null = null;
+let storeMounted = false;
+let storeWebSocketReady = false;
+let storeMessageId = 1;
+let storeScanTimer: number | undefined;
+let storeReconnectTimer: number | undefined;
+let storeCurrentAppIds = new Set<string>();
+const storeRuntimeRequests = new Map<number, {
+  resolve: (value: unknown) => void;
+  reject: (reason?: unknown) => void;
+  timeout: number;
+}>();
 
 function withBackendTimeout<T>(request: Promise<T>, timeoutMs = BACKEND_TIMEOUT_MS): Promise<T> {
   return Promise.race([
@@ -428,6 +457,340 @@ function XboxTileBadge({ appId }: { appId: number }) {
   </span>;
 }
 
+function buildStoreScanScript(): string {
+  return `
+    (function() {
+      const ids = new Set();
+      const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
+      if (pageMatch) ids.add(pageMatch[1]);
+      const nodes = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
+      for (const node of nodes) {
+        const rect = node.getBoundingClientRect();
+        if (rect.bottom < -200 || rect.top > innerHeight + 200 || rect.right < -200 || rect.left > innerWidth + 200) continue;
+        const raw = node.getAttribute('data-ds-appid') || node.closest('[data-ds-appid]')?.getAttribute('data-ds-appid') || '';
+        const href = node.getAttribute('href') || node.closest('a[href*="/app/"]')?.getAttribute('href') || '';
+        const match = raw.match(/\\d+/) || href.match(/\\/app\\/(\\d+)/);
+        const id = match ? (match[1] || match[0]) : '';
+        if (id && Number(id) > 0) ids.add(id);
+        if (ids.size >= 80) break;
+      }
+      return { url: location.href, appIds: Array.from(ids) };
+    })();
+  `;
+}
+
+function buildStoreBadgeScript(states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState }>): string {
+  const serializedStates = JSON.stringify(states).replace(/</g, "\\u003c");
+  const controllerPath = "M5.4 5.5h13.2c1.5 0 2.8 1 3.2 2.5l1.1 5c.4 1.8-.9 3.5-2.7 3.5-.8 0-1.5-.3-2-.9L15.6 13H8.4l-2.6 2.6c-.5.6-1.2.9-2 .9-1.8 0-3.1-1.7-2.7-3.5l1.1-5c.4-1.5 1.7-2.5 3.2-2.5Z";
+  const boosteroidPath = "M13.3259 3.30744C9.865 6.72998 9.549 12.1026 12.3773 15.8818L9.46609 18.7608C8.90018 19.3204 8.90018 20.2281 9.46609 20.7883C10.032 21.3479 10.9498 21.3479 11.5163 20.7883L14.4276 17.9093C18.2491 20.7063 23.682 20.3938 27.143 16.9713C30.9524 13.2041 30.9524 7.07459 27.143 3.30801C23.3336-.45857 17.1347-.459144 13.3259 3.30744ZM25.0927 14.9438C22.7653 17.2453 19.1705 17.5469 16.5103 15.8497L17.6595 14.7133C18.2254 14.1536 18.2254 13.246 17.6595 12.6858C17.0936 12.1261 16.1757 12.1261 15.6092 12.6858L14.46 13.8222C12.7438 11.1915 13.0488 7.63651 15.3762 5.33493C18.0549 2.68588 22.414 2.68588 25.0927 5.33493C27.7715 7.98398 27.7715 12.2947 25.0927 14.9438ZM16.2841 21.6272C16.85 22.1868 16.85 23.0945 16.2841 23.6547L10.1416 29.7291C9.57567 30.2887 8.65782 30.2887 8.09134 29.7291C7.52544 29.1695 7.52544 28.2618 8.09134 27.7016L14.2345 21.6272C14.8004 21.0675 15.7182 21.0675 16.2841 21.6272ZM.424426 22.1472C-.141475 21.5876-.141475 20.6799.424426 20.1197L6.56758 14.0447C7.13348 13.4851 8.05133 13.4851 8.61782 14.0447C9.18372 14.6043 9.18372 15.512 8.61782 16.0722L2.47466 22.1472C1.90818 22.7074.990907 22.7074.424426 22.1472Z";
+  return `
+    (function() {
+      const states = ${serializedStates};
+      const controllerPath = ${JSON.stringify(controllerPath)};
+      const boosteroidPath = ${JSON.stringify(boosteroidPath)};
+      const detailId = 'controller-xbox-store-detail-badges';
+      const cardClass = 'controller-xbox-store-card-badges';
+
+      function controllerBadge(state, appId, suffix) {
+        const titles = {
+          full: 'Steam: teljes kontroller-támogatás',
+          partial: 'Steam: részleges kontroller-támogatás',
+          unsupported: 'Steam: nincs kontroller-támogatás',
+          unavailable: 'A Steam kompatibilitási adata nem érhető el',
+          loading: 'A kompatibilitás ellenőrzése folyamatban van'
+        };
+        if (state !== 'full' && state !== 'partial') {
+          const symbol = state === 'unsupported' ? '×' : state === 'unavailable' ? '?' : '…';
+          const background = state === 'unsupported' ? '#a52a2a' : state === 'unavailable' ? '#d97706' : '#5f6b78';
+          return '<span class="cxc-controller cxc-symbol" title="' + titles[state] + '" style="background:' + background + '">' + symbol + '</span>';
+        }
+        const gradientId = 'cxc-half-' + appId + '-' + suffix;
+        const fill = state === 'full' ? 'white' : 'url(#' + gradientId + ')';
+        const defs = state === 'partial' ? '<defs><linearGradient id="' + gradientId + '" x1="0" x2="1"><stop offset="50%" stop-color="white"/><stop offset="50%" stop-color="transparent"/></linearGradient></defs>' : '';
+        return '<span class="cxc-controller" title="' + titles[state] + '"><svg width="24" height="20" viewBox="0 0 24 22" aria-hidden="true">' + defs + '<path d="' + controllerPath + '" fill="' + fill + '" stroke="white" stroke-width="1.4"/><path d="M5.4 9.7h3.2M7 8.1v3.2" fill="none" stroke="#107cde" stroke-width="1.25" stroke-linecap="round"/><circle cx="17.1" cy="8.7" r=".9" fill="#107cde"/><circle cx="19.2" cy="10.7" r=".9" fill="#107cde"/></svg></span>';
+      }
+
+      function gfnBadge(state) {
+        const data = {
+          available: ['GFN', '#76b900', '#fff', 'A játék elérhető a GeForce NOW kínálatában'],
+          not_available: ['GFN', '#59616a', '#d7dce1', 'A játék nem található a GeForce NOW kínálatában'],
+          unavailable: ['GFN?', '#d97706', '#fff', 'A GeForce NOW katalógus nem érhető el'],
+          loading: ['GFN…', '#5f6b78', '#fff', 'A GeForce NOW katalógus ellenőrzése folyamatban van']
+        }[state];
+        return '<span class="cxc-gfn" title="' + data[3] + '" style="background:' + data[1] + ';color:' + data[2] + '">' + data[0] + '</span>';
+      }
+
+      function boosteroidBadge(state) {
+        const data = {
+          available: ['#00a3ff', 'A játék elérhető a Boosteroid kínálatában'],
+          maintenance: ['#f59e0b', 'A játék elérhető a Boosteroiden, de jelenleg karbantartás alatt áll'],
+          not_available: ['#77808a', 'A játék nem található a Boosteroid kínálatában'],
+          unavailable: ['#f59e0b', 'A Boosteroid katalógus nem érhető el'],
+          loading: ['#5f6b78', 'A Boosteroid katalógus ellenőrzése folyamatban van']
+        }[state];
+        return '<span class="cxc-boosteroid" title="' + data[1] + '" style="color:' + data[0] + '"><svg width="19" height="19" viewBox="0 0 31 31" aria-hidden="true"><path fill="currentColor" d="' + boosteroidPath + '"/></svg></span>';
+      }
+
+      function badgesHtml(appId, suffix) {
+        const state = states[appId];
+        if (!state) return '';
+        return controllerBadge(state.controller, appId, suffix) + gfnBadge(state.gfn) + boosteroidBadge(state.boosteroid);
+      }
+
+      let style = document.getElementById('controller-xbox-store-style');
+      if (!style) {
+        style = document.createElement('style');
+        style.id = 'controller-xbox-store-style';
+        style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;transform:scale(.95);transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;z-index:9999;transform:scale(.72);transform-origin:top left}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}';
+        (document.head || document.documentElement).appendChild(style);
+      }
+
+      const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
+      const pageId = pageMatch ? pageMatch[1] : '';
+      let detail = document.getElementById(detailId);
+      if (pageId && states[pageId]) {
+        if (!detail) {
+          detail = document.createElement('div');
+          detail.id = detailId;
+          detail.className = 'cxc-store-badges cxc-store-detail';
+          document.body.appendChild(detail);
+        }
+        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid;
+        if (detail.getAttribute('data-state-key') !== key) {
+          detail.innerHTML = badgesHtml(pageId, 'detail');
+          detail.setAttribute('data-state-key', key);
+        }
+      } else if (detail) {
+        detail.remove();
+      }
+
+      const candidates = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
+      const usedHosts = new Set();
+      for (const node of candidates) {
+        const raw = node.getAttribute('data-ds-appid') || node.closest('[data-ds-appid]')?.getAttribute('data-ds-appid') || '';
+        const link = node.matches('a[href*="/app/"]') ? node : node.closest('a[href*="/app/"]');
+        const href = link?.getAttribute('href') || '';
+        const match = raw.match(/\\d+/) || href.match(/\\/app\\/(\\d+)/);
+        const appId = match ? (match[1] || match[0]) : '';
+        if (!appId || !states[appId]) continue;
+        const host = link || node;
+        if (usedHosts.has(host) || host.closest('#global_header, #store_header')) continue;
+        const rect = host.getBoundingClientRect();
+        if (rect.width < 90 || rect.height < 60 || rect.width > 700 || rect.height > 900) continue;
+        if (rect.bottom < -200 || rect.top > innerHeight + 200 || rect.right < -200 || rect.left > innerWidth + 200) continue;
+        if (pageId === appId && rect.width > 480) continue;
+        usedHosts.add(host);
+        if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+        let badge = Array.from(host.children).find(function(child) { return child.classList?.contains(cardClass); });
+        if (!badge) {
+          badge = document.createElement('div');
+          badge.className = 'cxc-store-badges ' + cardClass;
+          host.appendChild(badge);
+        }
+        const key = appId + ':' + states[appId].controller + ':' + states[appId].gfn + ':' + states[appId].boosteroid;
+        badge.setAttribute('data-cxc-appid', appId);
+        if (badge.getAttribute('data-state-key') !== key) {
+          badge.innerHTML = badgesHtml(appId, 'card-' + usedHosts.size);
+          badge.setAttribute('data-state-key', key);
+        }
+      }
+
+      for (const badge of document.querySelectorAll('.' + cardClass)) {
+        const id = badge.getAttribute('data-cxc-appid');
+        if (!id || !states[id]) badge.remove();
+      }
+    })();
+  `;
+}
+
+function sendStoreRuntime(expression: string, returnByValue = false): Promise<unknown> {
+  const socket = storeWebSocket;
+  if (!socket || socket.readyState !== WebSocket.OPEN || !storeWebSocketReady) {
+    return Promise.reject(new Error("A Steam Store böngészőkapcsolata nem aktív."));
+  }
+  const id = storeMessageId++;
+  socket.send(JSON.stringify({
+    id,
+    method: "Runtime.evaluate",
+    params: { expression, returnByValue, awaitPromise: true },
+  }));
+  if (!returnByValue) return Promise.resolve(undefined);
+  return new Promise((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      storeRuntimeRequests.delete(id);
+      reject(new Error("A Steam Store oldal nem válaszolt."));
+    }, 5_000);
+    storeRuntimeRequests.set(id, { resolve, reject, timeout });
+  });
+}
+
+function renderStoreBadges(): void {
+  if (!storeWebSocketReady || !storeCurrentAppIds.size) return;
+  const states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState }> = {};
+  for (const appId of storeCurrentAppIds) {
+    states[appId] = {
+      controller: supportStates.get(appId) ?? "loading",
+      gfn: gfnStates.get(appId) ?? "loading",
+      boosteroid: boosteroidStates.get(appId) ?? "loading",
+    };
+  }
+  void sendStoreRuntime(buildStoreBadgeScript(states)).catch((error) => {
+    console.debug("ControllerXbox store badge rendering skipped", error);
+  });
+}
+
+function scheduleStoreScan(delay = STORE_SCAN_INTERVAL_MS): void {
+  if (storeScanTimer !== undefined) window.clearTimeout(storeScanTimer);
+  if (!storeMounted) return;
+  storeScanTimer = window.setTimeout(() => void scanStorePage(), delay);
+}
+
+async function scanStorePage(): Promise<void> {
+  storeScanTimer = undefined;
+  if (!storeMounted || !storeWebSocketReady) return;
+  try {
+    const result = await sendStoreRuntime(buildStoreScanScript(), true) as StorePageScan | undefined;
+    const nextIds = new Set(
+      (Array.isArray(result?.appIds) ? result.appIds : [])
+        .map((value) => String(value))
+        .filter((value) => /^\d+$/.test(value) && Number(value) > 0),
+    );
+    storeCurrentAppIds = nextIds;
+    for (const appId of nextIds) queueSupportLookup(appId);
+    renderStoreBadges();
+  } catch (error) {
+    console.debug("ControllerXbox store scan skipped", error);
+  } finally {
+    scheduleStoreScan();
+  }
+}
+
+function clearStoreRuntimeRequests(reason: string): void {
+  for (const request of storeRuntimeRequests.values()) {
+    window.clearTimeout(request.timeout);
+    request.reject(new Error(reason));
+  }
+  storeRuntimeRequests.clear();
+}
+
+function scheduleStoreReconnect(delay = 1_000): void {
+  if (storeReconnectTimer !== undefined) window.clearTimeout(storeReconnectTimer);
+  if (!storeMounted) return;
+  storeReconnectTimer = window.setTimeout(() => {
+    storeReconnectTimer = undefined;
+    void connectToStoreDebugger();
+  }, delay);
+}
+
+async function connectToStoreDebugger(): Promise<void> {
+  if (!storeMounted || storeWebSocket) return;
+  try {
+    const response = await fetchNoCors(STORE_DEBUGGER_URL);
+    const tabs = await response.json() as StoreDebuggerTab[];
+    const tab = Array.isArray(tabs) ? tabs.find((candidate) => candidate.url?.includes("store.steampowered.com")) : undefined;
+    if (!tab?.webSocketDebuggerUrl) {
+      scheduleStoreReconnect();
+      return;
+    }
+
+    const socket = new WebSocket(tab.webSocketDebuggerUrl);
+    storeWebSocket = socket;
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ id: storeMessageId++, method: "Page.enable" }));
+      socket.send(JSON.stringify({ id: storeMessageId++, method: "Runtime.enable" }));
+      window.setTimeout(() => {
+        if (storeWebSocket !== socket || !storeMounted) return;
+        storeWebSocketReady = true;
+        scheduleStoreScan(0);
+      }, 300);
+    };
+    socket.onmessage = (event) => {
+      let message: StoreRuntimeResponse;
+      try { message = JSON.parse(String(event.data)) as StoreRuntimeResponse; } catch { return; }
+      if (typeof message.id === "number") {
+        const request = storeRuntimeRequests.get(message.id);
+        if (request) {
+          storeRuntimeRequests.delete(message.id);
+          window.clearTimeout(request.timeout);
+          if (message.error) request.reject(message.error);
+          else request.resolve(message.result?.result?.value);
+        }
+      }
+      if (message.method === "Page.frameNavigated" && message.params?.frame?.url?.includes("store.steampowered.com")) {
+        scheduleStoreScan(500);
+      }
+    };
+    socket.onerror = () => {
+      if (storeWebSocket === socket) console.debug("ControllerXbox store debugger connection error");
+    };
+    socket.onclose = () => {
+      if (storeWebSocket === socket) storeWebSocket = null;
+      storeWebSocketReady = false;
+      clearStoreRuntimeRequests("A Steam Store böngészőkapcsolata megszakadt.");
+      scheduleStoreReconnect();
+    };
+  } catch (error) {
+    console.debug("ControllerXbox store debugger discovery failed", error);
+    scheduleStoreReconnect();
+  }
+}
+
+function disconnectStoreDebugger(): void {
+  if (storeScanTimer !== undefined) window.clearTimeout(storeScanTimer);
+  if (storeReconnectTimer !== undefined) window.clearTimeout(storeReconnectTimer);
+  storeScanTimer = undefined;
+  storeReconnectTimer = undefined;
+  if (storeWebSocketReady) {
+    void sendStoreRuntime(`
+      (function() {
+        document.getElementById('controller-xbox-store-detail-badges')?.remove();
+        document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
+        document.getElementById('controller-xbox-store-style')?.remove();
+      })();
+    `).catch(() => {});
+  }
+  const socket = storeWebSocket;
+  storeWebSocket = null;
+  storeWebSocketReady = false;
+  storeCurrentAppIds.clear();
+  clearStoreRuntimeRequests("A Steam Store nézet bezárult.");
+  try { socket?.close(); } catch { /* The browser tab may already be gone. */ }
+}
+
+function patchSteamStore(): () => void {
+  const storeListener = () => renderStoreBadges();
+  supportListeners.add(storeListener);
+  let unlisten: (() => void) | undefined;
+  try {
+    const historyModule = findModuleExport((value: any) => value?.m_history !== undefined);
+    const history = historyModule?.m_history;
+    const handleLocation = (pathname: string) => {
+      const inStore = pathname === "/steamweb" || pathname.startsWith("/steamweb/");
+      if (inStore && !storeMounted) {
+        storeMounted = true;
+        void connectToStoreDebugger();
+      } else if (!inStore && storeMounted) {
+        storeMounted = false;
+        disconnectStoreDebugger();
+      }
+    };
+    handleLocation(String(history?.location?.pathname ?? window.location.pathname ?? ""));
+    if (typeof history?.listen === "function") {
+      unlisten = history.listen((info: { pathname?: string; location?: { pathname?: string } }) => {
+        handleLocation(String(info?.pathname ?? info?.location?.pathname ?? ""));
+      });
+    }
+  } catch (error) {
+    console.warn("ControllerXbox Steam Store patch failed", error);
+  }
+  return () => {
+    supportListeners.delete(storeListener);
+    try { unlisten?.(); } catch { /* Steam may already have disposed its history. */ }
+    storeMounted = false;
+    disconnectStoreDebugger();
+  };
+}
+
 function appendBadgeToTile(result: ReactElement, appId: number): ReactElement {
   const row = findInReactTree(result, (node: any) => {
     const className = node?.props?.className;
@@ -570,7 +933,7 @@ function patchLibraryTiles(): () => void {
 
 function Content() {
   const [stats, setStats] = useState<CacheStats>();
-  const [status, setStatus] = useState("A könyvtári csempejelölés indul. Nyisd meg vagy frissítsd a Könyvtárat.");
+  const [status, setStatus] = useState("A könyvtári és Steam Áruház-jelölés indul. Nyisd meg vagy frissítsd a kívánt nézetet.");
   const [diagnosticLog, setDiagnosticLog] = useState("Nincs rögzített hiba.");
   const [working, setWorking] = useState(false);
 
@@ -637,7 +1000,8 @@ function Content() {
   };
 
   return <PanelSection title="Xbox Controller Check">
-    <PanelSectionRow><div>A könyvtári bélyegképek jelölése: teli kontroller = teljes támogatás; félig kitöltött kontroller = részleges támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat.</div></PanelSectionRow>
+    <PanelSectionRow><div>A könyvtári és Steam Áruház-bélyegképek jelölése: teli kontroller = teljes támogatás; félig kitöltött kontroller = részleges támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat.</div></PanelSectionRow>
+    <PanelSectionRow><div>A megnyitott Steam Áruház-játék oldalán a három jelvény jobb alul, a ProtonDB Store-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
     <PanelSectionRow><div>GeForce NOW: zöld GFN = játszható; szürke GFN = nincs a katalógusban; narancssárga GFN? = a katalógus nem érhető el.</div></PanelSectionRow>
     <PanelSectionRow><div>Boosteroid: kék logó = elérhető; sárga logó = karbantartás alatt; szürke logó = nincs a katalógusban; narancssárga logó = a katalógus nem érhető el.</div></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
@@ -652,11 +1016,15 @@ function Content() {
 
 export default definePlugin(() => {
   const removeTilePatch = patchLibraryTiles();
+  const removeStorePatch = patchSteamStore();
   return {
     name: "Xbox Controller Check",
     titleView: <div className={staticClasses.Title}>Xbox Controller Check</div>,
     content: <Content />,
     icon: <span>✓</span>,
-    onDismount: removeTilePatch,
+    onDismount: () => {
+      removeStorePatch();
+      removeTilePatch();
+    },
   };
 });
