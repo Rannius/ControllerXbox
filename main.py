@@ -903,16 +903,20 @@ class Plugin:
             gfn_initialized = bool(state.get("gfn_initialized")) if valid_state else False
             boosteroid_initialized = bool(state.get("boosteroid_initialized")) if valid_state else False
 
-            gfn_added = len(current_gfn - previous_gfn) if gfn_available and gfn_initialized else 0
-            boosteroid_added = (
-                len(current_boosteroid - previous_boosteroid)
-                if boosteroid_available and boosteroid_initialized
-                else 0
+            gfn_added_app_ids = (
+                sorted(current_gfn - previous_gfn, key=int)
+                if gfn_available and gfn_initialized
+                else []
             )
-            boosteroid_maintenance = (
-                len(current_maintenance - previous_maintenance)
+            boosteroid_added_app_ids = (
+                sorted(current_boosteroid - previous_boosteroid, key=int)
                 if boosteroid_available and boosteroid_initialized
-                else 0
+                else []
+            )
+            boosteroid_maintenance_app_ids = (
+                sorted(current_maintenance - previous_maintenance, key=int)
+                if boosteroid_available and boosteroid_initialized
+                else []
             )
 
             last_notified_update = str(state.get("last_notified_update", "")) if valid_state else ""
@@ -960,14 +964,31 @@ class Plugin:
         return {
             "success": True,
             "tracked_games": len(library_app_ids),
-            "gfn_added": gfn_added if self._settings.get("notify_gfn_additions", True) else 0,
+            "gfn_added": (
+                len(gfn_added_app_ids) if self._settings.get("notify_gfn_additions", True) else 0
+            ),
+            "gfn_added_app_ids": (
+                gfn_added_app_ids if self._settings.get("notify_gfn_additions", True) else []
+            ),
             "boosteroid_added": (
-                boosteroid_added if self._settings.get("notify_boosteroid_additions", True) else 0
+                len(boosteroid_added_app_ids)
+                if self._settings.get("notify_boosteroid_additions", True)
+                else 0
+            ),
+            "boosteroid_added_app_ids": (
+                boosteroid_added_app_ids
+                if self._settings.get("notify_boosteroid_additions", True)
+                else []
             ),
             "boosteroid_maintenance": (
-                boosteroid_maintenance
+                len(boosteroid_maintenance_app_ids)
                 if self._settings.get("notify_boosteroid_maintenance", True)
                 else 0
+            ),
+            "boosteroid_maintenance_app_ids": (
+                boosteroid_maintenance_app_ids
+                if self._settings.get("notify_boosteroid_maintenance", True)
+                else []
             ),
             "update_version": update_version,
         }

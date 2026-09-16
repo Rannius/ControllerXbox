@@ -76,8 +76,11 @@ type NotificationEventsResponse = {
   success: boolean;
   tracked_games?: number;
   gfn_added?: number;
+  gfn_added_app_ids?: string[];
   boosteroid_added?: number;
+  boosteroid_added_app_ids?: string[];
   boosteroid_maintenance?: number;
+  boosteroid_maintenance_app_ids?: string[];
   update_version?: string;
   error?: string;
 };
@@ -252,24 +255,45 @@ async function loadBadgeVisibility(): Promise<void> {
   }
 }
 
-function getSteamLibraryAppIds(): string[] {
+function getSteamLibraryApps(): any[] {
   try {
     const collection = (globalThis as any).collectionStore?.allAppsCollection;
     const rawApps = collection?.allApps ?? collection?.apps;
-    const apps = Array.isArray(rawApps)
+    return Array.isArray(rawApps)
       ? rawApps
       : rawApps && typeof rawApps[Symbol.iterator] === "function"
         ? Array.from(rawApps)
         : [];
-    return Array.from(new Set(
-      apps
-        .map((app: any) => String(app?.appid ?? ""))
-        .filter((appId: string) => /^\d+$/.test(appId) && Number(appId) > 0),
-    ));
   } catch (error) {
     console.warn("ControllerXbox could not enumerate the Steam library", error);
     return [];
   }
+}
+
+function getSteamLibraryAppIds(): string[] {
+  return Array.from(new Set(
+    getSteamLibraryApps()
+      .map((app: any) => String(app?.appid ?? ""))
+      .filter((appId: string) => /^\d+$/.test(appId) && Number(appId) > 0),
+  ));
+}
+
+function resolveLibraryGameName(appId: string): string {
+  const numericAppId = Number(appId);
+  const collectionOverview = getSteamLibraryApps().find((app: any) => Number(app?.appid) === numericAppId);
+  const appStoreOverview = (globalThis as any).appStore?.GetAppOverviewByAppID?.(numericAppId);
+  const steamOverview = (globalThis as any).SteamClient?.Apps?.GetAppOverviewByAppID?.(numericAppId);
+  const name = [collectionOverview, appStoreOverview, steamOverview]
+    .flatMap((overview) => [overview?.display_name, overview?.strDisplayName, overview?.name, overview?.sort_as])
+    .find((value) => typeof value === "string" && value.trim());
+  return typeof name === "string" ? name.trim() : "Steam AppID " + appId;
+}
+
+function formatNotificationGameNames(appIds: string[] | undefined, count: number): string {
+  const names = (appIds ?? []).slice(0, 3).map(resolveLibraryGameName);
+  if (!names.length) return String(count) + " játék";
+  const remaining = Math.max(0, count - names.length);
+  return names.join(", ") + (remaining ? " és még " + String(remaining) + " játék" : "");
 }
 
 async function checkBackgroundNotifications(attempt = 0): Promise<void> {
@@ -282,22 +306,28 @@ async function checkBackgroundNotifications(attempt = 0): Promise<void> {
   try {
     const response = await withBackendTimeout(getNotificationEvents(appIds), 180_000);
     if (!response.success) throw new Error(response.error || "Az értesítési ellenőrzés sikertelen.");
-    if ((response.gfn_added ?? 0) > 0) {
+    const gfnAdded = response.gfn_added ?? 0;
+    if (gfnAdded > 0) {
       toaster.toast({
         title: "GeForce NOW újdonság",
-        body: String(response.gfn_added) + " játékod mostantól elérhető a GeForce NOW-on.",
+        body: "Mostantól elérhető a GeForce NOW-on: "
+          + formatNotificationGameNames(response.gfn_added_app_ids, gfnAdded) + ".",
       });
     }
-    if ((response.boosteroid_added ?? 0) > 0) {
+    const boosteroidAdded = response.boosteroid_added ?? 0;
+    if (boosteroidAdded > 0) {
       toaster.toast({
         title: "Boosteroid újdonság",
-        body: String(response.boosteroid_added) + " játékod mostantól elérhető a Boosteroiden.",
+        body: "Mostantól elérhető a Boosteroiden: "
+          + formatNotificationGameNames(response.boosteroid_added_app_ids, boosteroidAdded) + ".",
       });
     }
-    if ((response.boosteroid_maintenance ?? 0) > 0) {
+    const boosteroidMaintenance = response.boosteroid_maintenance ?? 0;
+    if (boosteroidMaintenance > 0) {
       toaster.toast({
         title: "Boosteroid karbantartás",
-        body: String(response.boosteroid_maintenance) + " játékod karbantartás alá került a Boosteroiden.",
+        body: "Karbantartás alá került a Boosteroiden: "
+          + formatNotificationGameNames(response.boosteroid_maintenance_app_ids, boosteroidMaintenance) + ".",
       });
     }
     if (response.update_version) {
