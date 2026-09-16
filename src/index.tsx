@@ -3,7 +3,7 @@ import { callable, toaster } from "@decky/api";
 import { createElement, ReactElement, useEffect, useState } from "react";
 
 const BACKEND_TIMEOUT_MS = 15_000;
-const GFN_BACKEND_TIMEOUT_MS = 60_000;
+const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
 const TILE_STATUS_EVENT = "controller-xbox-tile-status";
 const BADGE_KEY = "controller-xbox-tile-badge";
@@ -21,16 +21,27 @@ type GfnResponse = {
   catalog_entries?: number;
   error?: string;
 };
+type BoosteroidResponse = {
+  success: boolean;
+  availability?: Record<string, boolean>;
+  maintenance?: Record<string, boolean>;
+  unavailable?: string[];
+  catalog_entries?: number;
+  error?: string;
+};
 type CacheStats = {
   entries: number;
   fresh_entries: number;
   ttl_days: number;
   gfn_catalog_entries?: number;
   gfn_cache_fresh?: boolean;
+  boosteroid_catalog_entries?: number;
+  boosteroid_cache_fresh?: boolean;
 };
 type BackendDiagnostics = CacheStats & { success: boolean; backend: string; settings_directory: string };
 type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 type GfnState = "loading" | "available" | "not_available" | "unavailable";
+type BoosteroidState = "loading" | "available" | "maintenance" | "not_available" | "unavailable";
 
 type TileOverview = {
   appid: number;
@@ -54,12 +65,14 @@ type WebpackRequire = {
 
 const getControllerSupport = callable<[appIds: string[]], SupportResponse>("get_controller_support");
 const getGfnAvailability = callable<[appIds: string[]], GfnResponse>("get_gfn_availability");
-const clearCache = callable<[], { success: boolean; removed: number; gfn_removed?: number }>("clear_cache");
+const getBoosteroidAvailability = callable<[appIds: string[]], BoosteroidResponse>("get_boosteroid_availability");
+const clearCache = callable<[], { success: boolean; removed: number; gfn_removed?: number; boosteroid_removed?: number }>("clear_cache");
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
 const getBackendDiagnostics = callable<[], BackendDiagnostics>("get_backend_diagnostics");
 
 const supportStates = new Map<string, BadgeState>();
 const gfnStates = new Map<string, GfnState>();
+const boosteroidStates = new Map<string, BoosteroidState>();
 const visibleAppIds = new Map<string, number>();
 const supportListeners = new Set<() => void>();
 const pendingAppIds = new Set<string>();
@@ -106,12 +119,19 @@ function publishSupportState(): void {
   const gfnChecked = visible.filter((id) => ["available", "not_available"].includes(gfnStates.get(id) ?? "")).length;
   const gfnAvailable = visible.filter((id) => gfnStates.get(id) === "available").length;
   const gfnUnavailable = visible.filter((id) => gfnStates.get(id) === "unavailable").length;
+  const boosteroidChecked = visible.filter((id) => ["available", "maintenance", "not_available"].includes(boosteroidStates.get(id) ?? "")).length;
+  const boosteroidAvailable = visible.filter((id) => boosteroidStates.get(id) === "available").length;
+  const boosteroidMaintenance = visible.filter((id) => boosteroidStates.get(id) === "maintenance").length;
+  const boosteroidUnavailable = visible.filter((id) => boosteroidStates.get(id) === "unavailable").length;
   notifyTileStatus(
     "Látható játékok ellenőrzése: " + String(checked) + "/" + String(visible.length) +
     ". Teljes támogatás: " + String(full) + ". Részleges támogatás: " + String(partial) +
     (unavailable ? ". Kontrolleradat-hiba: " + String(unavailable) + "." : ".") +
     " GFN: " + String(gfnAvailable) + "/" + String(gfnChecked) +
-    (gfnUnavailable ? ". GFN-adathiba: " + String(gfnUnavailable) + "." : "."),
+    (gfnUnavailable ? ". GFN-adathiba: " + String(gfnUnavailable) + "." : ".") +
+    " Boosteroid: " + String(boosteroidAvailable) + "/" + String(boosteroidChecked) +
+    (boosteroidMaintenance ? ". Karbantartás: " + String(boosteroidMaintenance) + "." : ".") +
+    (boosteroidUnavailable ? " Boosteroid-adathiba: " + String(boosteroidUnavailable) + "." : ""),
   );
 }
 
@@ -121,9 +141,10 @@ async function flushSupportBatch(): Promise<void> {
   pendingAppIds.clear();
   if (!appIds.length) return;
 
-  const [supportResult, gfnResult] = await Promise.allSettled([
+  const [supportResult, gfnResult, boosteroidResult] = await Promise.allSettled([
     withBackendTimeout(getControllerSupport(appIds)),
-    withBackendTimeout(getGfnAvailability(appIds), GFN_BACKEND_TIMEOUT_MS),
+    withBackendTimeout(getGfnAvailability(appIds), CATALOG_BACKEND_TIMEOUT_MS),
+    withBackendTimeout(getBoosteroidAvailability(appIds), CATALOG_BACKEND_TIMEOUT_MS),
   ]);
 
   if (supportResult.status === "fulfilled") {
@@ -156,6 +177,22 @@ async function flushSupportBatch(): Promise<void> {
     const error = gfnResult.status === "rejected" ? gfnResult.reason : gfnResult.value.error;
     console.warn("ControllerXbox GeForce NOW lookup failed", error);
   }
+
+  if (boosteroidResult.status === "fulfilled" && boosteroidResult.value.success) {
+    const response = boosteroidResult.value;
+    for (const appId of appIds) {
+      const value = response.availability?.[appId];
+      const maintenance = response.maintenance?.[appId];
+      if (value === true && maintenance === true) boosteroidStates.set(appId, "maintenance");
+      else if (value === true) boosteroidStates.set(appId, "available");
+      else if (value === false) boosteroidStates.set(appId, "not_available");
+      else boosteroidStates.set(appId, "unavailable");
+    }
+  } else {
+    for (const appId of appIds) boosteroidStates.set(appId, "unavailable");
+    const error = boosteroidResult.status === "rejected" ? boosteroidResult.reason : boosteroidResult.value.error;
+    console.warn("ControllerXbox Boosteroid lookup failed", error);
+  }
   publishSupportState();
   notifyCacheChanged();
 }
@@ -163,9 +200,11 @@ async function flushSupportBatch(): Promise<void> {
 function queueSupportLookup(appId: string): void {
   const controllerReady = Boolean(supportStates.get(appId) && supportStates.get(appId) !== "unavailable");
   const gfnReady = Boolean(gfnStates.get(appId) && gfnStates.get(appId) !== "unavailable");
-  if (controllerReady && gfnReady) return;
+  const boosteroidReady = Boolean(boosteroidStates.get(appId) && boosteroidStates.get(appId) !== "unavailable");
+  if (controllerReady && gfnReady && boosteroidReady) return;
   if (!controllerReady) supportStates.set(appId, "loading");
   if (!gfnReady) gfnStates.set(appId, "loading");
+  if (!boosteroidReady) boosteroidStates.set(appId, "loading");
   pendingAppIds.add(appId);
   if (batchTimer === undefined) batchTimer = window.setTimeout(() => void flushSupportBatch(), 120);
 }
@@ -173,6 +212,7 @@ function queueSupportLookup(appId: string): void {
 function resetVisibleSupport(): void {
   supportStates.clear();
   gfnStates.clear();
+  boosteroidStates.clear();
   pendingAppIds.clear();
   for (const appId of visibleAppIds.keys()) queueSupportLookup(appId);
   publishSupportState();
@@ -289,16 +329,74 @@ function GfnBadge({ state }: { state: GfnState }) {
   >{badge.label}</span>;
 }
 
+function BoosteroidIcon() {
+  return <svg width="27" height="18" viewBox="0 0 49 31" aria-hidden="true">
+    <path
+      fill="currentColor"
+      d="M13.3259 3.30744C9.865 6.72998 9.549 12.1026 12.3773 15.8818L9.46609 18.7608C8.90018 19.3204 8.90018 20.2281 9.46609 20.7883C10.032 21.3479 10.9498 21.3479 11.5163 20.7883L14.4276 17.9093C18.2491 20.7063 23.682 20.3938 27.143 16.9713C30.9524 13.2041 30.9524 7.07459 27.143 3.30801C23.3336-.45857 17.1347-.459144 13.3259 3.30744ZM25.0927 14.9438C22.7653 17.2453 19.1705 17.5469 16.5103 15.8497L17.6595 14.7133C18.2254 14.1536 18.2254 13.246 17.6595 12.6858C17.0936 12.1261 16.1757 12.1261 15.6092 12.6858L14.46 13.8222C12.7438 11.1915 13.0488 7.63651 15.3762 5.33493C18.0549 2.68588 22.414 2.68588 25.0927 5.33493C27.7715 7.98398 27.7715 12.2947 25.0927 14.9438ZM16.2841 21.6272C16.85 22.1868 16.85 23.0945 16.2841 23.6547L10.1416 29.7291C9.57567 30.2887 8.65782 30.2887 8.09134 29.7291C7.52544 29.1695 7.52544 28.2618 8.09134 27.7016L14.2345 21.6272C14.8004 21.0675 15.7182 21.0675 16.2841 21.6272ZM.424426 22.1472C-.141475 21.5876-.141475 20.6799.424426 20.1197L6.56758 14.0447C7.13348 13.4851 8.05133 13.4851 8.61782 14.0447C9.18372 14.6043 9.18372 15.512 8.61782 16.0722L2.47466 22.1472C1.90818 22.7074.990907 22.7074.424426 22.1472Z"
+    />
+  </svg>;
+}
+
+function BoosteroidBadge({ state }: { state: BoosteroidState }) {
+  const appearance: Record<BoosteroidState, { background: string; color: string; title: string }> = {
+    available: {
+      background: "rgba(6,9,18,.9)",
+      color: "#00a3ff",
+      title: "A játék elérhető a Boosteroid kínálatában",
+    },
+    maintenance: {
+      background: "rgba(6,9,18,.9)",
+      color: "#f59e0b",
+      title: "A játék elérhető a Boosteroiden, de jelenleg karbantartás alatt áll",
+    },
+    not_available: {
+      background: "rgba(6,9,18,.9)",
+      color: "#77808a",
+      title: "A játék nem található a Boosteroid kínálatában",
+    },
+    unavailable: {
+      background: "rgba(6,9,18,.9)",
+      color: "#f59e0b",
+      title: "A Boosteroid katalógus nem érhető el",
+    },
+    loading: {
+      background: "rgba(6,9,18,.9)",
+      color: "#5f6b78",
+      title: "A Boosteroid katalógus ellenőrzése folyamatban van",
+    },
+  };
+  const badge = appearance[state];
+  return <span
+    title={badge.title}
+    style={{
+      display: "inline-flex",
+      alignItems: "center",
+      justifyContent: "center",
+      width: "34px",
+      height: "24px",
+      padding: "0 3px",
+      borderRadius: "5px",
+      background: badge.background,
+      color: badge.color,
+      boxShadow: "0 1px 5px rgba(0,0,0,.85)",
+      pointerEvents: "none",
+    }}
+  ><BoosteroidIcon /></span>;
+}
+
 function XboxTileBadge({ appId }: { appId: number }) {
   const appIdText = String(appId);
   const [state, setState] = useState<BadgeState>(() => supportStates.get(appIdText) ?? "loading");
   const [gfnState, setGfnState] = useState<GfnState>(() => gfnStates.get(appIdText) ?? "loading");
+  const [boosteroidState, setBoosteroidState] = useState<BoosteroidState>(() => boosteroidStates.get(appIdText) ?? "loading");
 
   useEffect(() => {
     visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
     const listener = () => {
       setState(supportStates.get(appIdText) ?? "loading");
       setGfnState(gfnStates.get(appIdText) ?? "loading");
+      setBoosteroidState(boosteroidStates.get(appIdText) ?? "loading");
     };
     supportListeners.add(listener);
     queueSupportLookup(appIdText);
@@ -324,6 +422,7 @@ function XboxTileBadge({ appId }: { appId: number }) {
   }}>
     <ControllerBadge state={state} appId={appId} />
     <GfnBadge state={gfnState} />
+    <BoosteroidBadge state={boosteroidState} />
   </span>;
 }
 
@@ -454,6 +553,7 @@ function patchLibraryTiles(): () => void {
       supportListeners.clear();
       supportStates.clear();
       gfnStates.clear();
+      boosteroidStates.clear();
       visibleAppIds.clear();
       pendingAppIds.clear();
       if (batchTimer !== undefined) window.clearTimeout(batchTimer);
@@ -502,7 +602,8 @@ function Content() {
       const response = await withBackendTimeout(clearCache());
       toaster.toast({
         title: "Xbox Controller Check",
-        body: String(response.removed) + " kontrollerbejegyzés és " + String(response.gfn_removed ?? 0) + " GFN-AppID törölve.",
+        body: String(response.removed) + " kontrollerbejegyzés, " + String(response.gfn_removed ?? 0) +
+          " GFN-AppID és " + String(response.boosteroid_removed ?? 0) + " Boosteroid-AppID törölve.",
       });
       resetVisibleSupport();
       notifyCacheChanged();
@@ -536,9 +637,11 @@ function Content() {
   return <PanelSection title="Xbox Controller Check">
     <PanelSectionRow><div>A könyvtári bélyegképek jelölése: teli kontroller = teljes támogatás; félig kitöltött kontroller = részleges támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat.</div></PanelSectionRow>
     <PanelSectionRow><div>GeForce NOW: zöld GFN = játszható; szürke GFN = nincs a katalógusban; narancssárga GFN? = a katalógus nem érhető el.</div></PanelSectionRow>
+    <PanelSectionRow><div>Boosteroid: kék logó = elérhető; sárga logó = karbantartás alatt; szürke logó = nincs a katalógusban; narancssárga logó = a katalógus nem érhető el.</div></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..."}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? "GFN-katalógus: " + String(stats.gfn_catalog_entries ?? 0) + " Steam AppID; " + (stats.gfn_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A GFN-katalógus állapotának betöltése folyamatban..."}</div></PanelSectionRow>
+    <PanelSectionRow><div>{stats ? "Boosteroid-katalógus: " + String(stats.boosteroid_catalog_entries ?? 0) + " Steam AppID; " + (stats.boosteroid_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A Boosteroid-katalógus állapotának betöltése folyamatban..."}</div></PanelSectionRow>
     <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hibanapló: {diagnosticLog}</div></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={backendCheck}>Látható játékok újraellenőrzése</ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={clearAndRefresh}>Cache törlése és újraellenőrzés</ButtonItem></PanelSectionRow>

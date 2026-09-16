@@ -5,7 +5,7 @@
   "flags": [],
   "publish": {
     "tags": ["controller", "library", "accessibility"],
-    "description": "Shows controller support and GeForce NOW availability badges on Steam library games.",
+    "description": "Shows controller support, GeForce NOW, and Boosteroid availability badges on Steam library games.",
     "image": ""
   }
 }

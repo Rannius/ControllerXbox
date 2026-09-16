@@ -1,7 +1,7 @@
 {
   "name": "controller-xbox",
-  "version": "1.0.28",
-  "description": "Decky Loader badges for controller support and GeForce NOW availability",
+  "version": "1.0.29",
+  "description": "Decky Loader badges for controller support, GeForce NOW, and Boosteroid availability",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

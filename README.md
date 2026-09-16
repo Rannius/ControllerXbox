@@ -1,12 +1,12 @@
 # Xbox Controller Check
 
-A Decky Loader plugin for Steam Deck. It marks visible Steam Library game tiles with their Steam controller-support level and GeForce NOW availability.
+A Decky Loader plugin for Steam Deck. It marks visible Steam Library game tiles with their Steam controller-support level, GeForce NOW availability, and Boosteroid availability.
 
 ## Privacy and cache
 
-Only app IDs present on the current visible screen are sent to Steam's public `appdetails` endpoint. The public NVIDIA GeForce NOW catalog is downloaded without sending the user's library or app IDs to NVIDIA; Steam AppID matching happens locally. No account, library, playtime, or other personal data is collected. Controller results are cached for 30 days and the GFN catalog is checked every 24 hours while remaining available as a stale fallback if a refresh fails. The Decky quick-access menu offers **Clear and refresh cache** at any time.
+Only app IDs present on the current visible screen are sent to Steam's public `appdetails` endpoint. The public NVIDIA GeForce NOW and Boosteroid catalogs are downloaded without sending the user's library or app IDs to either service; Steam AppID matching happens locally. No account, library, playtime, or other personal data is collected. Controller results are cached for 30 days and both cloud-gaming catalogs are checked every 24 hours while remaining available as stale fallbacks if a refresh fails. The Decky quick-access menu offers **Clear and refresh cache** at any time.
 
-The controller badge reflects Steam's partial or full controller-support category. The adjacent green or gray GFN badge reflects whether the Steam AppID exists in NVIDIA's public GeForce NOW catalog.
+The controller badge reflects Steam's partial or full controller-support category. The adjacent green or gray GFN badge reflects whether the Steam AppID exists in NVIDIA's public GeForce NOW catalog. The Boosteroid logo is blue when the Steam game is available, yellow during maintenance, and gray when it is absent from the public catalog.
 
 ## Development
 

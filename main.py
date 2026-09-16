@@ -1,8 +1,8 @@
 """Decky backend for ControllerXbox.
 
 Only Steam app IDs supplied by the visible-library frontend are checked. The
-Steam Store and NVIDIA GeForce NOW catalog endpoints are public and require no
-API key.
+Steam Store, NVIDIA GeForce NOW, and Boosteroid catalog endpoints are public
+and require no API key.
 """
 
 import asyncio
@@ -31,6 +31,8 @@ CACHE_SCHEMA_VERSION = 5
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
 GFN_CACHE_TTL_SECONDS = 24 * 60 * 60
 GFN_URL = "https://api-prod.nvidia.com/services/gfngames/v1/gameList"
+BOOSTEROID_CACHE_TTL_SECONDS = 24 * 60 * 60
+BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 
 
 class Plugin:
@@ -39,6 +41,10 @@ class Plugin:
         self._gfn_app_ids: Set[str] = set()
         self._gfn_checked_at = 0.0
         self._gfn_last_error = ""
+        self._boosteroid_app_ids: Set[str] = set()
+        self._boosteroid_maintenance_app_ids: Set[str] = set()
+        self._boosteroid_checked_at = 0.0
+        self._boosteroid_last_error = ""
         # Recent Decky versions expose the settings directory as
         # ``decky_SETTINGS_DIR``.  Keep the older name as a fallback so a
         # manually installed plugin works on both Loader generations.
@@ -47,17 +53,21 @@ class Plugin:
             raise RuntimeError("Decky settings directory is unavailable")
         self._cache_path = Path(settings_directory) / "controller-support-cache.json"
         self._gfn_cache_path = Path(settings_directory) / "geforce-now-catalog-cache.json"
+        self._boosteroid_cache_path = Path(settings_directory) / "boosteroid-catalog-cache.json"
         self._lock = asyncio.Lock()
         self._gfn_lock = asyncio.Lock()
+        self._boosteroid_lock = asyncio.Lock()
 
     async def _main(self) -> None:
         await self._load_cache()
         await self._load_gfn_cache()
+        await self._load_boosteroid_cache()
         decky.logger.info("ControllerXbox backend loaded")
 
     async def _unload(self) -> None:
         await self._save_cache()
         await self._save_gfn_cache()
+        await self._save_boosteroid_cache()
 
     async def _load_cache(self) -> None:
         try:
@@ -98,6 +108,46 @@ class Plugin:
                 separators=(",", ":"),
             )
             await self._run_blocking(self._write_file_atomically, self._gfn_cache_path, "gfn-cache-", payload)
+
+    async def _load_boosteroid_cache(self) -> None:
+        try:
+            contents = await self._run_blocking(lambda: self._boosteroid_cache_path.read_text(encoding="utf-8"))
+            parsed = json.loads(contents)
+            checked_at = parsed.get("checked_at") if isinstance(parsed, dict) else None
+            app_ids = parsed.get("steam_app_ids") if isinstance(parsed, dict) else None
+            maintenance_ids = parsed.get("maintenance_app_ids") if isinstance(parsed, dict) else None
+            if isinstance(checked_at, (int, float)) and isinstance(app_ids, list):
+                self._boosteroid_checked_at = float(checked_at)
+                self._boosteroid_app_ids = {str(app_id) for app_id in app_ids if str(app_id).isdigit()}
+                if isinstance(maintenance_ids, list):
+                    self._boosteroid_maintenance_app_ids = {
+                        str(app_id)
+                        for app_id in maintenance_ids
+                        if str(app_id).isdigit() and str(app_id) in self._boosteroid_app_ids
+                    }
+        except FileNotFoundError:
+            pass
+        except (OSError, json.JSONDecodeError) as error:
+            decky.logger.warning("Ignoring invalid Boosteroid cache: %s", error)
+
+    async def _save_boosteroid_cache(self) -> None:
+        async with self._boosteroid_lock:
+            if not self._boosteroid_checked_at or not self._boosteroid_app_ids:
+                return
+            payload = json.dumps(
+                {
+                    "checked_at": self._boosteroid_checked_at,
+                    "steam_app_ids": sorted(self._boosteroid_app_ids),
+                    "maintenance_app_ids": sorted(self._boosteroid_maintenance_app_ids),
+                },
+                separators=(",", ":"),
+            )
+            await self._run_blocking(
+                self._write_file_atomically,
+                self._boosteroid_cache_path,
+                "boosteroid-cache-",
+                payload,
+            )
 
     async def _run_blocking(self, function: Any, *args: Any) -> Any:
         """Run blocking file and network operations on Python 3.8 and newer."""
@@ -262,6 +312,121 @@ class Plugin:
                 "cached_for_hours": 24,
             }
 
+    def _fetch_boosteroid_catalog(self) -> Any:
+        steam_app_ids: Set[str] = set()
+        active_app_ids: Set[str] = set()
+        maintenance_app_ids: Set[str] = set()
+        last_page: Optional[int] = None
+        for page in range(1, 51):
+            request = urllib.request.Request(
+                BOOSTEROID_URL.format(page=page),
+                headers={
+                    "Accept": "application/json",
+                    "Origin": "https://boosteroid.com",
+                    "Referer": "https://boosteroid.com/games/",
+                    "User-Agent": "ControllerXbox Decky Plugin/1.0",
+                },
+            )
+            with self._open_request(request, timeout=20) as response:
+                result = json.load(response)
+            items = result.get("data") if isinstance(result, dict) else None
+            meta = result.get("meta") if isinstance(result, dict) else None
+            if not isinstance(items, list) or not isinstance(meta, dict):
+                raise ValueError("Invalid Boosteroid catalog response")
+            current_page = meta.get("current_page")
+            reported_last_page = meta.get("last_page")
+            if not isinstance(current_page, int) or current_page != page:
+                raise ValueError("Boosteroid catalog page number is invalid")
+            if not isinstance(reported_last_page, int) or reported_last_page < 1 or reported_last_page > 50:
+                raise ValueError("Boosteroid catalog page count is invalid")
+            if last_page is None:
+                last_page = reported_last_page
+            elif reported_last_page != last_page:
+                raise ValueError("Boosteroid catalog page count changed during refresh")
+            if page < reported_last_page and not items:
+                raise ValueError("Boosteroid catalog page is empty")
+            for game in items:
+                if not isinstance(game, dict):
+                    continue
+                stores = game.get("stores")
+                steam_url = stores.get("steam") if isinstance(stores, dict) else None
+                match = re.search(r"/app/(\d+)", str(steam_url or ""))
+                if not match:
+                    continue
+                app_id = match.group(1)
+                steam_app_ids.add(app_id)
+                if game.get("maintenance"):
+                    maintenance_app_ids.add(app_id)
+                else:
+                    active_app_ids.add(app_id)
+            if page >= reported_last_page:
+                break
+        if last_page is None or page < last_page:
+            raise ValueError("Boosteroid catalog exceeded the page limit")
+        if not steam_app_ids:
+            raise ValueError("Boosteroid catalog contained no Steam games")
+        return steam_app_ids, maintenance_app_ids - active_app_ids
+
+    async def _ensure_boosteroid_catalog(self) -> bool:
+        async with self._boosteroid_lock:
+            now = time.time()
+            if (
+                self._boosteroid_app_ids
+                and now - self._boosteroid_checked_at < BOOSTEROID_CACHE_TTL_SECONDS
+            ):
+                return True
+            try:
+                fetched_app_ids, fetched_maintenance_ids = await self._run_blocking(
+                    self._fetch_boosteroid_catalog
+                )
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
+                self._boosteroid_last_error = str(error)
+                decky.logger.warning("Boosteroid catalog refresh failed: %s", error)
+                return bool(self._boosteroid_app_ids)
+            self._boosteroid_app_ids = fetched_app_ids
+            self._boosteroid_maintenance_app_ids = fetched_maintenance_ids
+            self._boosteroid_checked_at = now
+            self._boosteroid_last_error = ""
+            payload = json.dumps(
+                {
+                    "checked_at": self._boosteroid_checked_at,
+                    "steam_app_ids": sorted(self._boosteroid_app_ids),
+                    "maintenance_app_ids": sorted(self._boosteroid_maintenance_app_ids),
+                },
+                separators=(",", ":"),
+            )
+            await self._run_blocking(
+                self._write_file_atomically,
+                self._boosteroid_cache_path,
+                "boosteroid-cache-",
+                payload,
+            )
+            return True
+
+    async def get_boosteroid_availability(self, app_ids: Any) -> Dict[str, Any]:
+        requested = self._valid_app_ids(app_ids)
+        available = await self._ensure_boosteroid_catalog()
+        async with self._boosteroid_lock:
+            if not available:
+                return {
+                    "success": False,
+                    "availability": {},
+                    "maintenance": {},
+                    "unavailable": requested,
+                    "catalog_entries": 0,
+                    "error": self._boosteroid_last_error or "Boosteroid catalog unavailable",
+                }
+            return {
+                "success": True,
+                "availability": {app_id: app_id in self._boosteroid_app_ids for app_id in requested},
+                "maintenance": {
+                    app_id: app_id in self._boosteroid_maintenance_app_ids for app_id in requested
+                },
+                "unavailable": [],
+                "catalog_entries": len(self._boosteroid_app_ids),
+                "cached_for_hours": 24,
+            }
+
     async def get_controller_support(self, app_ids: Any) -> Dict[str, Any]:
         """Return official partial or full controller support for the supplied app IDs."""
         requested = self._valid_app_ids(app_ids)
@@ -321,6 +486,12 @@ class Plugin:
         except FileNotFoundError:
             pass
 
+    def _delete_boosteroid_cache_file(self) -> None:
+        try:
+            self._boosteroid_cache_path.unlink()
+        except FileNotFoundError:
+            pass
+
     async def clear_cache(self) -> Dict[str, Any]:
         async with self._lock:
             removed = len(self._cache)
@@ -338,7 +509,22 @@ class Plugin:
                 await self._run_blocking(self._delete_gfn_cache_file)
             except OSError as error:
                 decky.logger.warning("Could not remove GeForce NOW cache: %s", error)
-        return {"success": True, "removed": removed, "gfn_removed": gfn_removed}
+        async with self._boosteroid_lock:
+            boosteroid_removed = len(self._boosteroid_app_ids)
+            self._boosteroid_app_ids = set()
+            self._boosteroid_maintenance_app_ids = set()
+            self._boosteroid_checked_at = 0.0
+            self._boosteroid_last_error = ""
+            try:
+                await self._run_blocking(self._delete_boosteroid_cache_file)
+            except OSError as error:
+                decky.logger.warning("Could not remove Boosteroid cache: %s", error)
+        return {
+            "success": True,
+            "removed": removed,
+            "gfn_removed": gfn_removed,
+            "boosteroid_removed": boosteroid_removed,
+        }
 
     async def get_cache_stats(self) -> Dict[str, Any]:
         now = time.time()
@@ -346,6 +532,11 @@ class Plugin:
             fresh = sum(1 for entry in self._cache.values() if isinstance(entry, dict) and self._is_fresh(entry, now))
         async with self._gfn_lock:
             gfn_fresh = bool(self._gfn_app_ids and now - self._gfn_checked_at < GFN_CACHE_TTL_SECONDS)
+        async with self._boosteroid_lock:
+            boosteroid_fresh = bool(
+                self._boosteroid_app_ids
+                and now - self._boosteroid_checked_at < BOOSTEROID_CACHE_TTL_SECONDS
+            )
             return {
                 "success": True,
                 "entries": len(self._cache),
@@ -353,6 +544,8 @@ class Plugin:
                 "ttl_days": 30,
                 "gfn_catalog_entries": len(self._gfn_app_ids),
                 "gfn_cache_fresh": gfn_fresh,
+                "boosteroid_catalog_entries": len(self._boosteroid_app_ids),
+                "boosteroid_cache_fresh": boosteroid_fresh,
             }
 
     async def get_backend_diagnostics(self) -> Dict[str, Any]:

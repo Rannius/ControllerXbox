@@ -19,17 +19,19 @@ const callable = api.callable;
 const toaster = api.toaster;
 
 const BACKEND_TIMEOUT_MS = 15_000;
-const GFN_BACKEND_TIMEOUT_MS = 60_000;
+const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
 const TILE_STATUS_EVENT = "controller-xbox-tile-status";
 const BADGE_KEY = "controller-xbox-tile-badge";
 const getControllerSupport = callable("get_controller_support");
 const getGfnAvailability = callable("get_gfn_availability");
+const getBoosteroidAvailability = callable("get_boosteroid_availability");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
 const getBackendDiagnostics = callable("get_backend_diagnostics");
 const supportStates = new Map();
 const gfnStates = new Map();
+const boosteroidStates = new Map();
 const visibleAppIds = new Map();
 const supportListeners = new Set();
 const pendingAppIds = new Set();
@@ -75,11 +77,18 @@ function publishSupportState() {
     const gfnChecked = visible.filter((id) => ["available", "not_available"].includes(gfnStates.get(id) ?? "")).length;
     const gfnAvailable = visible.filter((id) => gfnStates.get(id) === "available").length;
     const gfnUnavailable = visible.filter((id) => gfnStates.get(id) === "unavailable").length;
+    const boosteroidChecked = visible.filter((id) => ["available", "maintenance", "not_available"].includes(boosteroidStates.get(id) ?? "")).length;
+    const boosteroidAvailable = visible.filter((id) => boosteroidStates.get(id) === "available").length;
+    const boosteroidMaintenance = visible.filter((id) => boosteroidStates.get(id) === "maintenance").length;
+    const boosteroidUnavailable = visible.filter((id) => boosteroidStates.get(id) === "unavailable").length;
     notifyTileStatus("Látható játékok ellenőrzése: " + String(checked) + "/" + String(visible.length) +
         ". Teljes támogatás: " + String(full) + ". Részleges támogatás: " + String(partial) +
         (unavailable ? ". Kontrolleradat-hiba: " + String(unavailable) + "." : ".") +
         " GFN: " + String(gfnAvailable) + "/" + String(gfnChecked) +
-        (gfnUnavailable ? ". GFN-adathiba: " + String(gfnUnavailable) + "." : "."));
+        (gfnUnavailable ? ". GFN-adathiba: " + String(gfnUnavailable) + "." : ".") +
+        " Boosteroid: " + String(boosteroidAvailable) + "/" + String(boosteroidChecked) +
+        (boosteroidMaintenance ? ". Karbantartás: " + String(boosteroidMaintenance) + "." : ".") +
+        (boosteroidUnavailable ? " Boosteroid-adathiba: " + String(boosteroidUnavailable) + "." : ""));
 }
 async function flushSupportBatch() {
     batchTimer = undefined;
@@ -87,9 +96,10 @@ async function flushSupportBatch() {
     pendingAppIds.clear();
     if (!appIds.length)
         return;
-    const [supportResult, gfnResult] = await Promise.allSettled([
+    const [supportResult, gfnResult, boosteroidResult] = await Promise.allSettled([
         withBackendTimeout(getControllerSupport(appIds)),
-        withBackendTimeout(getGfnAvailability(appIds), GFN_BACKEND_TIMEOUT_MS),
+        withBackendTimeout(getGfnAvailability(appIds), CATALOG_BACKEND_TIMEOUT_MS),
+        withBackendTimeout(getBoosteroidAvailability(appIds), CATALOG_BACKEND_TIMEOUT_MS),
     ]);
     if (supportResult.status === "fulfilled") {
         const response = supportResult.value;
@@ -133,18 +143,42 @@ async function flushSupportBatch() {
         const error = gfnResult.status === "rejected" ? gfnResult.reason : gfnResult.value.error;
         console.warn("ControllerXbox GeForce NOW lookup failed", error);
     }
+    if (boosteroidResult.status === "fulfilled" && boosteroidResult.value.success) {
+        const response = boosteroidResult.value;
+        for (const appId of appIds) {
+            const value = response.availability?.[appId];
+            const maintenance = response.maintenance?.[appId];
+            if (value === true && maintenance === true)
+                boosteroidStates.set(appId, "maintenance");
+            else if (value === true)
+                boosteroidStates.set(appId, "available");
+            else if (value === false)
+                boosteroidStates.set(appId, "not_available");
+            else
+                boosteroidStates.set(appId, "unavailable");
+        }
+    }
+    else {
+        for (const appId of appIds)
+            boosteroidStates.set(appId, "unavailable");
+        const error = boosteroidResult.status === "rejected" ? boosteroidResult.reason : boosteroidResult.value.error;
+        console.warn("ControllerXbox Boosteroid lookup failed", error);
+    }
     publishSupportState();
     notifyCacheChanged();
 }
 function queueSupportLookup(appId) {
     const controllerReady = Boolean(supportStates.get(appId) && supportStates.get(appId) !== "unavailable");
     const gfnReady = Boolean(gfnStates.get(appId) && gfnStates.get(appId) !== "unavailable");
-    if (controllerReady && gfnReady)
+    const boosteroidReady = Boolean(boosteroidStates.get(appId) && boosteroidStates.get(appId) !== "unavailable");
+    if (controllerReady && gfnReady && boosteroidReady)
         return;
     if (!controllerReady)
         supportStates.set(appId, "loading");
     if (!gfnReady)
         gfnStates.set(appId, "loading");
+    if (!boosteroidReady)
+        boosteroidStates.set(appId, "loading");
     pendingAppIds.add(appId);
     if (batchTimer === undefined)
         batchTimer = window.setTimeout(() => void flushSupportBatch(), 120);
@@ -152,6 +186,7 @@ function queueSupportLookup(appId) {
 function resetVisibleSupport() {
     supportStates.clear();
     gfnStates.clear();
+    boosteroidStates.clear();
     pendingAppIds.clear();
     for (const appId of visibleAppIds.keys())
         queueSupportLookup(appId);
@@ -252,15 +287,63 @@ function GfnBadge({ state }) {
             pointerEvents: "none",
         }, children: badge.label });
 }
+function BoosteroidIcon() {
+    return SP_JSX.jsx("svg", { width: "27", height: "18", viewBox: "0 0 49 31", "aria-hidden": "true", children: SP_JSX.jsx("path", { fill: "currentColor", d: "M13.3259 3.30744C9.865 6.72998 9.549 12.1026 12.3773 15.8818L9.46609 18.7608C8.90018 19.3204 8.90018 20.2281 9.46609 20.7883C10.032 21.3479 10.9498 21.3479 11.5163 20.7883L14.4276 17.9093C18.2491 20.7063 23.682 20.3938 27.143 16.9713C30.9524 13.2041 30.9524 7.07459 27.143 3.30801C23.3336-.45857 17.1347-.459144 13.3259 3.30744ZM25.0927 14.9438C22.7653 17.2453 19.1705 17.5469 16.5103 15.8497L17.6595 14.7133C18.2254 14.1536 18.2254 13.246 17.6595 12.6858C17.0936 12.1261 16.1757 12.1261 15.6092 12.6858L14.46 13.8222C12.7438 11.1915 13.0488 7.63651 15.3762 5.33493C18.0549 2.68588 22.414 2.68588 25.0927 5.33493C27.7715 7.98398 27.7715 12.2947 25.0927 14.9438ZM16.2841 21.6272C16.85 22.1868 16.85 23.0945 16.2841 23.6547L10.1416 29.7291C9.57567 30.2887 8.65782 30.2887 8.09134 29.7291C7.52544 29.1695 7.52544 28.2618 8.09134 27.7016L14.2345 21.6272C14.8004 21.0675 15.7182 21.0675 16.2841 21.6272ZM.424426 22.1472C-.141475 21.5876-.141475 20.6799.424426 20.1197L6.56758 14.0447C7.13348 13.4851 8.05133 13.4851 8.61782 14.0447C9.18372 14.6043 9.18372 15.512 8.61782 16.0722L2.47466 22.1472C1.90818 22.7074.990907 22.7074.424426 22.1472Z" }) });
+}
+function BoosteroidBadge({ state }) {
+    const appearance = {
+        available: {
+            background: "rgba(6,9,18,.9)",
+            color: "#00a3ff",
+            title: "A játék elérhető a Boosteroid kínálatában",
+        },
+        maintenance: {
+            background: "rgba(6,9,18,.9)",
+            color: "#f59e0b",
+            title: "A játék elérhető a Boosteroiden, de jelenleg karbantartás alatt áll",
+        },
+        not_available: {
+            background: "rgba(6,9,18,.9)",
+            color: "#77808a",
+            title: "A játék nem található a Boosteroid kínálatában",
+        },
+        unavailable: {
+            background: "rgba(6,9,18,.9)",
+            color: "#f59e0b",
+            title: "A Boosteroid katalógus nem érhető el",
+        },
+        loading: {
+            background: "rgba(6,9,18,.9)",
+            color: "#5f6b78",
+            title: "A Boosteroid katalógus ellenőrzése folyamatban van",
+        },
+    };
+    const badge = appearance[state];
+    return SP_JSX.jsx("span", { title: badge.title, style: {
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: "34px",
+            height: "24px",
+            padding: "0 3px",
+            borderRadius: "5px",
+            background: badge.background,
+            color: badge.color,
+            boxShadow: "0 1px 5px rgba(0,0,0,.85)",
+            pointerEvents: "none",
+        }, children: SP_JSX.jsx(BoosteroidIcon, {}) });
+}
 function XboxTileBadge({ appId }) {
     const appIdText = String(appId);
     const [state, setState] = SP_REACT.useState(() => supportStates.get(appIdText) ?? "loading");
     const [gfnState, setGfnState] = SP_REACT.useState(() => gfnStates.get(appIdText) ?? "loading");
+    const [boosteroidState, setBoosteroidState] = SP_REACT.useState(() => boosteroidStates.get(appIdText) ?? "loading");
     SP_REACT.useEffect(() => {
         visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
         const listener = () => {
             setState(supportStates.get(appIdText) ?? "loading");
             setGfnState(gfnStates.get(appIdText) ?? "loading");
+            setBoosteroidState(boosteroidStates.get(appIdText) ?? "loading");
         };
         supportListeners.add(listener);
         queueSupportLookup(appIdText);
@@ -284,7 +367,7 @@ function XboxTileBadge({ appId }) {
             alignItems: "center",
             gap: "4px",
             pointerEvents: "none",
-        }, children: [SP_JSX.jsx(ControllerBadge, { state: state, appId: appId }), SP_JSX.jsx(GfnBadge, { state: gfnState })] });
+        }, children: [SP_JSX.jsx(ControllerBadge, { state: state, appId: appId }), SP_JSX.jsx(GfnBadge, { state: gfnState }), SP_JSX.jsx(BoosteroidBadge, { state: boosteroidState })] });
 }
 function appendBadgeToTile(result, appId) {
     const row = DFL.findInReactTree(result, (node) => {
@@ -464,6 +547,7 @@ function patchLibraryTiles() {
             supportListeners.clear();
             supportStates.clear();
             gfnStates.clear();
+            boosteroidStates.clear();
             visibleAppIds.clear();
             pendingAppIds.clear();
             if (batchTimer !== undefined)
@@ -512,7 +596,8 @@ function Content() {
             const response = await withBackendTimeout(clearCache());
             toaster.toast({
                 title: "Xbox Controller Check",
-                body: String(response.removed) + " kontrollerbejegyzés és " + String(response.gfn_removed ?? 0) + " GFN-AppID törölve.",
+                body: String(response.removed) + " kontrollerbejegyzés, " + String(response.gfn_removed ?? 0) +
+                    " GFN-AppID és " + String(response.boosteroid_removed ?? 0) + " Boosteroid-AppID törölve.",
             });
             resetVisibleSupport();
             notifyCacheChanged();
@@ -545,7 +630,7 @@ function Content() {
             setWorking(false);
         }
     };
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00F6nyvt\u00E1ri b\u00E9lyegk\u00E9pek jel\u00F6l\u00E9se: teli kontroller = teljes t\u00E1mogat\u00E1s; f\u00E9lig kit\u00F6lt\u00F6tt kontroller = r\u00E9szleges t\u00E1mogat\u00E1s; piros \u00D7 = nincs t\u00E1mogat\u00E1s; narancss\u00E1rga ? = nincs Steam-adat." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "GeForce NOW: z\u00F6ld GFN = j\u00E1tszhat\u00F3; sz\u00FCrke GFN = nincs a katal\u00F3gusban; narancss\u00E1rga GFN? = a katal\u00F3gus nem \u00E9rhet\u0151 el." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? "GFN-katalógus: " + String(stats.gfn_catalog_entries ?? 0) + " Steam AppID; " + (stats.gfn_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A GFN-katalógus állapotának betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00F6nyvt\u00E1ri b\u00E9lyegk\u00E9pek jel\u00F6l\u00E9se: teli kontroller = teljes t\u00E1mogat\u00E1s; f\u00E9lig kit\u00F6lt\u00F6tt kontroller = r\u00E9szleges t\u00E1mogat\u00E1s; piros \u00D7 = nincs t\u00E1mogat\u00E1s; narancss\u00E1rga ? = nincs Steam-adat." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "GeForce NOW: z\u00F6ld GFN = j\u00E1tszhat\u00F3; sz\u00FCrke GFN = nincs a katal\u00F3gusban; narancss\u00E1rga GFN? = a katal\u00F3gus nem \u00E9rhet\u0151 el." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Boosteroid: k\u00E9k log\u00F3 = el\u00E9rhet\u0151; s\u00E1rga log\u00F3 = karbantart\u00E1s alatt; sz\u00FCrke log\u00F3 = nincs a katal\u00F3gusban; narancss\u00E1rga log\u00F3 = a katal\u00F3gus nem \u00E9rhet\u0151 el." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? "GFN-katalógus: " + String(stats.gfn_catalog_entries ?? 0) + " Steam AppID; " + (stats.gfn_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A GFN-katalógus állapotának betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? "Boosteroid-katalógus: " + String(stats.boosteroid_catalog_entries ?? 0) + " Steam AppID; " + (stats.boosteroid_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A Boosteroid-katalógus állapotának betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
 }
 var index = DFL.definePlugin(() => {
     const removeTilePatch = patchLibraryTiles();
