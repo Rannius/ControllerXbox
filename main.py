@@ -79,6 +79,10 @@ class Plugin:
         self._settings: Dict[str, bool] = {
             "show_gfn_badges": True,
             "show_boosteroid_badges": True,
+            "notify_gfn_additions": True,
+            "notify_boosteroid_additions": True,
+            "notify_boosteroid_maintenance": True,
+            "notify_plugin_updates": True,
         }
         # Recent Decky versions expose the settings directory as
         # ``decky_SETTINGS_DIR``.  Keep the older name as a fallback so a
@@ -201,7 +205,14 @@ class Plugin:
             contents = await self._run_blocking(lambda: self._settings_path.read_text(encoding="utf-8"))
             parsed = json.loads(contents)
             if isinstance(parsed, dict) and parsed.get("schema_version") == SETTINGS_SCHEMA_VERSION:
-                for key in ("show_gfn_badges", "show_boosteroid_badges"):
+                for key in (
+                    "show_gfn_badges",
+                    "show_boosteroid_badges",
+                    "notify_gfn_additions",
+                    "notify_boosteroid_additions",
+                    "notify_boosteroid_maintenance",
+                    "notify_plugin_updates",
+                ):
                     if isinstance(parsed.get(key), bool):
                         self._settings[key] = parsed[key]
         except FileNotFoundError:
@@ -227,10 +238,34 @@ class Plugin:
     async def set_badge_visibility(self, show_gfn_badges: Any, show_boosteroid_badges: Any) -> Dict[str, Any]:
         if not isinstance(show_gfn_badges, bool) or not isinstance(show_boosteroid_badges, bool):
             return {"success": False, "error": "A jelvénybeállítás értéke érvénytelen."}
-        self._settings = {
+        self._settings.update({
             "show_gfn_badges": show_gfn_badges,
             "show_boosteroid_badges": show_boosteroid_badges,
-        }
+        })
+        await self._save_settings()
+        return {"success": True, **self._settings}
+
+    async def set_notification_preferences(
+        self,
+        notify_gfn_additions: Any,
+        notify_boosteroid_additions: Any,
+        notify_boosteroid_maintenance: Any,
+        notify_plugin_updates: Any,
+    ) -> Dict[str, Any]:
+        values = (
+            notify_gfn_additions,
+            notify_boosteroid_additions,
+            notify_boosteroid_maintenance,
+            notify_plugin_updates,
+        )
+        if not all(isinstance(value, bool) for value in values):
+            return {"success": False, "error": "Az értesítési beállítás értéke érvénytelen."}
+        self._settings.update({
+            "notify_gfn_additions": notify_gfn_additions,
+            "notify_boosteroid_additions": notify_boosteroid_additions,
+            "notify_boosteroid_maintenance": notify_boosteroid_maintenance,
+            "notify_plugin_updates": notify_plugin_updates,
+        })
         await self._save_settings()
         return {"success": True, **self._settings}
 
@@ -886,6 +921,7 @@ class Plugin:
                 isinstance(update, dict)
                 and update.get("success")
                 and update.get("has_update")
+                and self._settings.get("notify_plugin_updates", True)
                 and re.fullmatch(r"\d+\.\d+\.\d+", str(update.get("latest_version", "")))
                 and str(update.get("latest_version")) != last_notified_update
             ):
@@ -924,9 +960,15 @@ class Plugin:
         return {
             "success": True,
             "tracked_games": len(library_app_ids),
-            "gfn_added": gfn_added,
-            "boosteroid_added": boosteroid_added,
-            "boosteroid_maintenance": boosteroid_maintenance,
+            "gfn_added": gfn_added if self._settings.get("notify_gfn_additions", True) else 0,
+            "boosteroid_added": (
+                boosteroid_added if self._settings.get("notify_boosteroid_additions", True) else 0
+            ),
+            "boosteroid_maintenance": (
+                boosteroid_maintenance
+                if self._settings.get("notify_boosteroid_maintenance", True)
+                else 0
+            ),
             "update_version": update_version,
         }
 
