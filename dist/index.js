@@ -35,6 +35,9 @@ const getBoosteroidAvailability = callable("get_boosteroid_availability");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
 const getBackendDiagnostics = callable("get_backend_diagnostics");
+const checkForUpdate = callable("check_for_update");
+const applyUpdate = callable("apply_update");
+const restartPluginLoader = callable("restart_plugin_loader");
 const supportStates = new Map();
 const gfnStates = new Map();
 const boosteroidStates = new Map();
@@ -73,6 +76,37 @@ function errorMessage(error) {
         // Fall through to the string representation below.
     }
     return String(error);
+}
+async function reloadUpdatedPlugin() {
+    try {
+        const loader = window.DeckyPluginLoader;
+        if (typeof loader?.reloadPlugin === "function") {
+            await loader.reloadPlugin("ControllerXbox");
+            return "reloaded";
+        }
+    }
+    catch {
+        // Try the backend service restart below.
+    }
+    try {
+        const response = await withBackendTimeout(restartPluginLoader(), 5_000);
+        if (response.success)
+            return "restarting";
+    }
+    catch {
+        // Try a full Steam restart below.
+    }
+    try {
+        const steamSystem = window.SteamClient?.System;
+        if (typeof steamSystem?.RestartSteamClient === "function") {
+            steamSystem.RestartSteamClient();
+            return "restarting";
+        }
+    }
+    catch {
+        // The UI will provide a manual restart instruction.
+    }
+    return "failed";
 }
 function notifyCacheChanged() {
     window.dispatchEvent(new Event(CACHE_CHANGED_EVENT));
@@ -1076,6 +1110,10 @@ function Content() {
     const [status, setStatus] = SP_REACT.useState("A könyvtári csempék, játékoldalak és Steam Áruház jelölése indul. Nyisd meg vagy frissítsd a kívánt nézetet.");
     const [diagnosticLog, setDiagnosticLog] = SP_REACT.useState("Nincs rögzített hiba.");
     const [working, setWorking] = SP_REACT.useState(false);
+    const [updateInfo, setUpdateInfo] = SP_REACT.useState();
+    const [updateStatus, setUpdateStatus] = SP_REACT.useState("Frissítések keresése folyamatban...");
+    const [updateWorking, setUpdateWorking] = SP_REACT.useState(false);
+    const [installedUpdate, setInstalledUpdate] = SP_REACT.useState();
     const refreshStats = async () => {
         try {
             setStats(await withBackendTimeout(getCacheStats()));
@@ -1084,8 +1122,32 @@ function Content() {
             setDiagnosticLog("Cache állapot: " + errorMessage(error));
         }
     };
+    const refreshUpdateInfo = async (quiet = false) => {
+        setUpdateWorking(true);
+        if (!quiet)
+            setUpdateStatus("Frissítések keresése folyamatban...");
+        try {
+            const response = await withBackendTimeout(checkForUpdate(), 30_000);
+            setUpdateInfo(response);
+            if (!response.success)
+                throw new Error(response.error || "A frissítéskeresés sikertelen.");
+            if (response.has_update && response.latest_version) {
+                setUpdateStatus("Új stabil verzió érhető el: v" + response.latest_version + ".");
+            }
+            else {
+                setUpdateStatus("A plugin naprakész (v" + String(response.current_version ?? "ismeretlen") + ").");
+            }
+        }
+        catch (error) {
+            setUpdateStatus("Frissítéskeresési hiba: " + errorMessage(error));
+        }
+        finally {
+            setUpdateWorking(false);
+        }
+    };
     SP_REACT.useEffect(() => {
         void refreshStats();
+        void refreshUpdateInfo(true);
         const onCacheChanged = () => void refreshStats();
         const onTileStatus = (event) => {
             const detail = event.detail;
@@ -1140,7 +1202,48 @@ function Content() {
             setWorking(false);
         }
     };
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00F6nyvt\u00E1ri \u00E9s Steam \u00C1ruh\u00E1z-b\u00E9lyegk\u00E9pek jel\u00F6l\u00E9se: teli kontroller = teljes t\u00E1mogat\u00E1s; f\u00E9lig kit\u00F6lt\u00F6tt kontroller = r\u00E9szleges t\u00E1mogat\u00E1s; piros \u00D7 = nincs t\u00E1mogat\u00E1s; narancss\u00E1rga ? = nincs Steam-adat." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A K\u00F6nyvt\u00E1rban megnyitott j\u00E1t\u00E9k oldal\u00E1n a h\u00E1rom jelv\u00E9ny jobb fel\u00FCl, a ProtonDB-jelv\u00E9nnyel egy vonalban jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A megnyitott Steam \u00C1ruh\u00E1z-j\u00E1t\u00E9k oldal\u00E1n a h\u00E1rom jelv\u00E9ny jobb alul, a ProtonDB Store-jelv\u00E9nnyel egy vonalban jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "GeForce NOW: z\u00F6ld GFN = j\u00E1tszhat\u00F3; sz\u00FCrke GFN = nincs a katal\u00F3gusban; narancss\u00E1rga GFN? = a katal\u00F3gus nem \u00E9rhet\u0151 el." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Boosteroid: k\u00E9k log\u00F3 = el\u00E9rhet\u0151; s\u00E1rga log\u00F3 = karbantart\u00E1s alatt; sz\u00FCrke log\u00F3 = nincs a katal\u00F3gusban; narancss\u00E1rga log\u00F3 = a katal\u00F3gus nem \u00E9rhet\u0151 el." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? "GFN-katalógus: " + String(stats.gfn_catalog_entries ?? 0) + " Steam AppID; " + (stats.gfn_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A GFN-katalógus állapotának betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? "Boosteroid-katalógus: " + String(stats.boosteroid_catalog_entries ?? 0) + " Steam AppID; " + (stats.boosteroid_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A Boosteroid-katalógus állapotának betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) })] });
+    const installAvailableUpdate = async () => {
+        const version = updateInfo?.latest_version;
+        if (!updateInfo?.has_update || !version)
+            return;
+        setUpdateWorking(true);
+        setUpdateStatus("A v" + version + " frissítés letöltése, ellenőrzése és telepítése folyamatban...");
+        try {
+            const response = await withBackendTimeout(applyUpdate(version), 120_000);
+            if (!response.success)
+                throw new Error(response.error || "A frissítés telepítése sikertelen.");
+            setInstalledUpdate(response.version ?? version);
+            setUpdateStatus("A v" + String(response.version ?? version) + " telepítve. Töltsd újra a plugint az alábbi gombbal.");
+            toaster.toast({
+                title: "ControllerXbox frissítve",
+                body: "A v" + String(response.version ?? version) + " telepítve. A befejezéshez töltsd újra a plugint.",
+            });
+        }
+        catch (error) {
+            setUpdateStatus("Frissítési hiba: " + errorMessage(error));
+        }
+        finally {
+            setUpdateWorking(false);
+        }
+    };
+    const reloadAfterUpdate = async () => {
+        setUpdateWorking(true);
+        setUpdateStatus("A plugin újratöltése folyamatban...");
+        const result = await reloadUpdatedPlugin();
+        if (result === "failed") {
+            setUpdateStatus("Az automatikus újratöltés nem érhető el. Indítsd újra kézzel a Steamet.");
+            setUpdateWorking(false);
+        }
+        else {
+            toaster.toast({
+                title: "ControllerXbox",
+                body: result === "reloaded" ? "A plugin újratöltve." : "A pluginbetöltő újraindítása folyamatban...",
+            });
+        }
+    };
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Xbox Controller Check", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A k\u00F6nyvt\u00E1ri \u00E9s Steam \u00C1ruh\u00E1z-b\u00E9lyegk\u00E9pek jel\u00F6l\u00E9se: teli kontroller = teljes t\u00E1mogat\u00E1s; f\u00E9lig kit\u00F6lt\u00F6tt kontroller = r\u00E9szleges t\u00E1mogat\u00E1s; piros \u00D7 = nincs t\u00E1mogat\u00E1s; narancss\u00E1rga ? = nincs Steam-adat." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A K\u00F6nyvt\u00E1rban megnyitott j\u00E1t\u00E9k oldal\u00E1n a h\u00E1rom jelv\u00E9ny jobb fel\u00FCl, a ProtonDB-jelv\u00E9nnyel egy vonalban jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A megnyitott Steam \u00C1ruh\u00E1z-j\u00E1t\u00E9k oldal\u00E1n a h\u00E1rom jelv\u00E9ny jobb alul, a ProtonDB Store-jelv\u00E9nnyel egy vonalban jelenik meg." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "GeForce NOW: z\u00F6ld GFN = j\u00E1tszhat\u00F3; sz\u00FCrke GFN = nincs a katal\u00F3gusban; narancss\u00E1rga GFN? = a katal\u00F3gus nem \u00E9rhet\u0151 el." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Boosteroid: k\u00E9k log\u00F3 = el\u00E9rhet\u0151; s\u00E1rga log\u00F3 = karbantart\u00E1s alatt; sz\u00FCrke log\u00F3 = nincs a katal\u00F3gusban; narancss\u00E1rga log\u00F3 = a katal\u00F3gus nem \u00E9rhet\u0151 el." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? "GFN-katalógus: " + String(stats.gfn_catalog_entries ?? 0) + " Steam AppID; " + (stats.gfn_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A GFN-katalógus állapotának betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats ? "Boosteroid-katalógus: " + String(stats.boosteroid_catalog_entries ?? 0) + " Steam AppID; " + (stats.boosteroid_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A Boosteroid-katalógus állapotának betöltése folyamatban..." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hibanapl\u00F3: ", diagnosticLog] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "L\u00E1that\u00F3 j\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se \u00E9s \u00FAjraellen\u0151rz\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "Pluginfriss\u00EDt\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: updateStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: updateWorking, onClick: () => void refreshUpdateInfo(), children: "Friss\u00EDt\u00E9sek keres\u00E9se" }) }), updateInfo?.has_update && updateInfo.latest_version && !installedUpdate ?
+                SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", disabled: updateWorking, onClick: installAvailableUpdate, children: ["Friss\u00EDt\u00E9s telep\u00EDt\u00E9se: v", updateInfo.latest_version] }) }) : null, installedUpdate ?
+                SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: updateWorking, onClick: reloadAfterUpdate, children: "Plugin \u00FAjrat\u00F6lt\u00E9se" }) }) : null] });
 }
 var index = DFL.definePlugin(() => {
     const removeTilePatch = patchLibraryTiles();

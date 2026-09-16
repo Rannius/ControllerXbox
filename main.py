@@ -11,13 +11,17 @@ import functools
 import json
 import os
 import re
+import shutil
 import ssl
+import subprocess
 import tempfile
+import threading
 import time
 import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -42,6 +46,22 @@ BOOSTEROID_STEAM_APP_ID_OVERRIDES = {
     303: "1172620",  # Sea of Thieves: 2025 Edition (delisted title variant)
     721: "1293830",  # Forza Horizon 4 (delisted from Steam search)
 }
+GITHUB_REPOSITORY = "Rannius/ControllerXbox"
+GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/{}/releases/latest".format(GITHUB_REPOSITORY)
+GITHUB_RELEASE_TAG_URL = "https://api.github.com/repos/{}/releases/tags/v{{}}".format(GITHUB_REPOSITORY)
+GITHUB_DOWNLOAD_PREFIX = "https://github.com/{}/releases/download/".format(GITHUB_REPOSITORY)
+UPDATE_MAX_BYTES = 15 * 1024 * 1024
+UPDATE_FILES = [
+    ".gitignore",
+    "LICENSE",
+    "README.md",
+    "main.py",
+    "package.json",
+    "plugin.json",
+    "pnpm-lock.yaml",
+    "dist/index.js",
+    "dist/index.js.map",
+]
 
 
 class Plugin:
@@ -66,6 +86,7 @@ class Plugin:
         self._lock = asyncio.Lock()
         self._gfn_lock = asyncio.Lock()
         self._boosteroid_lock = asyncio.Lock()
+        self._update_lock = asyncio.Lock()
 
     async def _main(self) -> None:
         await self._load_cache()
@@ -231,6 +252,239 @@ class Plugin:
             if not isinstance(error.reason, ssl.SSLCertVerificationError):
                 raise
             return urllib.request.urlopen(request, timeout=timeout, context=ssl._create_unverified_context())
+
+    @staticmethod
+    def _open_verified_request(request: urllib.request.Request, timeout: int) -> Any:
+        """Open executable update data with strict TLS verification."""
+        ssl_context = ssl.create_default_context(cafile=certifi.where()) if certifi else ssl.create_default_context()
+        return urllib.request.urlopen(request, timeout=timeout, context=ssl_context)
+
+    @staticmethod
+    def _version_tuple(version: str) -> Any:
+        match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", str(version).strip())
+        if not match:
+            return (0, 0, 0)
+        return tuple(int(part) for part in match.groups())
+
+    @staticmethod
+    def _current_plugin_version() -> str:
+        plugin_directory = getattr(decky, "DECKY_PLUGIN_DIR", "")
+        try:
+            package = json.loads((Path(plugin_directory) / "package.json").read_text(encoding="utf-8"))
+            version = str(package.get("version", "")).strip()
+            if re.fullmatch(r"\d+\.\d+\.\d+", version):
+                return version
+        except (OSError, ValueError, AttributeError):
+            pass
+        decky_version = str(getattr(decky, "DECKY_PLUGIN_VERSION", "")).lstrip("v")
+        return decky_version if re.fullmatch(r"\d+\.\d+\.\d+", decky_version) else "0.0.0"
+
+    def _fetch_release(self, version: Optional[str] = None) -> Dict[str, Any]:
+        url = GITHUB_LATEST_RELEASE_URL if version is None else GITHUB_RELEASE_TAG_URL.format(version)
+        request = urllib.request.Request(
+            url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "ControllerXbox Decky Plugin Updater",
+            },
+        )
+        with self._open_verified_request(request, timeout=20) as response:
+            release = json.load(response)
+        if not isinstance(release, dict):
+            raise ValueError("A GitHub hibás kiadási adatot küldött.")
+        latest = str(release.get("tag_name", "")).strip().lstrip("v")
+        if not re.fullmatch(r"\d+\.\d+\.\d+", latest):
+            raise ValueError("A legújabb kiadás verziószáma érvénytelen.")
+        expected_asset_name = "ControllerXbox-v{}.zip".format(latest)
+        assets = release.get("assets", [])
+        asset = next(
+            (
+                item
+                for item in assets
+                if isinstance(item, dict) and str(item.get("name", "")) == expected_asset_name
+            ),
+            None,
+        )
+        if not isinstance(asset, dict):
+            raise ValueError("A kiadáshoz nem található ellenőrzött Decky ZIP.")
+        download_url = str(asset.get("browser_download_url", ""))
+        expected_prefix = GITHUB_DOWNLOAD_PREFIX + "v{}/".format(latest)
+        if not download_url.startswith(expected_prefix) or not download_url.endswith("/" + expected_asset_name):
+            raise ValueError("A kiadási ZIP címe nem megbízható.")
+        return {
+            "version": latest,
+            "zip_url": download_url,
+            "asset_size": asset.get("size"),
+            "release_url": str(release.get("html_url", "")),
+            "release_notes": str(release.get("body", "") or ""),
+        }
+
+    def _check_for_update_blocking(self) -> Dict[str, Any]:
+        current = self._current_plugin_version()
+        try:
+            release = self._fetch_release()
+            latest = str(release["version"])
+            return {
+                "success": True,
+                "current_version": current,
+                "latest_version": latest,
+                "has_update": self._version_tuple(latest) > self._version_tuple(current),
+                "asset_size": release.get("asset_size"),
+                "release_url": release.get("release_url", ""),
+                "release_notes": release.get("release_notes", ""),
+            }
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
+            decky.logger.error("Update check failed: %s", error)
+            return {"success": False, "current_version": current, "error": str(error)}
+
+    @staticmethod
+    def _validate_update_archive(archive: zipfile.ZipFile, expected_version: str) -> None:
+        expected_names = ["ControllerXbox/" + relative for relative in UPDATE_FILES]
+        entries = archive.infolist()
+        if [entry.filename for entry in entries] != expected_names:
+            raise ValueError("A ZIP fájlszerkezete nem egyezik a ControllerXbox telepítőével.")
+        if sum(entry.file_size for entry in entries) > UPDATE_MAX_BYTES:
+            raise ValueError("A kicsomagolt frissítés túl nagy.")
+        for entry in entries:
+            if entry.is_dir() or entry.flag_bits != 0:
+                raise ValueError("A ZIP nem támogatott vagy titkosított bejegyzést tartalmaz.")
+            if (
+                entry.compress_type != zipfile.ZIP_DEFLATED
+                or entry.create_system != 0
+                or entry.extract_version != 20
+                or entry.external_attr != 0
+            ):
+                raise ValueError("A ZIP metaadatai nem egyeznek a biztonságos Decky-csomaggal.")
+            path = Path(entry.filename)
+            if path.is_absolute() or ".." in path.parts:
+                raise ValueError("A ZIP veszélyes útvonalat tartalmaz.")
+        invalid_entry = archive.testzip()
+        if invalid_entry:
+            raise ValueError("A ZIP sérült fájlt tartalmaz: {}".format(invalid_entry))
+        package = json.loads(archive.read("ControllerXbox/package.json").decode("utf-8"))
+        if str(package.get("version", "")) != expected_version:
+            raise ValueError("A ZIP verziószáma nem egyezik a kiadással.")
+        manifest = json.loads(archive.read("ControllerXbox/plugin.json").decode("utf-8"))
+        if str(manifest.get("name", "")) != "ControllerXbox":
+            raise ValueError("A ZIP nem a ControllerXbox plugin telepítője.")
+
+    def _apply_update_blocking(self, expected_version: str) -> Dict[str, Any]:
+        if not re.fullmatch(r"\d+\.\d+\.\d+", str(expected_version)):
+            return {"success": False, "error": "Érvénytelen verziószám."}
+        temporary_update_files: List[Path] = []
+        replaced_files: List[str] = []
+        try:
+            release = self._fetch_release(str(expected_version))
+            if str(release["version"]) != str(expected_version):
+                raise ValueError("A GitHub kiadás verziószáma megváltozott.")
+            plugin_directory_value = getattr(decky, "DECKY_PLUGIN_DIR", "")
+            plugin_directory = Path(plugin_directory_value).resolve()
+            if not plugin_directory.is_dir():
+                raise OSError("A Decky pluginmappa nem található.")
+            current_manifest = json.loads((plugin_directory / "plugin.json").read_text(encoding="utf-8"))
+            if str(current_manifest.get("name", "")) != "ControllerXbox":
+                raise ValueError("A Decky pluginmappa nem a ControllerXboxhoz tartozik.")
+
+            with tempfile.TemporaryDirectory(prefix="controllerxbox-update-") as temporary_directory_value:
+                temporary_directory = Path(temporary_directory_value)
+                archive_path = temporary_directory / "update.zip"
+                request = urllib.request.Request(
+                    str(release["zip_url"]),
+                    headers={"User-Agent": "ControllerXbox Decky Plugin Updater"},
+                )
+                with self._open_verified_request(request, timeout=120) as response, archive_path.open("wb") as stream:
+                    declared_size = int(response.headers.get("Content-Length", "0") or 0)
+                    if declared_size > UPDATE_MAX_BYTES:
+                        raise ValueError("A letöltendő frissítés túl nagy.")
+                    downloaded = 0
+                    while True:
+                        chunk = response.read(64 * 1024)
+                        if not chunk:
+                            break
+                        downloaded += len(chunk)
+                        if downloaded > UPDATE_MAX_BYTES:
+                            raise ValueError("A letöltött frissítés túllépte a méretkorlátot.")
+                        stream.write(chunk)
+
+                extracted_directory = temporary_directory / "extracted"
+                backup_directory = temporary_directory / "backup"
+                extracted_directory.mkdir()
+                backup_directory.mkdir()
+                with zipfile.ZipFile(str(archive_path), "r") as archive:
+                    self._validate_update_archive(archive, str(expected_version))
+                    archive.extractall(str(extracted_directory))
+                source_root = extracted_directory / "ControllerXbox"
+
+                for relative in UPDATE_FILES:
+                    source = source_root / relative
+                    destination = plugin_directory / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    backup = backup_directory / relative
+                    if destination.is_file():
+                        backup.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(destination), str(backup))
+                    staged = destination.with_name(destination.name + ".controllerxbox-update")
+                    if staged.exists():
+                        staged.unlink()
+                    shutil.copy2(str(source), str(staged))
+                    temporary_update_files.append(staged)
+
+                try:
+                    for relative in UPDATE_FILES:
+                        destination = plugin_directory / relative
+                        staged = destination.with_name(destination.name + ".controllerxbox-update")
+                        os.replace(str(staged), str(destination))
+                        replaced_files.append(relative)
+                except Exception:
+                    for relative in reversed(replaced_files):
+                        destination = plugin_directory / relative
+                        backup = backup_directory / relative
+                        if backup.is_file():
+                            restore = destination.with_name(destination.name + ".controllerxbox-restore")
+                            shutil.copy2(str(backup), str(restore))
+                            os.replace(str(restore), str(destination))
+                        elif destination.exists():
+                            destination.unlink()
+                    raise
+
+            decky.logger.info("ControllerXbox updated to %s", expected_version)
+            return {"success": True, "version": str(expected_version), "restart_required": True}
+        except Exception as error:
+            decky.logger.exception("Update installation failed: %s", error)
+            return {"success": False, "error": str(error)}
+        finally:
+            for temporary_path in temporary_update_files:
+                try:
+                    temporary_path.unlink()
+                except FileNotFoundError:
+                    pass
+
+    async def check_for_update(self) -> Dict[str, Any]:
+        return await self._run_blocking(self._check_for_update_blocking)
+
+    async def apply_update(self, expected_version: str) -> Dict[str, Any]:
+        async with self._update_lock:
+            return await self._run_blocking(self._apply_update_blocking, expected_version)
+
+    async def restart_plugin_loader(self) -> Dict[str, Any]:
+        """Reload the updated backend without requiring the user's sudo password."""
+        def restart_after_response() -> None:
+            time.sleep(1.5)
+            try:
+                subprocess.run(
+                    ["sudo", "-n", "/usr/bin/systemctl", "restart", "plugin_loader"],
+                    timeout=10,
+                    check=True,
+                )
+            except Exception as error:
+                decky.logger.error("Plugin loader restart failed: %s", error)
+
+        threading.Thread(
+            target=restart_after_response,
+            daemon=True,
+            name="controllerxbox-restart-loader",
+        ).start()
+        return {"success": True}
 
     def _fetch_gfn_catalog(self) -> Set[str]:
         steam_app_ids: Set[str] = set()

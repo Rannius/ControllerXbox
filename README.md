@@ -16,7 +16,9 @@ Install Node.js and pnpm, then run `pnpm install` and `pnpm build`. Copy the res
 
 Pushing a version tag such as `v1.0.2` starts the release workflow. It builds a fresh Decky-installable ZIP, creates a GitHub Release, and attaches that ZIP as the immutable backup for that version.
 
-Developer-mode ZIP installations do not receive automatic in-Decky updates. For the Decky **Update** button and managed automatic updates, the plugin must be accepted into the official Decky Plugin Store (the Decky plugin database). After it has been approved there, each published store version is offered by Decky as an update.
+Version 1.0.36 adds a built-in updater for developer-mode installations. Install 1.0.36 manually once; future stable versions can be checked and installed from the plugin's quick-access panel. The updater only accepts the exact ZIP asset belonging to an immutable release in this repository, validates its fixed file list and metadata, and never asks for a sudo password. After installation it reloads the plugin, restarts Decky's plugin loader, or offers a Steam restart as a compatibility fallback.
+
+Official Decky Plugin Store publication can still provide Decky's own managed update button later, but it is no longer required for updating a developer-mode installation.
 
 ## Decky ZIP packaging contract
 
@@ -24,4 +26,4 @@ Every installable ZIP must contain exactly one `ControllerXbox/` root directory.
 
 The Python backend targets Decky's Python 3.8 runtime. Do not use Python 3.9+ typing syntax or `asyncio.to_thread`; use `typing.Dict`/`Optional` and an executor-backed helper instead.
 
-`plugin.json` sets `"api_version": 1` so the modern `@decky/api` frontend can call the Python backend.
+`plugin.json` sets `"api_version": 1` so the modern `@decky/api` frontend can call the Python backend. Its `root` flag lets the updater replace only the validated files inside its own plugin directory and restart Decky's plugin loader without asking for the user's sudo password.

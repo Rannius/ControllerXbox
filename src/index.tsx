@@ -43,6 +43,22 @@ type CacheStats = {
   boosteroid_cache_fresh?: boolean;
 };
 type BackendDiagnostics = CacheStats & { success: boolean; backend: string; settings_directory: string };
+type UpdateCheckResponse = {
+  success: boolean;
+  current_version?: string;
+  latest_version?: string;
+  has_update?: boolean;
+  asset_size?: number;
+  release_url?: string;
+  release_notes?: string;
+  error?: string;
+};
+type UpdateApplyResponse = {
+  success: boolean;
+  version?: string;
+  restart_required?: boolean;
+  error?: string;
+};
 type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 type GfnState = "loading" | "available" | "not_available" | "unavailable";
 type BoosteroidState = "loading" | "available" | "maintenance" | "not_available" | "unavailable";
@@ -88,6 +104,9 @@ const getBoosteroidAvailability = callable<[appIds: string[]], BoosteroidRespons
 const clearCache = callable<[], { success: boolean; removed: number; gfn_removed?: number; boosteroid_removed?: number }>("clear_cache");
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
 const getBackendDiagnostics = callable<[], BackendDiagnostics>("get_backend_diagnostics");
+const checkForUpdate = callable<[], UpdateCheckResponse>("check_for_update");
+const applyUpdate = callable<[expectedVersion: string], UpdateApplyResponse>("apply_update");
+const restartPluginLoader = callable<[], { success: boolean }>("restart_plugin_loader");
 
 const supportStates = new Map<string, BadgeState>();
 const gfnStates = new Map<string, GfnState>();
@@ -130,6 +149,34 @@ function errorMessage(error: unknown): string {
     // Fall through to the string representation below.
   }
   return String(error);
+}
+
+async function reloadUpdatedPlugin(): Promise<"reloaded" | "restarting" | "failed"> {
+  try {
+    const loader = (window as any).DeckyPluginLoader;
+    if (typeof loader?.reloadPlugin === "function") {
+      await loader.reloadPlugin("ControllerXbox");
+      return "reloaded";
+    }
+  } catch {
+    // Try the backend service restart below.
+  }
+  try {
+    const response = await withBackendTimeout(restartPluginLoader(), 5_000);
+    if (response.success) return "restarting";
+  } catch {
+    // Try a full Steam restart below.
+  }
+  try {
+    const steamSystem = (window as any).SteamClient?.System;
+    if (typeof steamSystem?.RestartSteamClient === "function") {
+      steamSystem.RestartSteamClient();
+      return "restarting";
+    }
+  } catch {
+    // The UI will provide a manual restart instruction.
+  }
+  return "failed";
 }
 
 function notifyCacheChanged(): void {
@@ -1085,6 +1132,10 @@ function Content() {
   const [status, setStatus] = useState("A könyvtári csempék, játékoldalak és Steam Áruház jelölése indul. Nyisd meg vagy frissítsd a kívánt nézetet.");
   const [diagnosticLog, setDiagnosticLog] = useState("Nincs rögzített hiba.");
   const [working, setWorking] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse>();
+  const [updateStatus, setUpdateStatus] = useState("Frissítések keresése folyamatban...");
+  const [updateWorking, setUpdateWorking] = useState(false);
+  const [installedUpdate, setInstalledUpdate] = useState<string>();
 
   const refreshStats = async () => {
     try {
@@ -1094,8 +1145,28 @@ function Content() {
     }
   };
 
+  const refreshUpdateInfo = async (quiet = false) => {
+    setUpdateWorking(true);
+    if (!quiet) setUpdateStatus("Frissítések keresése folyamatban...");
+    try {
+      const response = await withBackendTimeout(checkForUpdate(), 30_000);
+      setUpdateInfo(response);
+      if (!response.success) throw new Error(response.error || "A frissítéskeresés sikertelen.");
+      if (response.has_update && response.latest_version) {
+        setUpdateStatus("Új stabil verzió érhető el: v" + response.latest_version + ".");
+      } else {
+        setUpdateStatus("A plugin naprakész (v" + String(response.current_version ?? "ismeretlen") + ").");
+      }
+    } catch (error) {
+      setUpdateStatus("Frissítéskeresési hiba: " + errorMessage(error));
+    } finally {
+      setUpdateWorking(false);
+    }
+  };
+
   useEffect(() => {
     void refreshStats();
+    void refreshUpdateInfo(true);
     const onCacheChanged = () => void refreshStats();
     const onTileStatus = (event: Event) => {
       const detail = (event as CustomEvent<string>).detail;
@@ -1148,6 +1219,42 @@ function Content() {
     }
   };
 
+  const installAvailableUpdate = async () => {
+    const version = updateInfo?.latest_version;
+    if (!updateInfo?.has_update || !version) return;
+    setUpdateWorking(true);
+    setUpdateStatus("A v" + version + " frissítés letöltése, ellenőrzése és telepítése folyamatban...");
+    try {
+      const response = await withBackendTimeout(applyUpdate(version), 120_000);
+      if (!response.success) throw new Error(response.error || "A frissítés telepítése sikertelen.");
+      setInstalledUpdate(response.version ?? version);
+      setUpdateStatus("A v" + String(response.version ?? version) + " telepítve. Töltsd újra a plugint az alábbi gombbal.");
+      toaster.toast({
+        title: "ControllerXbox frissítve",
+        body: "A v" + String(response.version ?? version) + " telepítve. A befejezéshez töltsd újra a plugint.",
+      });
+    } catch (error) {
+      setUpdateStatus("Frissítési hiba: " + errorMessage(error));
+    } finally {
+      setUpdateWorking(false);
+    }
+  };
+
+  const reloadAfterUpdate = async () => {
+    setUpdateWorking(true);
+    setUpdateStatus("A plugin újratöltése folyamatban...");
+    const result = await reloadUpdatedPlugin();
+    if (result === "failed") {
+      setUpdateStatus("Az automatikus újratöltés nem érhető el. Indítsd újra kézzel a Steamet.");
+      setUpdateWorking(false);
+    } else {
+      toaster.toast({
+        title: "ControllerXbox",
+        body: result === "reloaded" ? "A plugin újratöltve." : "A pluginbetöltő újraindítása folyamatban...",
+      });
+    }
+  };
+
   return <PanelSection title="Xbox Controller Check">
     <PanelSectionRow><div>A könyvtári és Steam Áruház-bélyegképek jelölése: teli kontroller = teljes támogatás; félig kitöltött kontroller = részleges támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat.</div></PanelSectionRow>
     <PanelSectionRow><div>A Könyvtárban megnyitott játék oldalán a három jelvény jobb felül, a ProtonDB-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
@@ -1161,6 +1268,13 @@ function Content() {
     <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hibanapló: {diagnosticLog}</div></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={backendCheck}>Látható játékok újraellenőrzése</ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={clearAndRefresh}>Cache törlése és újraellenőrzés</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Pluginfrissítés</div></PanelSectionRow>
+    <PanelSectionRow><div>{updateStatus}</div></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={updateWorking} onClick={() => void refreshUpdateInfo()}>Frissítések keresése</ButtonItem></PanelSectionRow>
+    {updateInfo?.has_update && updateInfo.latest_version && !installedUpdate ?
+      <PanelSectionRow><ButtonItem layout="below" disabled={updateWorking} onClick={installAvailableUpdate}>Frissítés telepítése: v{updateInfo.latest_version}</ButtonItem></PanelSectionRow> : null}
+    {installedUpdate ?
+      <PanelSectionRow><ButtonItem layout="below" disabled={updateWorking} onClick={reloadAfterUpdate}>Plugin újratöltése</ButtonItem></PanelSectionRow> : null}
   </PanelSection>;
 }
 
