@@ -366,6 +366,8 @@ function XboxTileBadge({ appId }) {
             display: "inline-flex",
             alignItems: "center",
             gap: "4px",
+            transform: "scale(.72)",
+            transformOrigin: "top left",
             pointerEvents: "none",
         }, children: [SP_JSX.jsx(ControllerBadge, { state: state, appId: appId }), SP_JSX.jsx(GfnBadge, { state: gfnState }), SP_JSX.jsx(BoosteroidBadge, { state: boosteroidState })] });
 }

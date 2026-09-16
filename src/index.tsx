@@ -418,6 +418,8 @@ function XboxTileBadge({ appId }: { appId: number }) {
     display: "inline-flex",
     alignItems: "center",
     gap: "4px",
+    transform: "scale(.72)",
+    transformOrigin: "top left",
     pointerEvents: "none",
   }}>
     <ControllerBadge state={state} appId={appId} />
