@@ -8,6 +8,8 @@ Only app IDs present on the current visible screen are sent to Steam's public `a
 
 The controller badge reflects Steam's partial or full controller-support category. The adjacent green or gray GFN badge reflects whether the Steam AppID exists in NVIDIA's public GeForce NOW catalog. The Boosteroid logo is blue when the Steam game is available, yellow during maintenance, and gray when it is absent from the public catalog.
 
+GFN and Boosteroid badges can be enabled or disabled independently in the quick-access panel. A persistent, change-based background check notifies the user once when a library game becomes available on GeForce NOW or Boosteroid, enters Boosteroid maintenance, or when a new stable ControllerXbox release is available. The first check creates a baseline and does not announce the entire existing catalog.
+
 ## Development
 
 Install Node.js and pnpm, then run `pnpm install` and `pnpm build`. Copy the resulting plugin directory (including `dist/`, `main.py`, `package.json`, and `plugin.json`) into Decky's plugin location.

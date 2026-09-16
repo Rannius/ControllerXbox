@@ -40,6 +40,8 @@ GFN_CACHE_TTL_SECONDS = 24 * 60 * 60
 GFN_URL = "https://api-prod.nvidia.com/services/gfngames/v1/gameList"
 BOOSTEROID_CACHE_TTL_SECONDS = 24 * 60 * 60
 BOOSTEROID_CACHE_SCHEMA_VERSION = 3
+SETTINGS_SCHEMA_VERSION = 1
+NOTIFICATION_SCHEMA_VERSION = 1
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
 BOOSTEROID_STEAM_APP_ID_OVERRIDES = {
@@ -74,6 +76,10 @@ class Plugin:
         self._boosteroid_maintenance_app_ids: Set[str] = set()
         self._boosteroid_checked_at = 0.0
         self._boosteroid_last_error = ""
+        self._settings: Dict[str, bool] = {
+            "show_gfn_badges": True,
+            "show_boosteroid_badges": True,
+        }
         # Recent Decky versions expose the settings directory as
         # ``decky_SETTINGS_DIR``.  Keep the older name as a fallback so a
         # manually installed plugin works on both Loader generations.
@@ -83,21 +89,26 @@ class Plugin:
         self._cache_path = Path(settings_directory) / "controller-support-cache.json"
         self._gfn_cache_path = Path(settings_directory) / "geforce-now-catalog-cache.json"
         self._boosteroid_cache_path = Path(settings_directory) / "boosteroid-catalog-cache.json"
+        self._settings_path = Path(settings_directory) / "controller-xbox-settings.json"
+        self._notification_state_path = Path(settings_directory) / "controller-xbox-notifications.json"
         self._lock = asyncio.Lock()
         self._gfn_lock = asyncio.Lock()
         self._boosteroid_lock = asyncio.Lock()
         self._update_lock = asyncio.Lock()
+        self._notification_lock = asyncio.Lock()
 
     async def _main(self) -> None:
         await self._load_cache()
         await self._load_gfn_cache()
         await self._load_boosteroid_cache()
+        await self._load_settings()
         decky.logger.info("ControllerXbox backend loaded")
 
     async def _unload(self) -> None:
         await self._save_cache()
         await self._save_gfn_cache()
         await self._save_boosteroid_cache()
+        await self._save_settings()
 
     async def _load_cache(self) -> None:
         try:
@@ -184,6 +195,44 @@ class Plugin:
                 "boosteroid-cache-",
                 payload,
             )
+
+    async def _load_settings(self) -> None:
+        try:
+            contents = await self._run_blocking(lambda: self._settings_path.read_text(encoding="utf-8"))
+            parsed = json.loads(contents)
+            if isinstance(parsed, dict) and parsed.get("schema_version") == SETTINGS_SCHEMA_VERSION:
+                for key in ("show_gfn_badges", "show_boosteroid_badges"):
+                    if isinstance(parsed.get(key), bool):
+                        self._settings[key] = parsed[key]
+        except FileNotFoundError:
+            pass
+        except (OSError, json.JSONDecodeError) as error:
+            decky.logger.warning("Ignoring invalid ControllerXbox settings: %s", error)
+
+    async def _save_settings(self) -> None:
+        payload = json.dumps(
+            {"schema_version": SETTINGS_SCHEMA_VERSION, **self._settings},
+            separators=(",", ":"),
+        )
+        await self._run_blocking(
+            self._write_file_atomically,
+            self._settings_path,
+            "controller-settings-",
+            payload,
+        )
+
+    async def get_settings(self) -> Dict[str, Any]:
+        return {"success": True, **self._settings}
+
+    async def set_badge_visibility(self, show_gfn_badges: Any, show_boosteroid_badges: Any) -> Dict[str, Any]:
+        if not isinstance(show_gfn_badges, bool) or not isinstance(show_boosteroid_badges, bool):
+            return {"success": False, "error": "A jelvénybeállítás értéke érvénytelen."}
+        self._settings = {
+            "show_gfn_badges": show_gfn_badges,
+            "show_boosteroid_badges": show_boosteroid_badges,
+        }
+        await self._save_settings()
+        return {"success": True, **self._settings}
 
     async def _run_blocking(self, function: Any, *args: Any) -> Any:
         """Run blocking file and network operations on Python 3.8 and newer."""
@@ -768,6 +817,118 @@ class Plugin:
                 "catalog_entries": len(self._boosteroid_app_ids),
                 "cached_for_hours": 24,
             }
+
+    @staticmethod
+    def _valid_library_app_ids(app_ids: Any) -> Set[str]:
+        if not isinstance(app_ids, list):
+            return set()
+        return {
+            str(app_id)
+            for app_id in app_ids[:10000]
+            if str(app_id).isdigit() and 0 < int(str(app_id)) < 10000000000
+        }
+
+    def _read_notification_state(self) -> Dict[str, Any]:
+        try:
+            parsed = json.loads(self._notification_state_path.read_text(encoding="utf-8"))
+            return parsed if isinstance(parsed, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError) as error:
+            decky.logger.warning("Ignoring invalid notification state: %s", error)
+            return {}
+
+    async def get_notification_events(self, app_ids: Any) -> Dict[str, Any]:
+        """Return each catalog/update change once for the user's Steam library."""
+        library_app_ids = self._valid_library_app_ids(app_ids)
+        gfn_available, boosteroid_available, update = await asyncio.gather(
+            self._ensure_gfn_catalog(),
+            self._ensure_boosteroid_catalog(),
+            self._run_blocking(self._check_for_update_blocking),
+        )
+
+        async with self._gfn_lock:
+            current_gfn = self._gfn_app_ids & library_app_ids
+        async with self._boosteroid_lock:
+            current_boosteroid = self._boosteroid_app_ids & library_app_ids
+            current_maintenance = self._boosteroid_maintenance_app_ids & library_app_ids
+
+        async with self._notification_lock:
+            state = await self._run_blocking(self._read_notification_state)
+            valid_state = state.get("schema_version") == NOTIFICATION_SCHEMA_VERSION
+            previous_gfn = {
+                str(app_id) for app_id in state.get("gfn_available", []) if str(app_id).isdigit()
+            } if valid_state else set()
+            previous_boosteroid = {
+                str(app_id) for app_id in state.get("boosteroid_available", []) if str(app_id).isdigit()
+            } if valid_state else set()
+            previous_maintenance = {
+                str(app_id) for app_id in state.get("boosteroid_maintenance", []) if str(app_id).isdigit()
+            } if valid_state else set()
+            gfn_initialized = bool(state.get("gfn_initialized")) if valid_state else False
+            boosteroid_initialized = bool(state.get("boosteroid_initialized")) if valid_state else False
+
+            gfn_added = len(current_gfn - previous_gfn) if gfn_available and gfn_initialized else 0
+            boosteroid_added = (
+                len(current_boosteroid - previous_boosteroid)
+                if boosteroid_available and boosteroid_initialized
+                else 0
+            )
+            boosteroid_maintenance = (
+                len(current_maintenance - previous_maintenance)
+                if boosteroid_available and boosteroid_initialized
+                else 0
+            )
+
+            last_notified_update = str(state.get("last_notified_update", "")) if valid_state else ""
+            update_version = ""
+            if (
+                isinstance(update, dict)
+                and update.get("success")
+                and update.get("has_update")
+                and re.fullmatch(r"\d+\.\d+\.\d+", str(update.get("latest_version", "")))
+                and str(update.get("latest_version")) != last_notified_update
+            ):
+                update_version = str(update["latest_version"])
+                last_notified_update = update_version
+
+            next_state = {
+                "schema_version": NOTIFICATION_SCHEMA_VERSION,
+                "gfn_initialized": gfn_initialized or bool(gfn_available and library_app_ids),
+                "boosteroid_initialized": boosteroid_initialized or bool(boosteroid_available and library_app_ids),
+                "gfn_available": (
+                    sorted(current_gfn | (previous_gfn - library_app_ids))
+                    if gfn_available and library_app_ids
+                    else sorted(previous_gfn)
+                ),
+                "boosteroid_available": (
+                    sorted(current_boosteroid | (previous_boosteroid - library_app_ids))
+                    if boosteroid_available and library_app_ids
+                    else sorted(previous_boosteroid)
+                ),
+                "boosteroid_maintenance": (
+                    sorted(current_maintenance | (previous_maintenance - library_app_ids))
+                    if boosteroid_available and library_app_ids
+                    else sorted(previous_maintenance)
+                ),
+                "last_notified_update": last_notified_update,
+                "checked_at": time.time(),
+            }
+            await self._run_blocking(
+                self._write_file_atomically,
+                self._notification_state_path,
+                "controller-notifications-",
+                json.dumps(next_state, separators=(",", ":")),
+            )
+
+        return {
+            "success": True,
+            "tracked_games": len(library_app_ids),
+            "gfn_added": gfn_added,
+            "boosteroid_added": boosteroid_added,
+            "boosteroid_maintenance": boosteroid_maintenance,
+            "update_version": update_version,
+        }
 
     async def get_controller_support(self, app_ids: Any) -> Dict[str, Any]:
         """Return official partial or full controller support for the supplied app IDs."""

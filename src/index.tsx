@@ -1,4 +1,4 @@
-import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
+import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
 import { createElement, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
 
@@ -6,6 +6,7 @@ const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
 const TILE_STATUS_EVENT = "controller-xbox-tile-status";
+const SETTINGS_CHANGED_EVENT = "controller-xbox-settings-changed";
 const BADGE_KEY = "controller-xbox-tile-badge";
 const DETAIL_BADGE_KEY = "controller-xbox-detail-badge";
 const DETAIL_PATCH_FLAG = "__controllerXboxDetailPatched";
@@ -59,6 +60,20 @@ type UpdateApplyResponse = {
   restart_required?: boolean;
   error?: string;
 };
+type BadgeVisibility = {
+  show_gfn_badges: boolean;
+  show_boosteroid_badges: boolean;
+};
+type SettingsResponse = BadgeVisibility & { success: boolean; error?: string };
+type NotificationEventsResponse = {
+  success: boolean;
+  tracked_games?: number;
+  gfn_added?: number;
+  boosteroid_added?: number;
+  boosteroid_maintenance?: number;
+  update_version?: string;
+  error?: string;
+};
 type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 type GfnState = "loading" | "available" | "not_available" | "unavailable";
 type BoosteroidState = "loading" | "available" | "maintenance" | "not_available" | "unavailable";
@@ -107,6 +122,9 @@ const getBackendDiagnostics = callable<[], BackendDiagnostics>("get_backend_diag
 const checkForUpdate = callable<[], UpdateCheckResponse>("check_for_update");
 const applyUpdate = callable<[expectedVersion: string], UpdateApplyResponse>("apply_update");
 const restartPluginLoader = callable<[], { success: boolean }>("restart_plugin_loader");
+const getSettings = callable<[], SettingsResponse>("get_settings");
+const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean], SettingsResponse>("set_badge_visibility");
+const getNotificationEvents = callable<[appIds: string[]], NotificationEventsResponse>("get_notification_events");
 
 const supportStates = new Map<string, BadgeState>();
 const gfnStates = new Map<string, GfnState>();
@@ -125,6 +143,11 @@ let storeMessageId = 1;
 let storeScanTimer: number | undefined;
 let storeReconnectTimer: number | undefined;
 let storeCurrentAppIds = new Set<string>();
+let notificationTimer: number | undefined;
+let badgeVisibility: BadgeVisibility = {
+  show_gfn_badges: true,
+  show_boosteroid_badges: true,
+};
 const storeRuntimeRequests = new Map<number, {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
@@ -177,6 +200,86 @@ async function reloadUpdatedPlugin(): Promise<"reloaded" | "restarting" | "faile
     // The UI will provide a manual restart instruction.
   }
   return "failed";
+}
+
+function applyBadgeVisibility(next: BadgeVisibility): void {
+  badgeVisibility = next;
+  for (const listener of supportListeners) listener();
+  renderStoreBadges();
+  window.dispatchEvent(new CustomEvent<BadgeVisibility>(SETTINGS_CHANGED_EVENT, { detail: next }));
+}
+
+async function loadBadgeVisibility(): Promise<void> {
+  try {
+    const response = await withBackendTimeout(getSettings());
+    if (response.success) {
+      applyBadgeVisibility({
+        show_gfn_badges: response.show_gfn_badges,
+        show_boosteroid_badges: response.show_boosteroid_badges,
+      });
+    }
+  } catch (error) {
+    console.warn("ControllerXbox badge settings could not be loaded", error);
+  }
+}
+
+function getSteamLibraryAppIds(): string[] {
+  try {
+    const collection = (globalThis as any).collectionStore?.allAppsCollection;
+    const rawApps = collection?.allApps ?? collection?.apps;
+    const apps = Array.isArray(rawApps)
+      ? rawApps
+      : rawApps && typeof rawApps[Symbol.iterator] === "function"
+        ? Array.from(rawApps)
+        : [];
+    return Array.from(new Set(
+      apps
+        .map((app: any) => String(app?.appid ?? ""))
+        .filter((appId: string) => /^\d+$/.test(appId) && Number(appId) > 0),
+    ));
+  } catch (error) {
+    console.warn("ControllerXbox could not enumerate the Steam library", error);
+    return [];
+  }
+}
+
+async function checkBackgroundNotifications(attempt = 0): Promise<void> {
+  const appIds = getSteamLibraryAppIds();
+  if (!appIds.length && attempt < 3) {
+    notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(attempt + 1), 10_000);
+    return;
+  }
+  notificationTimer = undefined;
+  try {
+    const response = await withBackendTimeout(getNotificationEvents(appIds), 180_000);
+    if (!response.success) throw new Error(response.error || "Az értesítési ellenőrzés sikertelen.");
+    if ((response.gfn_added ?? 0) > 0) {
+      toaster.toast({
+        title: "GeForce NOW újdonság",
+        body: String(response.gfn_added) + " játékod mostantól elérhető a GeForce NOW-on.",
+      });
+    }
+    if ((response.boosteroid_added ?? 0) > 0) {
+      toaster.toast({
+        title: "Boosteroid újdonság",
+        body: String(response.boosteroid_added) + " játékod mostantól elérhető a Boosteroiden.",
+      });
+    }
+    if ((response.boosteroid_maintenance ?? 0) > 0) {
+      toaster.toast({
+        title: "Boosteroid karbantartás",
+        body: String(response.boosteroid_maintenance) + " játékod karbantartás alá került a Boosteroiden.",
+      });
+    }
+    if (response.update_version) {
+      toaster.toast({
+        title: "ControllerXbox frissítés",
+        body: "Új pluginverzió érhető el: v" + response.update_version + ". Nyisd meg a plugint a telepítéshez.",
+      });
+    }
+  } catch (error) {
+    console.warn("ControllerXbox background notification check failed", error);
+  }
 }
 
 function notifyCacheChanged(): void {
@@ -501,8 +604,8 @@ function XboxTileBadge({ appId }: { appId: number }) {
     pointerEvents: "none",
   }}>
     <ControllerBadge state={state} appId={appId} />
-    <GfnBadge state={gfnState} />
-    <BoosteroidBadge state={boosteroidState} />
+    {badgeVisibility.show_gfn_badges ? <GfnBadge state={gfnState} /> : null}
+    {badgeVisibility.show_boosteroid_badges ? <BoosteroidBadge state={boosteroidState} /> : null}
   </span>;
 }
 
@@ -606,8 +709,8 @@ function LibraryDetailBadges({ appId }: { appId: number }) {
     }}
   >
     <ControllerBadge state={state} appId={appId} />
-    <GfnBadge state={gfnState} />
-    <BoosteroidBadge state={boosteroidState} />
+    {badgeVisibility.show_gfn_badges ? <GfnBadge state={gfnState} /> : null}
+    {badgeVisibility.show_boosteroid_badges ? <BoosteroidBadge state={boosteroidState} /> : null}
   </span>;
 }
 
@@ -675,13 +778,18 @@ function buildStoreScanScript(): string {
   `;
 }
 
-function buildStoreBadgeScript(states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState }>): string {
+function buildStoreBadgeScript(
+  states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState }>,
+  visibility: BadgeVisibility,
+): string {
   const serializedStates = JSON.stringify(states).replace(/</g, "\\u003c");
   const controllerPath = "M5.4 5.5h13.2c1.5 0 2.8 1 3.2 2.5l1.1 5c.4 1.8-.9 3.5-2.7 3.5-.8 0-1.5-.3-2-.9L15.6 13H8.4l-2.6 2.6c-.5.6-1.2.9-2 .9-1.8 0-3.1-1.7-2.7-3.5l1.1-5c.4-1.5 1.7-2.5 3.2-2.5Z";
   const boosteroidPath = "M13.3259 3.30744C9.865 6.72998 9.549 12.1026 12.3773 15.8818L9.46609 18.7608C8.90018 19.3204 8.90018 20.2281 9.46609 20.7883C10.032 21.3479 10.9498 21.3479 11.5163 20.7883L14.4276 17.9093C18.2491 20.7063 23.682 20.3938 27.143 16.9713C30.9524 13.2041 30.9524 7.07459 27.143 3.30801C23.3336-.45857 17.1347-.459144 13.3259 3.30744ZM25.0927 14.9438C22.7653 17.2453 19.1705 17.5469 16.5103 15.8497L17.6595 14.7133C18.2254 14.1536 18.2254 13.246 17.6595 12.6858C17.0936 12.1261 16.1757 12.1261 15.6092 12.6858L14.46 13.8222C12.7438 11.1915 13.0488 7.63651 15.3762 5.33493C18.0549 2.68588 22.414 2.68588 25.0927 5.33493C27.7715 7.98398 27.7715 12.2947 25.0927 14.9438ZM16.2841 21.6272C16.85 22.1868 16.85 23.0945 16.2841 23.6547L10.1416 29.7291C9.57567 30.2887 8.65782 30.2887 8.09134 29.7291C7.52544 29.1695 7.52544 28.2618 8.09134 27.7016L14.2345 21.6272C14.8004 21.0675 15.7182 21.0675 16.2841 21.6272ZM.424426 22.1472C-.141475 21.5876-.141475 20.6799.424426 20.1197L6.56758 14.0447C7.13348 13.4851 8.05133 13.4851 8.61782 14.0447C9.18372 14.6043 9.18372 15.512 8.61782 16.0722L2.47466 22.1472C1.90818 22.7074.990907 22.7074.424426 22.1472Z";
   return `
     (function() {
       const states = ${serializedStates};
+      const showGfn = ${visibility.show_gfn_badges ? "true" : "false"};
+      const showBoosteroid = ${visibility.show_boosteroid_badges ? "true" : "false"};
       const controllerPath = ${JSON.stringify(controllerPath)};
       const boosteroidPath = ${JSON.stringify(boosteroidPath)};
       const detailId = 'controller-xbox-store-detail-badges';
@@ -730,7 +838,9 @@ function buildStoreBadgeScript(states: Record<string, { controller: BadgeState; 
       function badgesHtml(appId, suffix) {
         const state = states[appId];
         if (!state) return '';
-        return controllerBadge(state.controller, appId, suffix) + gfnBadge(state.gfn) + boosteroidBadge(state.boosteroid);
+        return controllerBadge(state.controller, appId, suffix) +
+          (showGfn ? gfnBadge(state.gfn) : '') +
+          (showBoosteroid ? boosteroidBadge(state.boosteroid) : '');
       }
 
       let style = document.getElementById('controller-xbox-store-style');
@@ -751,7 +861,7 @@ function buildStoreBadgeScript(states: Record<string, { controller: BadgeState; 
           detail.className = 'cxc-store-badges cxc-store-detail';
           document.body.appendChild(detail);
         }
-        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid;
+        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + showGfn + ':' + showBoosteroid;
         if (detail.getAttribute('data-state-key') !== key) {
           detail.innerHTML = badgesHtml(pageId, 'detail');
           detail.setAttribute('data-state-key', key);
@@ -783,7 +893,7 @@ function buildStoreBadgeScript(states: Record<string, { controller: BadgeState; 
           badge.className = 'cxc-store-badges ' + cardClass;
           host.appendChild(badge);
         }
-        const key = appId + ':' + states[appId].controller + ':' + states[appId].gfn + ':' + states[appId].boosteroid;
+        const key = appId + ':' + states[appId].controller + ':' + states[appId].gfn + ':' + states[appId].boosteroid + ':' + showGfn + ':' + showBoosteroid;
         badge.setAttribute('data-cxc-appid', appId);
         if (badge.getAttribute('data-state-key') !== key) {
           badge.innerHTML = badgesHtml(appId, 'card-' + usedHosts.size);
@@ -830,7 +940,7 @@ function renderStoreBadges(): void {
       boosteroid: boosteroidStates.get(appId) ?? "loading",
     };
   }
-  void sendStoreRuntime(buildStoreBadgeScript(states)).catch((error) => {
+  void sendStoreRuntime(buildStoreBadgeScript(states, badgeVisibility)).catch((error) => {
     console.debug("ControllerXbox store badge rendering skipped", error);
   });
 }
@@ -1136,6 +1246,8 @@ function Content() {
   const [updateStatus, setUpdateStatus] = useState("Frissítések keresése folyamatban...");
   const [updateWorking, setUpdateWorking] = useState(false);
   const [installedUpdate, setInstalledUpdate] = useState<string>();
+  const [visibility, setVisibility] = useState<BadgeVisibility>({ ...badgeVisibility });
+  const [settingsWorking, setSettingsWorking] = useState(false);
 
   const refreshStats = async () => {
     try {
@@ -1172,13 +1284,42 @@ function Content() {
       const detail = (event as CustomEvent<string>).detail;
       if (detail) setStatus(detail);
     };
+    const onSettingsChanged = (event: Event) => {
+      const detail = (event as CustomEvent<BadgeVisibility>).detail;
+      if (detail) setVisibility({ ...detail });
+    };
     window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
     window.addEventListener(TILE_STATUS_EVENT, onTileStatus);
+    window.addEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged);
     return () => {
       window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
       window.removeEventListener(TILE_STATUS_EVENT, onTileStatus);
+      window.removeEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged);
     };
   }, []);
+
+  const updateVisibility = async (next: BadgeVisibility) => {
+    const previous = visibility;
+    setSettingsWorking(true);
+    setVisibility(next);
+    applyBadgeVisibility(next);
+    try {
+      const response = await withBackendTimeout(
+        setBadgeVisibility(next.show_gfn_badges, next.show_boosteroid_badges),
+      );
+      if (!response.success) throw new Error(response.error || "A beállítás mentése sikertelen.");
+      applyBadgeVisibility({
+        show_gfn_badges: response.show_gfn_badges,
+        show_boosteroid_badges: response.show_boosteroid_badges,
+      });
+    } catch (error) {
+      setVisibility(previous);
+      applyBadgeVisibility(previous);
+      toaster.toast({ title: "Beállítási hiba", body: errorMessage(error) });
+    } finally {
+      setSettingsWorking(false);
+    }
+  };
 
   const clearAndRefresh = async () => {
     setWorking(true);
@@ -1256,11 +1397,27 @@ function Content() {
   };
 
   return <PanelSection title="Xbox Controller Check">
+    <PanelSectionRow><div style={{ fontWeight: 700 }}>Megjelenített jelvények</div></PanelSectionRow>
+    <PanelSectionRow><ToggleField
+      label="GeForce NOW jelvények"
+      description="GFN-jelvények megjelenítése a Könyvtárban és a Steam Áruházban."
+      checked={visibility.show_gfn_badges}
+      disabled={settingsWorking}
+      onChange={(checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked })}
+    /></PanelSectionRow>
+    <PanelSectionRow><ToggleField
+      label="Boosteroid jelvények"
+      description="Boosteroid-jelvények megjelenítése a Könyvtárban és a Steam Áruházban."
+      checked={visibility.show_boosteroid_badges}
+      disabled={settingsWorking}
+      onChange={(checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked })}
+    /></PanelSectionRow>
     <PanelSectionRow><div>A könyvtári és Steam Áruház-bélyegképek jelölése: teli kontroller = teljes támogatás; félig kitöltött kontroller = részleges támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat.</div></PanelSectionRow>
     <PanelSectionRow><div>A Könyvtárban megnyitott játék oldalán a három jelvény jobb felül, a ProtonDB-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
     <PanelSectionRow><div>A megnyitott Steam Áruház-játék oldalán a három jelvény jobb alul, a ProtonDB Store-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
     <PanelSectionRow><div>GeForce NOW: zöld GFN = játszható; szürke GFN = nincs a katalógusban; narancssárga GFN? = a katalógus nem érhető el.</div></PanelSectionRow>
     <PanelSectionRow><div>Boosteroid: kék logó = elérhető; sárga logó = karbantartás alatt; szürke logó = nincs a katalógusban; narancssárga logó = a katalógus nem érhető el.</div></PanelSectionRow>
+    <PanelSectionRow><div>A háttérellenőrzés egyszer értesít az új GFN- és Boosteroid-játékokról, a Boosteroid-karbantartásról és az új pluginverziókról.</div></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..."}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? "GFN-katalógus: " + String(stats.gfn_catalog_entries ?? 0) + " Steam AppID; " + (stats.gfn_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A GFN-katalógus állapotának betöltése folyamatban..."}</div></PanelSectionRow>
@@ -1279,6 +1436,8 @@ function Content() {
 }
 
 export default definePlugin(() => {
+  void loadBadgeVisibility();
+  notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(), 10_000);
   const removeTilePatch = patchLibraryTiles();
   const removeLibraryDetailPatch = patchLibraryDetails();
   const removeStorePatch = patchSteamStore();
@@ -1288,6 +1447,8 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <span>✓</span>,
     onDismount: () => {
+      if (notificationTimer !== undefined) window.clearTimeout(notificationTimer);
+      notificationTimer = undefined;
       removeStorePatch();
       removeLibraryDetailPatch();
       removeTilePatch();
