@@ -435,13 +435,13 @@ function LibraryDetailBadges({ appId }) {
                 setPosition((current) => current.top === 60 && current.right === 20 ? current : { top: 60, right: 20 });
                 return;
             }
-            const style = window.getComputedStyle(protonBadge);
-            const parsedTop = Number.parseFloat(style.top);
-            const parsedRight = Number.parseFloat(style.right);
+            const inlineTop = Number.parseFloat(protonBadge.style.top);
+            const inlineRight = Number.parseFloat(protonBadge.style.right);
             const width = protonBadge.getBoundingClientRect().width;
+            const protonIsExplicitlyRightAligned = Number.isFinite(inlineRight);
             const next = {
-                top: Number.isFinite(parsedTop) ? parsedTop : 60,
-                right: Number.isFinite(parsedRight) ? parsedRight + width + 8 : 20,
+                top: Number.isFinite(inlineTop) ? inlineTop : 60,
+                right: protonIsExplicitlyRightAligned ? inlineRight + width + 8 : 20,
             };
             setPosition((current) => current.top === next.top && current.right === next.right ? current : next);
         };
