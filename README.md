@@ -1,6 +1,6 @@
 # Xbox Controller Check
 
-A Decky Loader plugin for Steam Deck. It marks visible Steam Library and Steam Store game tiles with their Steam controller-support level, GeForce NOW availability, and Boosteroid availability. On an opened Steam Store game page, the same three badges appear at the bottom-right, aligned with the ProtonDB Store badge.
+A Decky Loader plugin for Steam Deck. It marks visible Steam Library and Steam Store game tiles with their Steam controller-support level, GeForce NOW availability, and Boosteroid availability. On an opened Library game page, the same three badges appear at the top-right beside the ProtonDB badge. On an opened Steam Store game page, they appear at the bottom-right, aligned with the ProtonDB Store badge.
 
 ## Privacy and cache
 

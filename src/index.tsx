@@ -1,12 +1,14 @@
-import { ButtonItem, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
-import { callable, fetchNoCors, toaster } from "@decky/api";
-import { createElement, ReactElement, useEffect, useState } from "react";
+import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
+import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
+import { createElement, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
 const TILE_STATUS_EVENT = "controller-xbox-tile-status";
 const BADGE_KEY = "controller-xbox-tile-badge";
+const DETAIL_BADGE_KEY = "controller-xbox-detail-badge";
+const DETAIL_PATCH_FLAG = "__controllerXboxDetailPatched";
 const STORE_DEBUGGER_URL = "http://localhost:8080/json";
 const STORE_SCAN_INTERVAL_MS = 1_500;
 
@@ -455,6 +457,153 @@ function XboxTileBadge({ appId }: { appId: number }) {
     <GfnBadge state={gfnState} />
     <BoosteroidBadge state={boosteroidState} />
   </span>;
+}
+
+function LibraryDetailBadges({ appId }: { appId: number }) {
+  const appIdText = String(appId);
+  const [state, setState] = useState<BadgeState>(() => supportStates.get(appIdText) ?? "loading");
+  const [gfnState, setGfnState] = useState<GfnState>(() => gfnStates.get(appIdText) ?? "loading");
+  const [boosteroidState, setBoosteroidState] = useState<BoosteroidState>(() => boosteroidStates.get(appIdText) ?? "loading");
+  const [position, setPosition] = useState({ top: 60, right: 20 });
+  const [hidden, setHidden] = useState(false);
+  const ref = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
+    const listener = () => {
+      setState(supportStates.get(appIdText) ?? "loading");
+      setGfnState(gfnStates.get(appIdText) ?? "loading");
+      setBoosteroidState(boosteroidStates.get(appIdText) ?? "loading");
+    };
+    supportListeners.add(listener);
+    queueSupportLookup(appIdText);
+    publishSupportState();
+    return () => {
+      supportListeners.delete(listener);
+      const remaining = (visibleAppIds.get(appIdText) ?? 1) - 1;
+      if (remaining > 0) visibleAppIds.set(appIdText, remaining);
+      else visibleAppIds.delete(appIdText);
+      publishSupportState();
+    };
+  }, [appIdText]);
+
+  useLayoutEffect(() => {
+    const element = ref.current;
+    const parent = element?.parentElement;
+    const documentRef = element?.ownerDocument;
+    if (!element || !parent || !documentRef) return;
+
+    const measure = () => {
+      const duplicates = Array.from(documentRef.querySelectorAll<HTMLElement>("[data-controller-xbox-detail-badge]"));
+      duplicates.sort((left, right) => {
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        return leftRect.top - rightRect.top || leftRect.left - rightRect.left;
+      });
+      setHidden(duplicates.length > 1 && duplicates[0] !== element);
+
+      const protonMarker = parent.querySelector<HTMLElement>(
+        ".protondb-decky-indicator-container, [data-pp-game-badge]",
+      );
+      const protonBadge = protonMarker?.hasAttribute("data-pp-game-badge")
+        ? protonMarker.parentElement as HTMLElement | null
+        : protonMarker;
+      if (!protonBadge || protonBadge === element) {
+        setPosition((current) => current.top === 60 && current.right === 20 ? current : { top: 60, right: 20 });
+        return;
+      }
+
+      const style = window.getComputedStyle(protonBadge);
+      const parsedTop = Number.parseFloat(style.top);
+      const parsedRight = Number.parseFloat(style.right);
+      const width = protonBadge.getBoundingClientRect().width;
+      const next = {
+        top: Number.isFinite(parsedTop) ? parsedTop : 60,
+        right: Number.isFinite(parsedRight) ? parsedRight + width + 8 : 20,
+      };
+      setPosition((current) => current.top === next.top && current.right === next.right ? current : next);
+    };
+
+    measure();
+    const mutationObserver = new MutationObserver(measure);
+    mutationObserver.observe(parent, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class", "style"],
+    });
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(parent);
+    for (const child of Array.from(parent.children)) resizeObserver.observe(child);
+    return () => {
+      mutationObserver.disconnect();
+      resizeObserver.disconnect();
+    };
+  }, [appId]);
+
+  if (hidden) return null;
+  return <span
+    ref={ref}
+    data-controller-xbox-detail-badge="true"
+    style={{
+      position: "absolute",
+      top: String(position.top) + "px",
+      right: String(position.right) + "px",
+      zIndex: 50,
+      display: "inline-flex",
+      alignItems: "center",
+      gap: "3px",
+      transform: "scale(.95)",
+      transformOrigin: "top right",
+      pointerEvents: "none",
+    }}
+  >
+    <ControllerBadge state={state} appId={appId} />
+    <GfnBadge state={gfnState} />
+    <BoosteroidBadge state={boosteroidState} />
+  </span>;
+}
+
+function patchLibraryDetails(): () => void {
+  const renderPatches = new Set<{ unpatch: () => void }>();
+  const routePatch = routerHook.addPatch("/library/app/:appid", (tree: any) => {
+    const routeProps = findInReactTree(tree, (node: any) => typeof node?.renderFunc === "function") as Record<string, any> | undefined;
+    if (!routeProps || routeProps[DETAIL_PATCH_FLAG]) return tree;
+    routeProps[DETAIL_PATCH_FLAG] = true;
+    const patchHandler = createReactTreePatcher([
+      (renderTree: any) => findInReactTree(renderTree, (node: any) => node?.props?.children?.props?.overview)?.props?.children,
+    ], (_args: unknown[], result?: ReactElement) => {
+      try {
+        const match = window.location.pathname.match(/\/library\/app\/(\d+)/);
+        const appId = Number(match?.[1] ?? 0);
+        if (!Number.isInteger(appId) || appId <= 0) return result;
+        const innerClass = appDetailsClasses?.InnerContainer;
+        if (!innerClass) return result;
+        const container = findInReactTree(result, (node: any) =>
+          Array.isArray(node?.props?.children) &&
+          typeof node?.props?.className === "string" &&
+          node.props.className.includes(innerClass),
+        ) as ReactElement | undefined;
+        const children = (container?.props as { children?: unknown[] } | undefined)?.children;
+        if (!Array.isArray(children)) return result;
+        if (children.some((child: any) => child?.key === DETAIL_BADGE_KEY)) return result;
+        children.splice(1, 0, createElement(LibraryDetailBadges, { key: DETAIL_BADGE_KEY, appId }));
+      } catch (error) {
+        console.debug("ControllerXbox library detail badge injection skipped", error);
+      }
+      return result;
+    }, "ControllerXboxLibraryDetails");
+    renderPatches.add(afterPatch(routeProps, "renderFunc", patchHandler));
+    return tree;
+  });
+
+  return () => {
+    try { routerHook.removePatch("/library/app/:appid", routePatch); } catch { /* The router may already be disposed. */ }
+    for (const patch of renderPatches) {
+      try { patch.unpatch(); } catch { /* The route instance may already be gone. */ }
+    }
+    renderPatches.clear();
+  };
 }
 
 function buildStoreScanScript(): string {
@@ -933,7 +1082,7 @@ function patchLibraryTiles(): () => void {
 
 function Content() {
   const [stats, setStats] = useState<CacheStats>();
-  const [status, setStatus] = useState("A könyvtári és Steam Áruház-jelölés indul. Nyisd meg vagy frissítsd a kívánt nézetet.");
+  const [status, setStatus] = useState("A könyvtári csempék, játékoldalak és Steam Áruház jelölése indul. Nyisd meg vagy frissítsd a kívánt nézetet.");
   const [diagnosticLog, setDiagnosticLog] = useState("Nincs rögzített hiba.");
   const [working, setWorking] = useState(false);
 
@@ -1001,6 +1150,7 @@ function Content() {
 
   return <PanelSection title="Xbox Controller Check">
     <PanelSectionRow><div>A könyvtári és Steam Áruház-bélyegképek jelölése: teli kontroller = teljes támogatás; félig kitöltött kontroller = részleges támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat.</div></PanelSectionRow>
+    <PanelSectionRow><div>A Könyvtárban megnyitott játék oldalán a három jelvény jobb felül, a ProtonDB-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
     <PanelSectionRow><div>A megnyitott Steam Áruház-játék oldalán a három jelvény jobb alul, a ProtonDB Store-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
     <PanelSectionRow><div>GeForce NOW: zöld GFN = játszható; szürke GFN = nincs a katalógusban; narancssárga GFN? = a katalógus nem érhető el.</div></PanelSectionRow>
     <PanelSectionRow><div>Boosteroid: kék logó = elérhető; sárga logó = karbantartás alatt; szürke logó = nincs a katalógusban; narancssárga logó = a katalógus nem érhető el.</div></PanelSectionRow>
@@ -1016,6 +1166,7 @@ function Content() {
 
 export default definePlugin(() => {
   const removeTilePatch = patchLibraryTiles();
+  const removeLibraryDetailPatch = patchLibraryDetails();
   const removeStorePatch = patchSteamStore();
   return {
     name: "Xbox Controller Check",
@@ -1024,6 +1175,7 @@ export default definePlugin(() => {
     icon: <span>✓</span>,
     onDismount: () => {
       removeStorePatch();
+      removeLibraryDetailPatch();
       removeTilePatch();
     },
   };
