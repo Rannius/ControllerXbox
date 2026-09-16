@@ -6,6 +6,7 @@ and require no API key.
 """
 
 import asyncio
+import concurrent.futures
 import functools
 import json
 import os
@@ -13,7 +14,9 @@ import re
 import ssl
 import tempfile
 import time
+import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -32,7 +35,13 @@ STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=eng
 GFN_CACHE_TTL_SECONDS = 24 * 60 * 60
 GFN_URL = "https://api-prod.nvidia.com/services/gfngames/v1/gameList"
 BOOSTEROID_CACHE_TTL_SECONDS = 24 * 60 * 60
+BOOSTEROID_CACHE_SCHEMA_VERSION = 3
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
+STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
+BOOSTEROID_STEAM_APP_ID_OVERRIDES = {
+    303: "1172620",  # Sea of Thieves: 2025 Edition (delisted title variant)
+    721: "1293830",  # Forza Horizon 4 (delisted from Steam search)
+}
 
 
 class Plugin:
@@ -113,10 +122,15 @@ class Plugin:
         try:
             contents = await self._run_blocking(lambda: self._boosteroid_cache_path.read_text(encoding="utf-8"))
             parsed = json.loads(contents)
+            schema_version = parsed.get("schema_version") if isinstance(parsed, dict) else None
             checked_at = parsed.get("checked_at") if isinstance(parsed, dict) else None
             app_ids = parsed.get("steam_app_ids") if isinstance(parsed, dict) else None
             maintenance_ids = parsed.get("maintenance_app_ids") if isinstance(parsed, dict) else None
-            if isinstance(checked_at, (int, float)) and isinstance(app_ids, list):
+            if (
+                schema_version == BOOSTEROID_CACHE_SCHEMA_VERSION
+                and isinstance(checked_at, (int, float))
+                and isinstance(app_ids, list)
+            ):
                 self._boosteroid_checked_at = float(checked_at)
                 self._boosteroid_app_ids = {str(app_id) for app_id in app_ids if str(app_id).isdigit()}
                 if isinstance(maintenance_ids, list):
@@ -136,6 +150,7 @@ class Plugin:
                 return
             payload = json.dumps(
                 {
+                    "schema_version": BOOSTEROID_CACHE_SCHEMA_VERSION,
                     "checked_at": self._boosteroid_checked_at,
                     "steam_app_ids": sorted(self._boosteroid_app_ids),
                     "maintenance_app_ids": sorted(self._boosteroid_maintenance_app_ids),
@@ -312,10 +327,43 @@ class Plugin:
                 "cached_for_hours": 24,
             }
 
+    @staticmethod
+    def _normalize_game_name(name: str) -> str:
+        without_platform = re.sub(r"\s*\(Steam\)\s*$", "", name, flags=re.IGNORECASE)
+        decomposed = unicodedata.normalize("NFKD", without_platform)
+        without_marks = "".join(character for character in decomposed if not unicodedata.combining(character))
+        return "".join(character for character in without_marks.casefold() if character.isalnum())
+
+    def _resolve_steam_app_id_by_name(self, title: str) -> Optional[str]:
+        clean_title = re.sub(r"\s*\(Steam\)\s*$", "", title, flags=re.IGNORECASE).strip()
+        request = urllib.request.Request(
+            STEAM_SEARCH_URL.format(term=urllib.parse.quote(clean_title)),
+            headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"},
+        )
+        try:
+            with self._open_request(request, timeout=15) as response:
+                result = json.load(response)
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
+            decky.logger.debug("Steam title lookup failed for %s: %s", clean_title, error)
+            return None
+        items = result.get("items") if isinstance(result, dict) else None
+        if not isinstance(items, list):
+            return None
+        normalized_title = self._normalize_game_name(clean_title)
+        matches = {
+            str(item.get("id"))
+            for item in items
+            if isinstance(item, dict)
+            and str(item.get("id", "")).isdigit()
+            and self._normalize_game_name(str(item.get("name", ""))) == normalized_title
+        }
+        return next(iter(matches)) if len(matches) == 1 else None
+
     def _fetch_boosteroid_catalog(self) -> Any:
         steam_app_ids: Set[str] = set()
         active_app_ids: Set[str] = set()
         maintenance_app_ids: Set[str] = set()
+        unresolved_titles: Dict[str, List[bool]] = {}
         last_page: Optional[int] = None
         for page in range(1, 51):
             request = urllib.request.Request(
@@ -352,8 +400,25 @@ class Plugin:
                 steam_url = stores.get("steam") if isinstance(stores, dict) else None
                 match = re.search(r"/app/(\d+)", str(steam_url or ""))
                 if not match:
-                    continue
-                app_id = match.group(1)
+                    match = re.search(
+                        r"store\.steampowered\.com/app/(\d+)",
+                        str(game.get("applicationLink") or ""),
+                        re.IGNORECASE,
+                    )
+                if not match:
+                    boosteroid_id = game.get("id")
+                    app_id = (
+                        BOOSTEROID_STEAM_APP_ID_OVERRIDES.get(boosteroid_id)
+                        if isinstance(boosteroid_id, int)
+                        else None
+                    )
+                    if not app_id:
+                        title = str(game.get("name") or "").strip()
+                        if title:
+                            unresolved_titles.setdefault(title, []).append(bool(game.get("maintenance")))
+                        continue
+                else:
+                    app_id = match.group(1)
                 steam_app_ids.add(app_id)
                 if game.get("maintenance"):
                     maintenance_app_ids.add(app_id)
@@ -363,6 +428,28 @@ class Plugin:
                 break
         if last_page is None or page < last_page:
             raise ValueError("Boosteroid catalog exceeded the page limit")
+        if unresolved_titles:
+            resolved_titles: Dict[str, Optional[str]] = {}
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+                future_titles = {
+                    executor.submit(self._resolve_steam_app_id_by_name, title): title
+                    for title in unresolved_titles
+                }
+                for future, title in future_titles.items():
+                    try:
+                        resolved_titles[title] = future.result()
+                    except Exception as error:
+                        decky.logger.debug("Steam title resolver failed for %s: %s", title, error)
+                        resolved_titles[title] = None
+            for title, maintenance_states in unresolved_titles.items():
+                app_id = resolved_titles.get(title)
+                if not app_id:
+                    continue
+                steam_app_ids.add(app_id)
+                if all(maintenance_states):
+                    maintenance_app_ids.add(app_id)
+                else:
+                    active_app_ids.add(app_id)
         if not steam_app_ids:
             raise ValueError("Boosteroid catalog contained no Steam games")
         return steam_app_ids, maintenance_app_ids - active_app_ids
@@ -389,6 +476,7 @@ class Plugin:
             self._boosteroid_last_error = ""
             payload = json.dumps(
                 {
+                    "schema_version": BOOSTEROID_CACHE_SCHEMA_VERSION,
                     "checked_at": self._boosteroid_checked_at,
                     "steam_app_ids": sorted(self._boosteroid_app_ids),
                     "maintenance_app_ids": sorted(self._boosteroid_maintenance_app_ids),
