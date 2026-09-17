@@ -62,6 +62,11 @@ type UpdateApplyResponse = {
   restart_required?: boolean;
   error?: string;
 };
+type UpdateNotificationResponse = {
+  success: boolean;
+  update_version?: string;
+  error?: string;
+};
 type BadgeVisibility = {
   show_gfn_badges: boolean;
   show_boosteroid_badges: boolean;
@@ -84,7 +89,6 @@ type NotificationEventsResponse = {
   boosteroid_maintenance?: number;
   boosteroid_maintenance_app_ids?: string[];
   app_names?: Record<string, string>;
-  update_version?: string;
   error?: string;
 };
 type WatchlistEntry = {
@@ -161,6 +165,11 @@ const clearCache = callable<[], { success: boolean; removed: number; gfn_removed
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
 const getBackendDiagnostics = callable<[], BackendDiagnostics>("get_backend_diagnostics");
 const checkForUpdate = callable<[], UpdateCheckResponse>("check_for_update");
+const getUpdateNotification = callable<[], UpdateNotificationResponse>("get_update_notification");
+const acknowledgeUpdateNotification = callable<
+  [version: string],
+  { success: boolean; version?: string; error?: string }
+>("acknowledge_update_notification");
 const applyUpdate = callable<[expectedVersion: string], UpdateApplyResponse>("apply_update");
 const restartPluginLoader = callable<[], { success: boolean }>("restart_plugin_loader");
 const getSettings = callable<[], SettingsResponse>("get_settings");
@@ -478,6 +487,24 @@ async function checkBackgroundNotifications(attempt = 0): Promise<void> {
   }
   notificationTimer = undefined;
   try {
+    const update = await withBackendTimeout(getUpdateNotification(), 30_000);
+    if (!update.success) throw new Error(update.error || "A frissítésértesítés ellenőrzése sikertelen.");
+    if (update.update_version) {
+      toaster.toast({
+        title: "Deck Play Badges frissítés",
+        body: "Új pluginverzió érhető el: v" + update.update_version + ". Nyisd meg a plugint a telepítéshez.",
+      });
+      const acknowledgement = await withBackendTimeout(
+        acknowledgeUpdateNotification(update.update_version),
+      );
+      if (!acknowledgement.success) {
+        throw new Error(acknowledgement.error || "A frissítésértesítés nyugtázása sikertelen.");
+      }
+    }
+  } catch (error) {
+    console.warn("Deck Play Badges update notification check failed", error);
+  }
+  try {
     const response = await withBackendTimeout(
       getNotificationEvents(appIds, getSteamLibraryGameNames()),
       180_000,
@@ -509,12 +536,6 @@ async function checkBackgroundNotifications(attempt = 0): Promise<void> {
             boosteroidMaintenance,
             response.app_names,
           ) + ".",
-      });
-    }
-    if (response.update_version) {
-      toaster.toast({
-        title: "ControllerXbox frissítés",
-        body: "Új pluginverzió érhető el: v" + response.update_version + ". Nyisd meg a plugint a telepítéshez.",
       });
     }
     window.dispatchEvent(new Event(HISTORY_CHANGED_EVENT));
@@ -1807,7 +1828,7 @@ function Content() {
     try {
       const response = await withBackendTimeout(clearCache());
       toaster.toast({
-        title: "Xbox Controller Check",
+        title: "Deck Play Badges",
         body: String(response.removed) + " kontrollerbejegyzés, " + String(response.gfn_removed ?? 0) +
           " GFN-AppID és " + String(response.boosteroid_removed ?? 0) + " Boosteroid-AppID törölve.",
       });
@@ -1852,7 +1873,7 @@ function Content() {
       setInstalledUpdate(response.version ?? version);
       setUpdateStatus("A v" + String(response.version ?? version) + " telepítve. Indítsd újra a Steamet és a plugint az alábbi gombbal.");
       toaster.toast({
-        title: "ControllerXbox frissítve",
+        title: "Deck Play Badges frissítve",
         body: "A v" + String(response.version ?? version) + " telepítve. A befejezéshez indítsd újra a Steamet.",
       });
     } catch (error) {
@@ -1871,7 +1892,7 @@ function Content() {
       setUpdateWorking(false);
     } else {
       toaster.toast({
-        title: "ControllerXbox",
+        title: "Deck Play Badges",
         body: result === "reloaded" ? "A plugin újratöltve." : "A Steam és a plugin újraindítása folyamatban...",
       });
     }
@@ -2002,7 +2023,7 @@ function Content() {
     >Előzmények törlése</ButtonItem></PanelSectionRow> : null}
   </PanelSection>;
 
-  return <PanelSection title="ControllerXbox">
+  return <PanelSection title="Deck Play Badges">
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("watchlist")}>
       Figyelőlista ({watchlist.length})
     </ButtonItem></PanelSectionRow>
@@ -2039,8 +2060,8 @@ export default definePlugin(() => {
   const removeLibraryDetailPatch = patchLibraryDetails();
   const removeStorePatch = patchSteamStore();
   return {
-    name: "Xbox Controller Check",
-    titleView: <div className={staticClasses.Title}>Xbox Controller Check</div>,
+    name: "Deck Play Badges",
+    titleView: <div className={staticClasses.Title}>Deck Play Badges</div>,
     content: <Content />,
     icon: <span>✓</span>,
     onDismount: () => {

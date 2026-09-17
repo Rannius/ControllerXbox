@@ -39,6 +39,8 @@ const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
 const getBackendDiagnostics = callable("get_backend_diagnostics");
 const checkForUpdate = callable("check_for_update");
+const getUpdateNotification = callable("get_update_notification");
+const acknowledgeUpdateNotification = callable("acknowledge_update_notification");
 const applyUpdate = callable("apply_update");
 const restartPluginLoader = callable("restart_plugin_loader");
 const getSettings = callable("get_settings");
@@ -326,6 +328,24 @@ async function checkBackgroundNotifications(attempt = 0) {
     }
     notificationTimer = undefined;
     try {
+        const update = await withBackendTimeout(getUpdateNotification(), 30_000);
+        if (!update.success)
+            throw new Error(update.error || "A frissítésértesítés ellenőrzése sikertelen.");
+        if (update.update_version) {
+            toaster.toast({
+                title: "Deck Play Badges frissítés",
+                body: "Új pluginverzió érhető el: v" + update.update_version + ". Nyisd meg a plugint a telepítéshez.",
+            });
+            const acknowledgement = await withBackendTimeout(acknowledgeUpdateNotification(update.update_version));
+            if (!acknowledgement.success) {
+                throw new Error(acknowledgement.error || "A frissítésértesítés nyugtázása sikertelen.");
+            }
+        }
+    }
+    catch (error) {
+        console.warn("Deck Play Badges update notification check failed", error);
+    }
+    try {
         const response = await withBackendTimeout(getNotificationEvents(appIds, getSteamLibraryGameNames()), 180_000);
         if (!response.success)
             throw new Error(response.error || "Az értesítési ellenőrzés sikertelen.");
@@ -351,12 +371,6 @@ async function checkBackgroundNotifications(attempt = 0) {
                 title: "Boosteroid karbantartás",
                 body: "Karbantartás alá került a Boosteroiden: "
                     + formatNotificationGameNames(response.boosteroid_maintenance_app_ids, boosteroidMaintenance, response.app_names) + ".",
-            });
-        }
-        if (response.update_version) {
-            toaster.toast({
-                title: "ControllerXbox frissítés",
-                body: "Új pluginverzió érhető el: v" + response.update_version + ". Nyisd meg a plugint a telepítéshez.",
             });
         }
         window.dispatchEvent(new Event(HISTORY_CHANGED_EVENT));
@@ -1690,7 +1704,7 @@ function Content() {
         try {
             const response = await withBackendTimeout(clearCache());
             toaster.toast({
-                title: "Xbox Controller Check",
+                title: "Deck Play Badges",
                 body: String(response.removed) + " kontrollerbejegyzés, " + String(response.gfn_removed ?? 0) +
                     " GFN-AppID és " + String(response.boosteroid_removed ?? 0) + " Boosteroid-AppID törölve.",
             });
@@ -1739,7 +1753,7 @@ function Content() {
             setInstalledUpdate(response.version ?? version);
             setUpdateStatus("A v" + String(response.version ?? version) + " telepítve. Indítsd újra a Steamet és a plugint az alábbi gombbal.");
             toaster.toast({
-                title: "ControllerXbox frissítve",
+                title: "Deck Play Badges frissítve",
                 body: "A v" + String(response.version ?? version) + " telepítve. A befejezéshez indítsd újra a Steamet.",
             });
         }
@@ -1760,7 +1774,7 @@ function Content() {
         }
         else {
             toaster.toast({
-                title: "ControllerXbox",
+                title: "Deck Play Badges",
                 body: result === "reloaded" ? "A plugin újratöltve." : "A Steam és a plugin újraindítása folyamatban...",
             });
         }
@@ -1774,7 +1788,7 @@ function Content() {
                 }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { marginTop: "12px", fontWeight: 700 }, children: ["Figyelt j\u00E1t\u00E9kok (", watchlist.length, ")"] }) }), watchlist.length ? watchlist.map((entry) => SP_JSX.jsxs(SP_REACT.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { paddingTop: "6px", fontWeight: 700 }, children: entry.title }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { opacity: 0.75 }, children: ["GFN: ", entry.watch_gfn ? watchlistGfnLabel(entry.gfn) : "kikapcsolva", " · Boosteroid: ", entry.watch_boosteroid ? watchlistBoosteroidLabel(entry.boosteroid) : "kikapcsolva"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: entry.watch_gfn, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, checked, entry.watch_boosteroid) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: entry.watch_boosteroid, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, entry.watch_gfn, checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: watchWorking, onClick: () => void removeWatchedGame(entry.app_id), children: "Elt\u00E1vol\u00EDt\u00E1s" }) })] }, entry.app_id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A figyel\u0151lista \u00FCres." }) })] });
     if (page === "history")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "El\u0151zm\u00E9nyek", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), history.length ? history.map((entry) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { padding: "6px 0" }, children: [SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: entry.title }), SP_JSX.jsx("div", { children: historyEventLabel(entry) }), SP_JSX.jsxs("div", { style: { opacity: 0.7, fontSize: "12px" }, children: [new Date(entry.created_at * 1000).toLocaleString("hu-HU"), " \u00B7 Steam AppID: ", entry.app_id] })] }) }, entry.id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "M\u00E9g nincs r\u00F6gz\u00EDtett esem\u00E9ny." }) }), history.length ? SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: historyWorking, onClick: clearHistory, children: "El\u0151zm\u00E9nyek t\u00F6rl\u00E9se" }) }) : null] });
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "ControllerXbox", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Deck Play Badges", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
                         ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
                             + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
                             + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
@@ -1792,8 +1806,8 @@ var index = DFL.definePlugin(() => {
     const removeLibraryDetailPatch = patchLibraryDetails();
     const removeStorePatch = patchSteamStore();
     return {
-        name: "Xbox Controller Check",
-        titleView: SP_JSX.jsx("div", { className: DFL.staticClasses.Title, children: "Xbox Controller Check" }),
+        name: "Deck Play Badges",
+        titleView: SP_JSX.jsx("div", { className: DFL.staticClasses.Title, children: "Deck Play Badges" }),
         content: SP_JSX.jsx(Content, {}),
         icon: SP_JSX.jsx("span", { children: "\u2713" }),
         onDismount: () => {

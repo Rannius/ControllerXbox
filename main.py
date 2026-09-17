@@ -765,6 +765,53 @@ class Plugin:
     async def check_for_update(self) -> Dict[str, Any]:
         return await self._run_blocking(self._check_for_update_blocking)
 
+    async def get_update_notification(self) -> Dict[str, Any]:
+        """Return an unseen update without coupling it to catalog refreshes."""
+        update = await self._run_blocking(self._check_for_update_blocking)
+        if not update.get("success"):
+            return {
+                "success": False,
+                "update_version": "",
+                "error": str(update.get("error", "A frissítés ellenőrzése sikertelen.")),
+            }
+        latest = str(update.get("latest_version", ""))
+        if (
+            not update.get("has_update")
+            or not self._settings.get("notify_plugin_updates", True)
+            or not re.fullmatch(r"\d+\.\d+\.\d+", latest)
+        ):
+            return {"success": True, "update_version": ""}
+        async with self._notification_lock:
+            state = await self._run_blocking(self._read_notification_state)
+            last_notified_update = (
+                str(state.get("last_notified_update", ""))
+                if state.get("schema_version") == NOTIFICATION_SCHEMA_VERSION
+                else ""
+            )
+        return {
+            "success": True,
+            "update_version": "" if latest == last_notified_update else latest,
+        }
+
+    async def acknowledge_update_notification(self, version: Any) -> Dict[str, Any]:
+        """Mark an update as notified only after the frontend displayed it."""
+        normalized = str(version).strip()
+        if not re.fullmatch(r"\d+\.\d+\.\d+", normalized):
+            return {"success": False, "error": "Érvénytelen verziószám."}
+        async with self._notification_lock:
+            state = await self._run_blocking(self._read_notification_state)
+            if state.get("schema_version") != NOTIFICATION_SCHEMA_VERSION:
+                state = {"schema_version": NOTIFICATION_SCHEMA_VERSION}
+            state["last_notified_update"] = normalized
+            state["checked_at"] = time.time()
+            await self._run_blocking(
+                self._write_file_atomically,
+                self._notification_state_path,
+                "controller-notifications-",
+                json.dumps(state, separators=(",", ":")),
+            )
+        return {"success": True, "version": normalized}
+
     async def apply_update(self, expected_version: str) -> Dict[str, Any]:
         async with self._update_lock:
             return await self._run_blocking(self._apply_update_blocking, expected_version)
@@ -1254,10 +1301,9 @@ class Plugin:
             for app_id, entry in watchlist.items()
         }
         known_names.update(supplied_names)
-        gfn_available, boosteroid_available, update = await asyncio.gather(
+        gfn_available, boosteroid_available = await asyncio.gather(
             self._ensure_gfn_catalog(),
             self._ensure_boosteroid_catalog(),
-            self._run_blocking(self._check_for_update_blocking),
         )
 
         async with self._gfn_lock:
@@ -1298,17 +1344,6 @@ class Plugin:
             )
 
             last_notified_update = str(state.get("last_notified_update", "")) if valid_state else ""
-            update_version = ""
-            if (
-                isinstance(update, dict)
-                and update.get("success")
-                and update.get("has_update")
-                and self._settings.get("notify_plugin_updates", True)
-                and re.fullmatch(r"\d+\.\d+\.\d+", str(update.get("latest_version", "")))
-                and str(update.get("latest_version")) != last_notified_update
-            ):
-                update_version = str(update["latest_version"])
-                last_notified_update = update_version
 
             next_state = {
                 "schema_version": NOTIFICATION_SCHEMA_VERSION,
@@ -1420,7 +1455,6 @@ class Plugin:
                 else []
             ),
             "app_names": event_names,
-            "update_version": update_version,
         }
 
     async def get_controller_support(self, app_ids: Any) -> Dict[str, Any]:

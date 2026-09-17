@@ -5,7 +5,7 @@
   "flags": ["root"],
   "publish": {
     "tags": ["controller", "library", "accessibility"],
-    "description": "Shows controller support, GeForce NOW, and Boosteroid badges in the Steam Library and Store.",
+    "description": "Deck Play Badges shows controller support, GeForce NOW, and Boosteroid status in the Steam Library and Store.",
     "image": ""
   }
 }

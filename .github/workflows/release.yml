@@ -102,5 +102,5 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             "release/ControllerXbox-${GITHUB_REF_NAME}.zip" \
-            --title "ControllerXbox ${GITHUB_REF_NAME}" \
+            --title "Deck Play Badges ${GITHUB_REF_NAME}" \
             --generate-notes
