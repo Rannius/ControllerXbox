@@ -1,6 +1,6 @@
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
-import { createElement, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createElement, Fragment, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
@@ -91,10 +91,14 @@ type WatchlistEntry = {
   app_id: string;
   title: string;
   added_at: number;
+  watch_gfn: boolean;
+  watch_boosteroid: boolean;
   gfn: "available" | "not_available" | "unavailable";
   boosteroid: "available" | "maintenance" | "not_available" | "unavailable";
 };
 type WatchlistResponse = { success: boolean; entries?: WatchlistEntry[]; error?: string };
+type SteamSearchEntry = { app_id: string; title: string };
+type SteamSearchResponse = { success: boolean; entries?: SteamSearchEntry[]; error?: string };
 type NotificationHistoryEntry = {
   id: string;
   platform: "gfn" | "boosteroid";
@@ -103,7 +107,13 @@ type NotificationHistoryEntry = {
   title: string;
   created_at: number;
 };
-type NotificationHistoryResponse = { success: boolean; entries?: NotificationHistoryEntry[]; error?: string };
+type NotificationHistoryResponse = {
+  success: boolean;
+  entries?: NotificationHistoryEntry[];
+  unread_count?: number;
+  error?: string;
+};
+type PluginPage = "home" | "watchlist" | "history" | "settings";
 type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 type GfnState = "loading" | "available" | "not_available" | "unavailable";
 type BoosteroidState = "loading" | "available" | "maintenance" | "not_available" | "unavailable";
@@ -134,6 +144,7 @@ type StoreDebuggerTab = {
 type StorePageScan = {
   url?: string;
   appIds?: string[];
+  watchActions?: string[];
 };
 type StoreRuntimeResponse = {
   id?: number;
@@ -165,10 +176,21 @@ const getNotificationEvents = callable<[
   appNames: Record<string, string>,
 ], NotificationEventsResponse>("get_notification_events");
 const getWatchlist = callable<[], WatchlistResponse>("get_watchlist");
-const addWatchlistGame = callable<[appId: string], WatchlistResponse>("add_watchlist_game");
+const addWatchlistGame = callable<[
+  appId: string,
+  watchGfn: boolean,
+  watchBoosteroid: boolean,
+], WatchlistResponse>("add_watchlist_game");
 const removeWatchlistGame = callable<[appId: string], WatchlistResponse>("remove_watchlist_game");
+const setWatchlistPlatforms = callable<[
+  appId: string,
+  watchGfn: boolean,
+  watchBoosteroid: boolean,
+], WatchlistResponse>("set_watchlist_platforms");
+const searchSteamGames = callable<[query: string], SteamSearchResponse>("search_steam_games");
 const getNotificationHistory = callable<[], NotificationHistoryResponse>("get_notification_history");
 const clearNotificationHistory = callable<[], NotificationHistoryResponse>("clear_notification_history");
+const markNotificationHistoryRead = callable<[], NotificationHistoryResponse>("mark_notification_history_read");
 
 const supportStates = new Map<string, BadgeState>();
 const gfnStates = new Map<string, GfnState>();
@@ -189,6 +211,9 @@ let storeReconnectTimer: number | undefined;
 let storeCurrentAppIds = new Set<string>();
 let notificationTimer: number | undefined;
 let pluginActive = false;
+let watchedGames = new Map<string, WatchlistEntry>();
+const watchlistListeners = new Set<() => void>();
+const watchlistMutations = new Set<string>();
 let badgeVisibility: BadgeVisibility = {
   show_gfn_badges: true,
   show_boosteroid_badges: true,
@@ -262,6 +287,42 @@ function applyBadgeVisibility(next: BadgeVisibility): void {
 function applyNotificationPreferences(next: NotificationPreferences): void {
   notificationPreferences = next;
   window.dispatchEvent(new CustomEvent<Partial<PluginSettings>>(SETTINGS_CHANGED_EVENT, { detail: next }));
+}
+
+function applyWatchlistEntries(entries: WatchlistEntry[]): void {
+  watchedGames = new Map(entries.map((entry) => [entry.app_id, entry]));
+  for (const listener of watchlistListeners) listener();
+  renderStoreBadges();
+}
+
+async function loadWatchlistState(): Promise<void> {
+  try {
+    const response = await withBackendTimeout(getWatchlist(), 120_000);
+    if (response.success) applyWatchlistEntries(response.entries ?? []);
+  } catch (error) {
+    console.warn("ControllerXbox watchlist could not be loaded", error);
+  }
+}
+
+async function toggleWatchlistGame(appId: string): Promise<void> {
+  if (watchlistMutations.has(appId)) return;
+  watchlistMutations.add(appId);
+  try {
+    const current = watchedGames.get(appId);
+    const response = current
+      ? await withBackendTimeout(removeWatchlistGame(appId), 120_000)
+      : await withBackendTimeout(addWatchlistGame(appId, true, true), 120_000);
+    if (!response.success) throw new Error(response.error || "A figyelőlista módosítása sikertelen.");
+    applyWatchlistEntries(response.entries ?? []);
+    toaster.toast({
+      title: current ? "Figyelés kikapcsolva" : "Figyelőlistához adva",
+      body: current?.title ?? watchedGames.get(appId)?.title ?? ("Steam AppID " + appId),
+    });
+  } catch (error) {
+    toaster.toast({ title: "Figyelőlista hiba", body: errorMessage(error) });
+  } finally {
+    watchlistMutations.delete(appId);
+  }
 }
 
 async function loadBadgeVisibility(): Promise<void> {
@@ -363,6 +424,49 @@ function historyEventLabel(entry: NotificationHistoryEntry): string {
   if (entry.platform === "gfn") return "Felkerült a GeForce NOW-ra";
   if (entry.event_type === "maintenance") return "Boosteroid-karbantartás alá került";
   return "Felkerült a Boosteroidra";
+}
+
+function WatchStarButton({ appId }: { appId: number }) {
+  const appIdText = String(appId);
+  const [watched, setWatched] = useState(() => watchedGames.has(appIdText));
+  const [working, setWorking] = useState(false);
+
+  useEffect(() => {
+    const listener = () => setWatched(watchedGames.has(appIdText));
+    watchlistListeners.add(listener);
+    listener();
+    return () => { watchlistListeners.delete(listener); };
+  }, [appIdText]);
+
+  const toggle = async (event: any) => {
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    setWorking(true);
+    await toggleWatchlistGame(appIdText);
+    setWorking(false);
+  };
+
+  return <button
+    type="button"
+    title={watched ? "Eltávolítás a figyelőlistáról" : "Hozzáadás a figyelőlistához"}
+    disabled={working}
+    onClick={(event) => void toggle(event)}
+    style={{
+      width: "30px",
+      height: "24px",
+      padding: 0,
+      border: 0,
+      borderRadius: "6px",
+      background: watched ? "#d9a400" : "rgba(24, 31, 40, .92)",
+      color: watched ? "#111" : "#fff",
+      fontSize: "18px",
+      lineHeight: "24px",
+      boxShadow: "0 1px 5px rgba(0,0,0,.85)",
+      cursor: "pointer",
+      pointerEvents: "auto",
+      opacity: working ? 0.6 : 1,
+    }}
+  >{watched ? "★" : "☆"}</button>;
 }
 
 async function checkBackgroundNotifications(attempt = 0): Promise<void> {
@@ -849,12 +953,13 @@ function LibraryDetailBadges({ appId }: { appId: number }) {
       gap: "3px",
       transform: "scale(.95)",
       transformOrigin: "top right",
-      pointerEvents: "none",
+      pointerEvents: "auto",
     }}
   >
     <ControllerBadge state={state} appId={appId} />
     {badgeVisibility.show_gfn_badges ? <GfnBadge state={gfnState} /> : null}
     {badgeVisibility.show_boosteroid_badges ? <BoosteroidBadge state={boosteroidState} /> : null}
+    <WatchStarButton appId={appId} />
   </span>;
 }
 
@@ -917,7 +1022,10 @@ function buildStoreScanScript(): string {
         if (id && Number(id) > 0) ids.add(id);
         if (ids.size >= 80) break;
       }
-      return { url: location.href, appIds: Array.from(ids) };
+      const watchActions = Array.isArray(window.__controllerXboxWatchActions)
+        ? window.__controllerXboxWatchActions.splice(0, 20).map(String)
+        : [];
+      return { url: location.href, appIds: Array.from(ids), watchActions };
     })();
   `;
 }
@@ -925,13 +1033,16 @@ function buildStoreScanScript(): string {
 function buildStoreBadgeScript(
   states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState }>,
   visibility: BadgeVisibility,
+  watchedAppIds: Set<string>,
 ): string {
   const serializedStates = JSON.stringify(states).replace(/</g, "\\u003c");
+  const serializedWatchedAppIds = JSON.stringify(Array.from(watchedAppIds)).replace(/</g, "\\u003c");
   const controllerPath = "M5.4 5.5h13.2c1.5 0 2.8 1 3.2 2.5l1.1 5c.4 1.8-.9 3.5-2.7 3.5-.8 0-1.5-.3-2-.9L15.6 13H8.4l-2.6 2.6c-.5.6-1.2.9-2 .9-1.8 0-3.1-1.7-2.7-3.5l1.1-5c.4-1.5 1.7-2.5 3.2-2.5Z";
   const boosteroidPath = "M13.3259 3.30744C9.865 6.72998 9.549 12.1026 12.3773 15.8818L9.46609 18.7608C8.90018 19.3204 8.90018 20.2281 9.46609 20.7883C10.032 21.3479 10.9498 21.3479 11.5163 20.7883L14.4276 17.9093C18.2491 20.7063 23.682 20.3938 27.143 16.9713C30.9524 13.2041 30.9524 7.07459 27.143 3.30801C23.3336-.45857 17.1347-.459144 13.3259 3.30744ZM25.0927 14.9438C22.7653 17.2453 19.1705 17.5469 16.5103 15.8497L17.6595 14.7133C18.2254 14.1536 18.2254 13.246 17.6595 12.6858C17.0936 12.1261 16.1757 12.1261 15.6092 12.6858L14.46 13.8222C12.7438 11.1915 13.0488 7.63651 15.3762 5.33493C18.0549 2.68588 22.414 2.68588 25.0927 5.33493C27.7715 7.98398 27.7715 12.2947 25.0927 14.9438ZM16.2841 21.6272C16.85 22.1868 16.85 23.0945 16.2841 23.6547L10.1416 29.7291C9.57567 30.2887 8.65782 30.2887 8.09134 29.7291C7.52544 29.1695 7.52544 28.2618 8.09134 27.7016L14.2345 21.6272C14.8004 21.0675 15.7182 21.0675 16.2841 21.6272ZM.424426 22.1472C-.141475 21.5876-.141475 20.6799.424426 20.1197L6.56758 14.0447C7.13348 13.4851 8.05133 13.4851 8.61782 14.0447C9.18372 14.6043 9.18372 15.512 8.61782 16.0722L2.47466 22.1472C1.90818 22.7074.990907 22.7074.424426 22.1472Z";
   return `
     (function() {
       const states = ${serializedStates};
+      const watchedAppIds = new Set(${serializedWatchedAppIds});
       const showGfn = ${visibility.show_gfn_badges ? "true" : "false"};
       const showBoosteroid = ${visibility.show_boosteroid_badges ? "true" : "false"};
       const controllerPath = ${JSON.stringify(controllerPath)};
@@ -991,7 +1102,7 @@ function buildStoreBadgeScript(
       if (!style) {
         style = document.createElement('style');
         style.id = 'controller-xbox-store-style';
-        style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;transform:scale(.95);transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;z-index:9999;transform:scale(.72);transform-origin:top left}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}';
+        style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;transform:scale(.95);transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;z-index:9999;transform:scale(.72);transform-origin:top left}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}.cxc-watch{width:30px;height:24px;padding:0;border:0;border-radius:6px;background:rgba(24,31,40,.92);color:#fff;font:bold 18px/24px Arial,sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:auto;cursor:pointer}.cxc-watch.is-watched{background:#d9a400;color:#111}';
         (document.head || document.documentElement).appendChild(style);
       }
 
@@ -1005,9 +1116,22 @@ function buildStoreBadgeScript(
           detail.className = 'cxc-store-badges cxc-store-detail';
           document.body.appendChild(detail);
         }
-        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + showGfn + ':' + showBoosteroid;
+        const isWatched = watchedAppIds.has(pageId);
+        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
         if (detail.getAttribute('data-state-key') !== key) {
           detail.innerHTML = badgesHtml(pageId, 'detail');
+          const watchButton = document.createElement('button');
+          watchButton.type = 'button';
+          watchButton.className = 'cxc-watch' + (isWatched ? ' is-watched' : '');
+          watchButton.textContent = isWatched ? '★' : '☆';
+          watchButton.title = isWatched ? 'Eltávolítás a figyelőlistáról' : 'Hozzáadás a figyelőlistához';
+          watchButton.addEventListener('click', function(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            window.__controllerXboxWatchActions = window.__controllerXboxWatchActions || [];
+            window.__controllerXboxWatchActions.push(pageId);
+          });
+          detail.appendChild(watchButton);
           detail.setAttribute('data-state-key', key);
         }
       } else if (detail) {
@@ -1084,7 +1208,7 @@ function renderStoreBadges(): void {
       boosteroid: boosteroidStates.get(appId) ?? "loading",
     };
   }
-  void sendStoreRuntime(buildStoreBadgeScript(states, badgeVisibility)).catch((error) => {
+  void sendStoreRuntime(buildStoreBadgeScript(states, badgeVisibility, new Set(watchedGames.keys()))).catch((error) => {
     console.debug("ControllerXbox store badge rendering skipped", error);
   });
 }
@@ -1106,6 +1230,10 @@ async function scanStorePage(): Promise<void> {
         .filter((value) => /^\d+$/.test(value) && Number(value) > 0),
     );
     storeCurrentAppIds = nextIds;
+    const watchActions = (Array.isArray(result?.watchActions) ? result.watchActions : [])
+      .map((value) => String(value))
+      .filter((value) => /^\d+$/.test(value) && Number(value) > 0);
+    for (const appId of watchActions) void toggleWatchlistGame(appId);
     for (const appId of nextIds) queueSupportLookup(appId);
     renderStoreBadges();
   } catch (error) {
@@ -1196,6 +1324,7 @@ function disconnectStoreDebugger(): void {
         document.getElementById('controller-xbox-store-detail-badges')?.remove();
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
+        delete window.__controllerXboxWatchActions;
       })();
     `).catch(() => {});
   }
@@ -1382,6 +1511,8 @@ function patchLibraryTiles(): () => void {
 }
 
 function Content() {
+  const [page, setPage] = useState<PluginPage>("home");
+  const pageRef = useRef<PluginPage>("home");
   const [stats, setStats] = useState<CacheStats>();
   const [status, setStatus] = useState("A jelvények aktívak.");
   const [diagnosticLog, setDiagnosticLog] = useState("Nincs rögzített hiba.");
@@ -1394,9 +1525,14 @@ function Content() {
   const [notifications, setNotifications] = useState<NotificationPreferences>({ ...notificationPreferences });
   const [settingsWorking, setSettingsWorking] = useState(false);
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
-  const [watchInput, setWatchInput] = useState("");
   const [watchWorking, setWatchWorking] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SteamSearchEntry[]>([]);
+  const [searchWorking, setSearchWorking] = useState(false);
+  const [newWatchGfn, setNewWatchGfn] = useState(true);
+  const [newWatchBoosteroid, setNewWatchBoosteroid] = useState(true);
   const [history, setHistory] = useState<NotificationHistoryEntry[]>([]);
+  const [unreadHistoryCount, setUnreadHistoryCount] = useState(0);
   const [historyWorking, setHistoryWorking] = useState(false);
 
   const refreshStats = async () => {
@@ -1411,17 +1547,22 @@ function Content() {
     try {
       const response = await withBackendTimeout(getWatchlist(), 120_000);
       if (!response.success) throw new Error(response.error || "A figyelőlista betöltése sikertelen.");
-      setWatchlist(response.entries ?? []);
+      const entries = response.entries ?? [];
+      setWatchlist(entries);
+      applyWatchlistEntries(entries);
     } catch (error) {
       setDiagnosticLog("Figyelőlista: " + errorMessage(error));
     }
   };
 
-  const refreshHistory = async () => {
+  const refreshHistory = async (markRead = false) => {
     try {
-      const response = await withBackendTimeout(getNotificationHistory());
+      const response = await withBackendTimeout(
+        markRead ? markNotificationHistoryRead() : getNotificationHistory(),
+      );
       if (!response.success) throw new Error(response.error || "Az értesítési előzmények betöltése sikertelen.");
       setHistory(response.entries ?? []);
+      setUnreadHistoryCount(response.unread_count ?? 0);
     } catch (error) {
       setDiagnosticLog("Értesítési előzmények: " + errorMessage(error));
     }
@@ -1453,8 +1594,11 @@ function Content() {
     void refreshUpdateInfo(true);
     const onCacheChanged = () => void refreshStats();
     const onHistoryChanged = () => {
-      void refreshHistory();
+      void refreshHistory(pageRef.current === "history");
       void refreshWatchlist();
+    };
+    const onWatchlistChanged = () => {
+      setWatchlist(Array.from(watchedGames.values()).sort((left, right) => left.title.localeCompare(right.title)));
     };
     const onTileStatus = (event: Event) => {
       const detail = (event as CustomEvent<string>).detail;
@@ -1487,13 +1631,19 @@ function Content() {
     window.addEventListener(HISTORY_CHANGED_EVENT, onHistoryChanged);
     window.addEventListener(TILE_STATUS_EVENT, onTileStatus);
     window.addEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged);
+    watchlistListeners.add(onWatchlistChanged);
     return () => {
       window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
       window.removeEventListener(HISTORY_CHANGED_EVENT, onHistoryChanged);
       window.removeEventListener(TILE_STATUS_EVENT, onTileStatus);
       window.removeEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged);
+      watchlistListeners.delete(onWatchlistChanged);
     };
   }, []);
+
+  useEffect(() => {
+    pageRef.current = page;
+  }, [page]);
 
   const updateVisibility = async (next: BadgeVisibility) => {
     const previous = visibility;
@@ -1546,23 +1696,43 @@ function Content() {
     }
   };
 
-  const addWatchedGame = async () => {
-    const appId = watchInput.trim();
-    if (!/^\d+$/.test(appId)) {
-      toaster.toast({ title: "Figyelőlista", body: "Adj meg egy érvényes Steam AppID-t." });
+  const searchForGames = async () => {
+    const query = searchQuery.trim();
+    if (query.length < 2) {
+      toaster.toast({ title: "Steam-keresés", body: "Írj be legalább két karaktert." });
+      return;
+    }
+    setSearchWorking(true);
+    try {
+      const response = await withBackendTimeout(searchSteamGames(query), 30_000);
+      if (!response.success) throw new Error(response.error || "A Steam-keresés sikertelen.");
+      setSearchResults(response.entries ?? []);
+    } catch (error) {
+      setSearchResults([]);
+      toaster.toast({ title: "Steam-keresési hiba", body: errorMessage(error) });
+    } finally {
+      setSearchWorking(false);
+    }
+  };
+
+  const addWatchedGame = async (appId: string) => {
+    if (!newWatchGfn && !newWatchBoosteroid) {
+      toaster.toast({ title: "Figyelőlista", body: "Legalább egy platformot válassz ki." });
       return;
     }
     setWatchWorking(true);
     try {
-      const response = await withBackendTimeout(addWatchlistGame(appId), 120_000);
+      const response = await withBackendTimeout(
+        addWatchlistGame(appId, newWatchGfn, newWatchBoosteroid),
+        120_000,
+      );
       if (!response.success) throw new Error(response.error || "A játék felvétele sikertelen.");
-      setWatchlist(response.entries ?? []);
-      setWatchInput("");
-      const added = (response.entries ?? []).find((entry) => entry.app_id === appId);
-      toaster.toast({
-        title: "Figyelőlistához adva",
-        body: added?.title ?? ("Steam AppID " + appId),
-      });
+      const entries = response.entries ?? [];
+      applyWatchlistEntries(entries);
+      setWatchlist(entries);
+      setSearchResults((current) => current.filter((entry) => entry.app_id !== appId));
+      const added = entries.find((entry) => entry.app_id === appId);
+      toaster.toast({ title: "Figyelőlistához adva", body: added?.title ?? ("Steam AppID " + appId) });
     } catch (error) {
       toaster.toast({ title: "Figyelőlista hiba", body: errorMessage(error) });
     } finally {
@@ -1575,12 +1745,45 @@ function Content() {
     try {
       const response = await withBackendTimeout(removeWatchlistGame(appId), 120_000);
       if (!response.success) throw new Error(response.error || "A játék eltávolítása sikertelen.");
-      setWatchlist(response.entries ?? []);
+      const entries = response.entries ?? [];
+      setWatchlist(entries);
+      applyWatchlistEntries(entries);
     } catch (error) {
       toaster.toast({ title: "Figyelőlista hiba", body: errorMessage(error) });
     } finally {
       setWatchWorking(false);
     }
+  };
+
+  const updateWatchedPlatforms = async (
+    entry: WatchlistEntry,
+    watchGfn: boolean,
+    watchBoosteroid: boolean,
+  ) => {
+    if (!watchGfn && !watchBoosteroid) {
+      toaster.toast({ title: "Figyelőlista", body: "Legalább egy platformot hagyj bekapcsolva." });
+      return;
+    }
+    setWatchWorking(true);
+    try {
+      const response = await withBackendTimeout(
+        setWatchlistPlatforms(entry.app_id, watchGfn, watchBoosteroid),
+        120_000,
+      );
+      if (!response.success) throw new Error(response.error || "A platformbeállítás mentése sikertelen.");
+      const entries = response.entries ?? [];
+      setWatchlist(entries);
+      applyWatchlistEntries(entries);
+    } catch (error) {
+      toaster.toast({ title: "Figyelőlista hiba", body: errorMessage(error) });
+    } finally {
+      setWatchWorking(false);
+    }
+  };
+
+  const openPage = (nextPage: PluginPage) => {
+    setPage(nextPage);
+    if (nextPage === "history") void refreshHistory(true);
   };
 
   const clearHistory = async () => {
@@ -1589,6 +1792,7 @@ function Content() {
       const response = await withBackendTimeout(clearNotificationHistory());
       if (!response.success) throw new Error(response.error || "Az előzmények törlése sikertelen.");
       setHistory([]);
+      setUnreadHistoryCount(0);
       toaster.toast({ title: "Értesítési előzmények", body: "Az előzmények törölve." });
     } catch (error) {
       toaster.toast({ title: "Előzménytörlési hiba", body: errorMessage(error) });
@@ -1673,16 +1877,17 @@ function Content() {
     }
   };
 
-  return <PanelSection title="Xbox Controller Check">
-    <PanelSectionRow><div style={{ fontWeight: 700 }}>Megjelenített jelvények</div></PanelSectionRow>
+  if (page === "settings") return <PanelSection title="Beállítások">
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontWeight: 700 }}>Jelvények</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
-      label="GeForce NOW jelvények"
+      label="GeForce NOW"
       checked={visibility.show_gfn_badges}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked })}
     /></PanelSectionRow>
     <PanelSectionRow><ToggleField
-      label="Boosteroid jelvények"
+      label="Boosteroid"
       checked={visibility.show_boosteroid_badges}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked })}
@@ -1712,34 +1917,75 @@ function Content() {
       disabled={settingsWorking}
       onChange={(checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked })}
     /></PanelSectionRow>
-    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Figyelőlista</div></PanelSectionRow>
+  </PanelSection>;
+
+  if (page === "watchlist") return <PanelSection title="Figyelőlista">
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
     <PanelSectionRow><TextField
-      label="Steam AppID"
-      value={watchInput}
-      mustBeNumeric
+      label="Játéknév vagy Steam AppID"
+      value={searchQuery}
       bShowClearAction
-      disabled={watchWorking}
-      onChange={(event) => setWatchInput(event.currentTarget.value)}
+      disabled={searchWorking || watchWorking}
+      onChange={(event) => setSearchQuery(event.currentTarget.value)}
     /></PanelSectionRow>
     <PanelSectionRow><ButtonItem
       layout="below"
-      disabled={watchWorking || !watchInput.trim()}
-      onClick={addWatchedGame}
-    >Hozzáadás</ButtonItem></PanelSectionRow>
-    {watchlist.length ? watchlist.map((entry) =>
-      <PanelSectionRow key={entry.app_id}><ButtonItem
+      disabled={searchWorking || watchWorking || searchQuery.trim().length < 2}
+      onClick={searchForGames}
+    >Keresés</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ToggleField
+      label="GeForce NOW figyelése"
+      checked={newWatchGfn}
+      disabled={watchWorking}
+      onChange={setNewWatchGfn}
+    /></PanelSectionRow>
+    <PanelSectionRow><ToggleField
+      label="Boosteroid figyelése"
+      checked={newWatchBoosteroid}
+      disabled={watchWorking}
+      onChange={setNewWatchBoosteroid}
+    /></PanelSectionRow>
+    {searchResults.map((entry) => {
+      const alreadyWatched = watchedGames.has(entry.app_id);
+      return <PanelSectionRow key={"search-" + entry.app_id}><ButtonItem
         layout="below"
         label={entry.title}
-        description={
-          "Steam AppID: " + entry.app_id
-          + " · GFN: " + watchlistGfnLabel(entry.gfn)
-          + " · Boosteroid: " + watchlistBoosteroidLabel(entry.boosteroid)
-        }
+        description={"Steam AppID: " + entry.app_id}
+        disabled={watchWorking || alreadyWatched}
+        onClick={() => void addWatchedGame(entry.app_id)}
+      >{alreadyWatched ? "Már figyelve" : "Hozzáadás"}</ButtonItem></PanelSectionRow>;
+    })}
+    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>
+      Figyelt játékok ({watchlist.length})
+    </div></PanelSectionRow>
+    {watchlist.length ? watchlist.map((entry) => <Fragment key={entry.app_id}>
+      <PanelSectionRow><div style={{ paddingTop: "6px", fontWeight: 700 }}>{entry.title}</div></PanelSectionRow>
+      <PanelSectionRow><div style={{ opacity: 0.75 }}>
+        GFN: {entry.watch_gfn ? watchlistGfnLabel(entry.gfn) : "kikapcsolva"}
+        {" · Boosteroid: "}{entry.watch_boosteroid ? watchlistBoosteroidLabel(entry.boosteroid) : "kikapcsolva"}
+      </div></PanelSectionRow>
+      <PanelSectionRow><ToggleField
+        label="GeForce NOW"
+        checked={entry.watch_gfn}
+        disabled={watchWorking}
+        onChange={(checked) => void updateWatchedPlatforms(entry, checked, entry.watch_boosteroid)}
+      /></PanelSectionRow>
+      <PanelSectionRow><ToggleField
+        label="Boosteroid"
+        checked={entry.watch_boosteroid}
+        disabled={watchWorking}
+        onChange={(checked) => void updateWatchedPlatforms(entry, entry.watch_gfn, checked)}
+      /></PanelSectionRow>
+      <PanelSectionRow><ButtonItem
+        layout="below"
         disabled={watchWorking}
         onClick={() => void removeWatchedGame(entry.app_id)}
-      >Eltávolítás</ButtonItem></PanelSectionRow>,
-    ) : <PanelSectionRow><div>A figyelőlista üres.</div></PanelSectionRow>}
-    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Előzmények</div></PanelSectionRow>
+      >Eltávolítás</ButtonItem></PanelSectionRow>
+    </Fragment>) : <PanelSectionRow><div>A figyelőlista üres.</div></PanelSectionRow>}
+  </PanelSection>;
+
+  if (page === "history") return <PanelSection title="Előzmények">
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
     {history.length ? history.map((entry) =>
       <PanelSectionRow key={entry.id}><div style={{ padding: "6px 0" }}>
         <div style={{ fontWeight: 700 }}>{entry.title}</div>
@@ -1748,12 +1994,22 @@ function Content() {
           {new Date(entry.created_at * 1000).toLocaleString("hu-HU")} · Steam AppID: {entry.app_id}
         </div>
       </div></PanelSectionRow>,
-    ) : <PanelSectionRow><div>Még nincs rögzített értesítési esemény.</div></PanelSectionRow>}
+    ) : <PanelSectionRow><div>Még nincs rögzített esemény.</div></PanelSectionRow>}
     {history.length ? <PanelSectionRow><ButtonItem
       layout="below"
       disabled={historyWorking}
       onClick={clearHistory}
-    >Értesítési előzmények törlése</ButtonItem></PanelSectionRow> : null}
+    >Előzmények törlése</ButtonItem></PanelSectionRow> : null}
+  </PanelSection>;
+
+  return <PanelSection title="ControllerXbox">
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("watchlist")}>
+      Figyelőlista ({watchlist.length})
+    </ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("history")}>
+      Előzmények{unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""}
+    </ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>Beállítások</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats
       ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
@@ -1762,8 +2018,8 @@ function Content() {
       : "Állapot betöltése..."}</div></PanelSectionRow>
     {diagnosticLog !== "Nincs rögzített hiba." ?
       <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hiba: {diagnosticLog}</div></PanelSectionRow> : null}
-    <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={backendCheck}>Látható játékok újraellenőrzése</ButtonItem></PanelSectionRow>
-    <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={clearAndRefresh}>Cache törlése és újraellenőrzés</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={backendCheck}>Játékok újraellenőrzése</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={clearAndRefresh}>Cache törlése</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Pluginfrissítés</div></PanelSectionRow>
     <PanelSectionRow><div>{updateStatus}</div></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={updateWorking} onClick={() => void refreshUpdateInfo()}>Frissítések keresése</ButtonItem></PanelSectionRow>
@@ -1777,6 +2033,7 @@ function Content() {
 export default definePlugin(() => {
   pluginActive = true;
   void loadBadgeVisibility();
+  void loadWatchlistState();
   notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(), 10_000);
   const removeTilePatch = patchLibraryTiles();
   const removeLibraryDetailPatch = patchLibraryDetails();
