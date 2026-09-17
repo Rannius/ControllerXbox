@@ -33,6 +33,14 @@ jobs:
       - name: Frontend fordítása
         run: pnpm run build
 
+      - name: Frontend típusok és felületfrissítő ellenőrzése
+        run: |
+          pnpm run check
+          pnpm test
+
+      - name: Backend beállítások és Python 3.8 szintaxis ellenőrzése
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
       - name: Kiadási verzió ellenőrzése
         run: |
           node -e 'const version = "v" + require("./package.json").version; if (version !== process.env.GITHUB_REF_NAME) { console.error("Verzióeltérés: " + version + " != " + process.env.GITHUB_REF_NAME); process.exit(1); }'
@@ -45,6 +53,7 @@ jobs:
           mkdir -p release
           python3 - <<'PY'
           import os
+          from copy import copy
           from pathlib import Path
           import struct
           import zipfile
@@ -63,9 +72,12 @@ jobs:
               "dist/index.js.map",
           ]
           output = Path("release") / f"ControllerXbox-v{version}.zip"
+          with zipfile.ZipFile("releases/ControllerXbox-v1.0.0.zip") as baseline:
+              reference_entries = baseline.infolist()
+          assert [entry.filename for entry in reference_entries] == [f"{root}/{relative}" for relative in files]
           with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
-              for relative in files:
-                  info = zipfile.ZipInfo(f"{root}/{relative}")
+              for relative, reference in zip(files, reference_entries):
+                  info = copy(reference)
                   info.create_system = 0
                   info.create_version = 20
                   info.extract_version = 20
@@ -88,7 +100,15 @@ jobs:
           output.write_bytes(data)
           with zipfile.ZipFile(output) as archive:
               assert archive.namelist() == [f"{root}/{relative}" for relative in files]
-              for entry in archive.infolist():
+              assert archive.namelist() == [entry.filename for entry in reference_entries]
+              assert archive.testzip() is None
+              for entry, reference in zip(archive.infolist(), reference_entries):
+                  for attribute in (
+                      "date_time", "compress_type", "create_system", "create_version",
+                      "extract_version", "flag_bits", "internal_attr", "external_attr",
+                      "extra", "comment",
+                  ):
+                      assert getattr(entry, attribute) == getattr(reference, attribute), (entry.filename, attribute)
                   assert entry.compress_type == zipfile.ZIP_DEFLATED
                   assert entry.flag_bits == 0
                   assert entry.create_system == 0
@@ -100,6 +120,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          NOTES_FILE=".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            gh release create "${GITHUB_REF_NAME}" \
+              "release/ControllerXbox-${GITHUB_REF_NAME}.zip" \
+              --title "Deck Play Badges ${GITHUB_REF_NAME}" \
+              --notes-file "$NOTES_FILE"
+            exit 0
+          fi
           gh release create "${GITHUB_REF_NAME}" \
             "release/ControllerXbox-${GITHUB_REF_NAME}.zip" \
             --title "Deck Play Badges ${GITHUB_REF_NAME}" \

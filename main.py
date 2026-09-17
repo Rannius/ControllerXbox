@@ -88,6 +88,7 @@ class Plugin:
             "notify_boosteroid_additions": True,
             "notify_boosteroid_maintenance": True,
             "notify_plugin_updates": True,
+            "refresh_ui_after_resume": False,
         }
         # Recent Decky versions expose the settings directory as
         # ``decky_SETTINGS_DIR``.  Keep the older name as a fallback so a
@@ -223,6 +224,7 @@ class Plugin:
                     "notify_boosteroid_additions",
                     "notify_boosteroid_maintenance",
                     "notify_plugin_updates",
+                    "refresh_ui_after_resume",
                 ):
                     if isinstance(parsed.get(key), bool):
                         self._settings[key] = parsed[key]
@@ -244,6 +246,18 @@ class Plugin:
         )
 
     async def get_settings(self) -> Dict[str, Any]:
+        return {"success": True, **self._settings}
+
+    async def set_ui_refresh_enabled(self, enabled: Any) -> Dict[str, Any]:
+        if not isinstance(enabled, bool):
+            return {"success": False, "error": "A felületfrissítés beállítása érvénytelen."}
+        previous = self._settings["refresh_ui_after_resume"]
+        self._settings["refresh_ui_after_resume"] = enabled
+        try:
+            await self._save_settings()
+        except OSError:
+            self._settings["refresh_ui_after_resume"] = previous
+            return {"success": False, "error": "A felületfrissítés beállítását nem sikerült menteni."}
         return {"success": True, **self._settings}
 
     async def set_badge_visibility(self, show_gfn_badges: Any, show_boosteroid_badges: Any) -> Dict[str, Any]:

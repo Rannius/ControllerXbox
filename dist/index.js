@@ -20,12 +20,113 @@ const routerHook = api.routerHook;
 const toaster = api.toaster;
 const fetchNoCors = api.fetchNoCors;
 
+// Restart the same shared UI context as Decky's own reinjection helper.
+// This cannot repair a native Steam Input/driver fault or verify the buttons.
+class SteamUiRefresher {
+    constructor(env) {
+        this.env = env;
+        this.automaticAvailable = false;
+        this.status = { working: false, message: "A felületfrissítő kipróbálásra kész." };
+        this.enabled = false;
+        this.disposed = false;
+        this.suspended = false;
+        this.subscriptions = [];
+        this.available = typeof env.browser?.RestartJSContext === "function";
+        if (!this.available) {
+            this.status.message = "A Steam felület-újratöltése ezen a verzión nem érhető el.";
+            return;
+        }
+        const system = env.system;
+        if (!system?.RegisterForOnResumeFromSuspend || !system.RegisterForOnSuspendRequest)
+            return;
+        try {
+            this.subscriptions.push(system.RegisterForOnResumeFromSuspend(() => {
+                // Require a suspend observed by THIS instance. A resume callback on
+                // re-registration after a JS restart must never cause a reload loop.
+                const wasSuspended = this.suspended;
+                this.suspended = false;
+                if (wasSuspended && this.enabled)
+                    this.schedule(3_000);
+            }));
+            this.subscriptions.push(system.RegisterForOnSuspendRequest(() => {
+                this.suspended = true;
+                this.cancel();
+            }));
+            this.automaticAvailable = true;
+        }
+        catch {
+            this.unsubscribe();
+            this.update(false, "Az automatikus ébresztésfigyelés nem érhető el. Kézzel újratöltheted a felületet.");
+        }
+    }
+    setEnabled(enabled) {
+        this.enabled = enabled && this.automaticAvailable;
+        if (!this.enabled)
+            this.cancel();
+    }
+    refresh() {
+        this.schedule(250);
+    }
+    schedule(delay) {
+        if (this.disposed || this.suspended || !this.available || this.status.working)
+            return;
+        this.update(true, "A Steam felületének újratöltése hamarosan elindul…");
+        this.timer = this.env.setTimeout(() => {
+            this.timer = undefined;
+            try {
+                if (this.env.isLocked()) {
+                    this.update(false, "Az újratöltés kimaradt: a zárolási képernyő aktív.");
+                    return;
+                }
+                this.update(true, "Újratöltés kérve. A felület visszatérése után próbáld ki a STEAM és a … gombot.");
+                // If this context remains alive, the native call did not establish
+                // that a reload happened. Do not retry or escalate to a Steam restart.
+                this.timer = this.env.setTimeout(() => {
+                    this.timer = undefined;
+                    this.update(false, "Az újratöltést nem sikerült visszaigazolni. Ha a gombok továbbra sem működnek, a hiba mélyebben lehet a Steamben.");
+                }, 15_000);
+                this.env.browser.RestartJSContext();
+            }
+            catch (error) {
+                this.cancel();
+                this.update(false, "Felületfrissítési hiba: " + (error instanceof Error ? error.message : String(error)));
+            }
+        }, delay);
+    }
+    update(working, message) {
+        this.status = { working, message };
+        if (!this.disposed)
+            this.env.report(this.status);
+    }
+    cancel() {
+        if (this.timer !== undefined)
+            this.env.clearTimeout(this.timer);
+        this.timer = undefined;
+        if (this.status.working)
+            this.update(false, "A várakozó felületfrissítés leállítva.");
+    }
+    unsubscribe() {
+        for (const subscription of this.subscriptions.splice(0)) {
+            try {
+                subscription.unregister();
+            }
+            catch { /* Continue cleaning up. */ }
+        }
+    }
+    dispose() {
+        this.disposed = true;
+        this.cancel();
+        this.unsubscribe();
+    }
+}
+
 const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
 const TILE_STATUS_EVENT = "controller-xbox-tile-status";
 const SETTINGS_CHANGED_EVENT = "controller-xbox-settings-changed";
 const HISTORY_CHANGED_EVENT = "controller-xbox-history-changed";
+const UI_REFRESH_EVENT = "controller-xbox-ui-refresh";
 const BADGE_KEY = "controller-xbox-tile-badge";
 const DETAIL_BADGE_KEY = "controller-xbox-detail-badge";
 const DETAIL_PATCH_FLAG = "__controllerXboxDetailPatched";
@@ -44,6 +145,7 @@ const acknowledgeUpdateNotification = callable("acknowledge_update_notification"
 const applyUpdate = callable("apply_update");
 const restartPluginLoader = callable("restart_plugin_loader");
 const getSettings = callable("get_settings");
+const setUiRefreshEnabled = callable("set_ui_refresh_enabled");
 const setBadgeVisibility = callable("set_badge_visibility");
 const setNotificationPreferences = callable("set_notification_preferences");
 const getNotificationEvents = callable("get_notification_events");
@@ -74,6 +176,8 @@ let storeReconnectTimer;
 let storeCurrentAppIds = new Set();
 let notificationTimer;
 let pluginActive = false;
+let steamUiRefresher;
+let refreshUiAfterResume = false;
 let watchedGames = new Map();
 const watchlistListeners = new Set();
 const watchlistMutations = new Set();
@@ -210,11 +314,19 @@ async function loadBadgeVisibility() {
                 notify_boosteroid_maintenance: response.notify_boosteroid_maintenance ?? true,
                 notify_plugin_updates: response.notify_plugin_updates ?? true,
             });
+            applyUiRefreshSetting(response.refresh_ui_after_resume ?? false);
         }
     }
     catch (error) {
         console.warn("ControllerXbox badge settings could not be loaded", error);
     }
+}
+function applyUiRefreshSetting(enabled) {
+    refreshUiAfterResume = enabled;
+    steamUiRefresher?.setEnabled(enabled);
+    window.dispatchEvent(new CustomEvent(SETTINGS_CHANGED_EVENT, {
+        detail: { refresh_ui_after_resume: enabled },
+    }));
 }
 function getSteamLibraryApps() {
     try {
@@ -1430,6 +1542,10 @@ function Content() {
     const [visibility, setVisibility] = SP_REACT.useState({ ...badgeVisibility });
     const [notifications, setNotifications] = SP_REACT.useState({ ...notificationPreferences });
     const [settingsWorking, setSettingsWorking] = SP_REACT.useState(false);
+    const [autoUiRefresh, setAutoUiRefresh] = SP_REACT.useState(refreshUiAfterResume);
+    const [uiStatus, setUiStatus] = SP_REACT.useState(() => steamUiRefresher?.status ?? {
+        working: false, message: "A felületfrissítő nem érhető el.",
+    });
     const [watchlist, setWatchlist] = SP_REACT.useState([]);
     const [watchWorking, setWatchWorking] = SP_REACT.useState(false);
     const [searchQuery, setSearchQuery] = SP_REACT.useState("");
@@ -1518,6 +1634,9 @@ function Content() {
             const detail = event.detail;
             if (!detail)
                 return;
+            if (typeof detail.refresh_ui_after_resume === "boolean") {
+                setAutoUiRefresh(detail.refresh_ui_after_resume);
+            }
             if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean") {
                 setVisibility((current) => ({
                     show_gfn_badges: detail.show_gfn_badges ?? current.show_gfn_badges,
@@ -1536,12 +1655,15 @@ function Content() {
                 }));
             }
         };
+        const onUiRefresh = (event) => setUiStatus(event.detail);
+        window.addEventListener(UI_REFRESH_EVENT, onUiRefresh);
         window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
         window.addEventListener(HISTORY_CHANGED_EVENT, onHistoryChanged);
         window.addEventListener(TILE_STATUS_EVENT, onTileStatus);
         window.addEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged);
         watchlistListeners.add(onWatchlistChanged);
         return () => {
+            window.removeEventListener(UI_REFRESH_EVENT, onUiRefresh);
             window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
             window.removeEventListener(HISTORY_CHANGED_EVENT, onHistoryChanged);
             window.removeEventListener(TILE_STATUS_EVENT, onTileStatus);
@@ -1552,6 +1674,21 @@ function Content() {
     SP_REACT.useEffect(() => {
         pageRef.current = page;
     }, [page]);
+    const updateUiRefresh = async (enabled) => {
+        setSettingsWorking(true);
+        try {
+            const response = await withBackendTimeout(setUiRefreshEnabled(enabled));
+            if (!response.success)
+                throw new Error(response.error || "A beállítás mentése sikertelen.");
+            applyUiRefreshSetting(response.refresh_ui_after_resume);
+        }
+        catch (error) {
+            toaster.toast({ title: "Beállítási hiba", body: errorMessage(error) });
+        }
+        finally {
+            setSettingsWorking(false);
+        }
+    };
     const updateVisibility = async (next) => {
         const previous = visibility;
         setSettingsWorking(true);
@@ -1787,7 +1924,7 @@ function Content() {
         }
     };
     if (page === "settings")
-        return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
+        return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Fel\u00FCletfriss\u00EDt\u00E9s \u00E9breszt\u00E9s ut\u00E1n", description: "K\u00EDs\u00E9rleti: \u00E9breszt\u00E9s ut\u00E1n \u00FAjrat\u00F6lti a Steam fel\u00FClet\u00E9t. A fel\u00FClet \u00E1tmenetileg elt\u0171nhet. El\u0151bb pr\u00F3b\u00E1ld ki k\u00E9zzel; alapb\u00F3l kikapcsolva.", checked: autoUiRefresh, disabled: settingsWorking || !steamUiRefresher?.automaticAvailable, onChange: (checked) => void updateUiRefresh(checked) }) }), !steamUiRefresher?.automaticAvailable ? SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Az automatikus \u00E9breszt\u00E9sfigyel\u00E9s ezen a Steam-verzi\u00F3n nem \u00E9rhet\u0151 el." }) }) : null, SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
     if (page === "watchlist")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Figyel\u0151lista", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "J\u00E1t\u00E9kn\u00E9v vagy Steam AppID", value: searchQuery, bShowClearAction: true, disabled: searchWorking || watchWorking, onChange: (event) => setSearchQuery(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: searchWorking || watchWorking || searchQuery.trim().length < 2, onClick: searchForGames, children: "Keres\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW figyel\u00E9se", checked: newWatchGfn, disabled: watchWorking, onChange: setNewWatchGfn }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid figyel\u00E9se", checked: newWatchBoosteroid, disabled: watchWorking, onChange: setNewWatchBoosteroid }) }), searchResults.map((entry) => {
                     const alreadyWatched = watchedGames.has(entry.app_id);
@@ -1795,7 +1932,7 @@ function Content() {
                 }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { marginTop: "12px", fontWeight: 700 }, children: ["Figyelt j\u00E1t\u00E9kok (", watchlist.length, ")"] }) }), watchlist.length ? watchlist.map((entry) => SP_JSX.jsxs(SP_REACT.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { paddingTop: "6px", fontWeight: 700 }, children: entry.title }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { opacity: 0.75 }, children: ["GFN: ", entry.watch_gfn ? watchlistGfnLabel(entry.gfn) : "kikapcsolva", " · Boosteroid: ", entry.watch_boosteroid ? watchlistBoosteroidLabel(entry.boosteroid) : "kikapcsolva"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: entry.watch_gfn, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, checked, entry.watch_boosteroid) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: entry.watch_boosteroid, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, entry.watch_gfn, checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: watchWorking, onClick: () => void removeWatchedGame(entry.app_id), children: "Elt\u00E1vol\u00EDt\u00E1s" }) })] }, entry.app_id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A figyel\u0151lista \u00FCres." }) })] });
     if (page === "history")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "El\u0151zm\u00E9nyek", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), history.length ? history.map((entry) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { padding: "6px 0" }, children: [SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: entry.title }), SP_JSX.jsx("div", { children: historyEventLabel(entry) }), SP_JSX.jsxs("div", { style: { opacity: 0.7, fontSize: "12px" }, children: [new Date(entry.created_at * 1000).toLocaleString("hu-HU"), " \u00B7 Steam AppID: ", entry.app_id] })] }) }, entry.id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "M\u00E9g nincs r\u00F6gz\u00EDtett esem\u00E9ny." }) }), history.length ? SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: historyWorking, onClick: clearHistory, children: "El\u0151zm\u00E9nyek t\u00F6rl\u00E9se" }) }) : null] });
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Deck Play Badges", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Deck Play Badges", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", description: "K\u00EDs\u00E9rleti seg\u00EDts\u00E9g a beragadt STEAM \u00E9s \u2026 gombhoz. A Steam fel\u00FClete \u00E1tmenetileg elt\u0171nik. Els\u0151 pr\u00F3ba el\u0151tt ments a j\u00E1t\u00E9kban.", disabled: uiStatus.working || !steamUiRefresher?.available, onClick: () => void steamUiRefresher?.refresh(), children: "Steam fel\u00FClet \u00FAjrat\u00F6lt\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: uiStatus.message }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
                         ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
                             + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
                             + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
@@ -1806,6 +1943,19 @@ function Content() {
 }
 var index = DFL.definePlugin(() => {
     pluginActive = true;
+    steamUiRefresher = new SteamUiRefresher({
+        system: window.SteamClient?.System,
+        browser: window.SteamClient?.Browser,
+        isLocked: () => {
+            if (typeof window.securitystore?.IsLockScreenActive !== "function") {
+                throw new Error("A Steam zárolási állapota nem ellenőrizhető.");
+            }
+            return window.securitystore.IsLockScreenActive();
+        },
+        setTimeout: (callback, delay) => window.setTimeout(callback, delay),
+        clearTimeout: (timer) => window.clearTimeout(timer),
+        report: (status) => window.dispatchEvent(new CustomEvent(UI_REFRESH_EVENT, { detail: status })),
+    });
     void loadBadgeVisibility();
     void loadWatchlistState();
     notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(), 10_000);
@@ -1819,6 +1969,8 @@ var index = DFL.definePlugin(() => {
         icon: SP_JSX.jsx("span", { children: "\u2713" }),
         onDismount: () => {
             pluginActive = false;
+            steamUiRefresher?.dispose();
+            steamUiRefresher = undefined;
             if (notificationTimer !== undefined)
                 window.clearTimeout(notificationTimer);
             notificationTimer = undefined;
