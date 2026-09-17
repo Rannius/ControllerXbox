@@ -1,7 +1,7 @@
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
 import { createElement, Fragment, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { SleepManager, SteamUiRefresher, UiRefreshStatus } from "./steamUiRefresher";
+import { SteamUiRefresher, UiRefreshStatus, UiResumeSnapshot, UiRefreshPermission, RefreshTrigger, RefreshGuard, uiRefreshOutcomeMessage } from "./steamUiRefresher";
 
 const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
@@ -176,6 +176,11 @@ const applyUpdate = callable<[expectedVersion: string], UpdateApplyResponse>("ap
 const restartPluginLoader = callable<[], { success: boolean }>("restart_plugin_loader");
 const getSettings = callable<[], SettingsResponse>("get_settings");
 const setUiRefreshEnabled = callable<[enabled: boolean], SettingsResponse>("set_ui_refresh_enabled");
+const getUiResumeStatus = callable<[], UiResumeSnapshot>("get_ui_resume_status");
+const beginUiRefresh = callable<
+  [trigger: RefreshTrigger, session: string, sequence: number, guard: RefreshGuard], UiRefreshPermission
+>("begin_ui_refresh");
+const finishUiRefresh = callable<[attempt: string, outcome: string], { success: boolean }>("finish_ui_refresh");
 const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean], SettingsResponse>("set_badge_visibility");
 const setNotificationPreferences = callable<[
   notifyGfnAdditions: boolean,
@@ -245,12 +250,13 @@ const storeRuntimeRequests = new Map<number, {
 }>();
 
 function withBackendTimeout<T>(request: Promise<T>, timeoutMs = BACKEND_TIMEOUT_MS): Promise<T> {
+  let timer: number | undefined;
   return Promise.race([
     request,
     new Promise<never>((_, reject) => {
-      window.setTimeout(() => reject(new Error("A Decky backend " + String(timeoutMs / 1000) + " másodpercen belül nem válaszolt.")), timeoutMs);
+      timer = window.setTimeout(() => reject(new Error("A Decky backend " + String(timeoutMs / 1000) + " másodpercen belül nem válaszolt.")), timeoutMs);
     }),
-  ]);
+  ]).finally(() => { if (timer !== undefined) window.clearTimeout(timer); });
 }
 
 function errorMessage(error: unknown): string {
@@ -2084,6 +2090,14 @@ function Content() {
       onClick={() => void steamUiRefresher?.refresh()}
     >Steam felület újratöltése</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div>{uiStatus.message}</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: 0.85 }}>
+      <div>{uiStatus.monitorMessage ?? "Ébresztésfigyelés ellenőrzése…"}</div>
+      <div>Utolsó észlelt ébresztés: {uiStatus.resume?.last_resume_at
+        ? new Date(uiStatus.resume.last_resume_at * 1000).toLocaleString("hu-HU") : "még nincs"}</div>
+      <div>Utolsó újratöltési kérés: {uiStatus.resume?.last_request_at
+        ? new Date(uiStatus.resume.last_request_at * 1000).toLocaleString("hu-HU") : "még nincs"}</div>
+      <div>{uiRefreshOutcomeMessage(uiStatus.resume?.last_outcome ?? "idle")}</div>
+    </div></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("watchlist")}>
       Figyelőlista ({watchlist.length})
     </ButtonItem></PanelSectionRow>
@@ -2113,19 +2127,11 @@ function Content() {
 
 export default definePlugin(() => {
   pluginActive = true;
-  let sleepManager: SleepManager | undefined;
-  try {
-    sleepManager = findModuleExport((value) =>
-      typeof value?.RegisterForNotifyResumeFromSuspend === "function",
-    ) as SleepManager | undefined;
-  } catch (error) {
-    console.warn("Deck Play Badges could not locate Steam's sleep manager", error);
-  }
   steamUiRefresher = new SteamUiRefresher({
-    system: window.SteamClient?.System,
-    user: window.SteamClient?.User,
-    sleepManager,
     browser: window.SteamClient?.Browser,
+    getResumeStatus: () => withBackendTimeout(getUiResumeStatus(), 5_000),
+    beginRefresh: (trigger, session, sequence, guard) => withBackendTimeout(beginUiRefresh(trigger, session, sequence, guard), 5_000),
+    finishRefresh: (attempt, outcome) => withBackendTimeout(finishUiRefresh(attempt, outcome), 5_000),
     isLocked: () => {
       if (typeof window.securitystore?.IsLockScreenActive !== "function") {
         throw new Error("A Steam zárolási állapota nem ellenőrizhető.");

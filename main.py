@@ -9,6 +9,7 @@ import asyncio
 import concurrent.futures
 import functools
 import json
+import math
 import os
 import re
 import shutil
@@ -18,6 +19,7 @@ import tempfile
 import threading
 import time
 import unicodedata
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -57,6 +59,9 @@ GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/{}/releases/latest".fo
 GITHUB_RELEASE_TAG_URL = "https://api.github.com/repos/{}/releases/tags/v{{}}".format(GITHUB_REPOSITORY)
 GITHUB_DOWNLOAD_PREFIX = "https://github.com/{}/releases/download/".format(GITHUB_REPOSITORY)
 UPDATE_MAX_BYTES = 15 * 1024 * 1024
+UI_RESUME_MIN_SLEEP_SECONDS = 0.5
+UI_RESUME_MAX_AGE_SECONDS = 60.0
+UI_REFRESH_COOLDOWN_SECONDS = 15.0
 PLUGIN_MANIFEST_NAMES = {"ControllerXbox", "Deck Play Badges"}
 UPDATE_FILES = [
     ".gitignore",
@@ -110,6 +115,20 @@ class Plugin:
         self._update_lock = asyncio.Lock()
         self._notification_lock = asyncio.Lock()
         self._watchlist_lock = asyncio.Lock()
+        self._ui_resume_task: Optional[asyncio.Task] = None
+        self._ui_resume_session = uuid.uuid4().hex
+        self._ui_resume_available = False
+        self._ui_suspend_offset: Optional[float] = None
+        self._ui_resume_sequence = 0
+        self._ui_handled_sequence = 0
+        self._ui_last_resume_at = 0.0
+        self._ui_resume_detected_at = 0.0
+        self._ui_last_request_at = 0.0
+        self._ui_last_request_clock = float("-inf")
+        self._ui_last_attempt_id = ""
+        self._ui_last_attempt_sequence = 0
+        self._ui_last_outcome = "idle"
+        self._sample_ui_resume_clock()
 
     async def _main(self) -> None:
         await self._load_cache()
@@ -117,9 +136,17 @@ class Plugin:
         await self._load_boosteroid_cache()
         await self._load_settings()
         await self._load_watchlist()
+        self._ui_resume_task = asyncio.create_task(self._monitor_ui_resume())
         decky.logger.info("ControllerXbox backend loaded")
 
     async def _unload(self) -> None:
+        if self._ui_resume_task is not None:
+            self._ui_resume_task.cancel()
+            try:
+                await self._ui_resume_task
+            except asyncio.CancelledError:
+                pass
+            self._ui_resume_task = None
         await self._save_cache()
         await self._save_gfn_cache()
         await self._save_boosteroid_cache()
@@ -258,7 +285,112 @@ class Plugin:
         except OSError:
             self._settings["refresh_ui_after_resume"] = previous
             return {"success": False, "error": "A felületfrissítés beállítását nem sikerült menteni."}
+        # Toggling the setting must not replay an earlier wake.
+        self._sample_ui_resume_clock()
+        self._ui_handled_sequence = self._ui_resume_sequence
         return {"success": True, **self._settings}
+
+    @staticmethod
+    def _read_ui_suspend_clock() -> Optional[float]:
+        """Linux BOOTTIME includes suspend; MONOTONIC excludes it.
+
+        Bracket the reads to reject scheduler delays. Wall-clock changes and
+        a stalled UI therefore cannot be mistaken for a system resume.
+        """
+        try:
+            before = time.clock_gettime(time.CLOCK_MONOTONIC)
+            boot = time.clock_gettime(time.CLOCK_BOOTTIME)
+            after = time.clock_gettime(time.CLOCK_MONOTONIC)
+        except (AttributeError, OSError, ValueError):
+            return None
+        if not all(math.isfinite(value) for value in (before, boot, after)):
+            return None
+        if not 0 <= after - before <= 0.05:
+            return None
+        return boot - (before + after) / 2.0
+
+    def _sample_ui_resume_clock(self) -> None:
+        offset = self._read_ui_suspend_clock()
+        if offset is None:
+            return
+        self._ui_resume_available = True
+        previous = self._ui_suspend_offset
+        self._ui_suspend_offset = offset
+        if previous is None or offset - previous < UI_RESUME_MIN_SLEEP_SECONDS:
+            return
+        self._ui_resume_sequence += 1
+        self._ui_last_resume_at = time.time()
+        self._ui_resume_detected_at = time.monotonic()
+        self._ui_last_outcome = "detected" if self._settings["refresh_ui_after_resume"] else "disabled"
+        if not self._settings["refresh_ui_after_resume"]:
+            self._ui_handled_sequence = self._ui_resume_sequence
+        decky.logger.info("UI refresher observed Linux resume %s (%.2fs asleep)",
+                          self._ui_resume_sequence, offset - previous)
+
+    async def _monitor_ui_resume(self) -> None:
+        while True:
+            self._sample_ui_resume_clock()
+            await asyncio.sleep(2)
+
+    def _expire_ui_resume(self) -> None:
+        if (self._ui_resume_sequence > self._ui_handled_sequence
+                and time.monotonic() - self._ui_resume_detected_at > UI_RESUME_MAX_AGE_SECONDS):
+            self._ui_handled_sequence = self._ui_resume_sequence
+            self._ui_last_outcome = "expired"
+
+    async def get_ui_resume_status(self) -> Dict[str, Any]:
+        # The backend monitor continues even while the plugin panel is closed
+        # or the frontend is being reloaded. Reads also give it a fresh sample.
+        self._sample_ui_resume_clock()
+        self._expire_ui_resume()
+        return {
+            "success": True,
+            "available": self._ui_resume_available,
+            "enabled": self._settings["refresh_ui_after_resume"],
+            "session_id": self._ui_resume_session,
+            "sequence": self._ui_resume_sequence,
+            "pending": self._ui_resume_sequence > self._ui_handled_sequence,
+            "last_resume_at": self._ui_last_resume_at,
+            "last_request_at": self._ui_last_request_at,
+            "last_outcome": self._ui_last_outcome,
+        }
+
+    async def begin_ui_refresh(self, trigger: Any, session_id: Any, sequence: Any,
+                               guard: Any) -> Dict[str, Any]:
+        """Consume a wake BEFORE the UI can restart, including across reloads."""
+        if trigger not in ("manual", "automatic") or guard not in ("ready", "locked", "lock_unknown"):
+            return {"success": False, "allowed": False, "reason": "invalid"}
+        self._sample_ui_resume_clock()
+        self._expire_ui_resume()
+        if trigger == "automatic":
+            if (not self._settings["refresh_ui_after_resume"] or not self._ui_resume_available
+                    or session_id != self._ui_resume_session or type(sequence) is not int
+                    or sequence != self._ui_resume_sequence or sequence <= self._ui_handled_sequence):
+                return {"success": True, "allowed": False, "reason": "stale"}
+            if time.monotonic() - self._ui_resume_detected_at < 3:
+                return {"success": True, "allowed": False, "reason": "too_early"}
+        if time.monotonic() - self._ui_last_request_clock < UI_REFRESH_COOLDOWN_SECONDS:
+            return {"success": True, "allowed": False, "reason": "cooldown"}
+        self._ui_handled_sequence = self._ui_resume_sequence
+        if guard != "ready":
+            self._ui_last_outcome = guard
+            return {"success": True, "allowed": False, "reason": guard}
+        self._ui_last_attempt_id = uuid.uuid4().hex
+        self._ui_last_attempt_sequence = self._ui_resume_sequence
+        self._ui_last_request_at = time.time()
+        self._ui_last_request_clock = time.monotonic()
+        self._ui_last_outcome = "requested"
+        decky.logger.info("Steam UI reload requested (%s, resume %s)", trigger, self._ui_resume_sequence)
+        return {"success": True, "allowed": True, "attempt_id": self._ui_last_attempt_id}
+
+    async def finish_ui_refresh(self, attempt_id: Any, outcome: Any) -> Dict[str, Any]:
+        if (attempt_id != self._ui_last_attempt_id or not attempt_id
+                or self._ui_last_attempt_sequence != self._ui_resume_sequence
+                or outcome not in ("native_error", "unconfirmed", "cancelled", "locked", "lock_unknown")):
+            return {"success": False}
+        self._ui_last_outcome = outcome
+        decky.logger.info("Steam UI reload outcome: %s", outcome)
+        return {"success": True}
 
     async def set_badge_visibility(self, show_gfn_badges: Any, show_boosteroid_badges: Any) -> Dict[str, Any]:
         if not isinstance(show_gfn_badges, bool) or not isinstance(show_boosteroid_badges, bool):
