@@ -1,4 +1,4 @@
-import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, ToggleField } from "@decky/ui";
+import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
 import { createElement, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
 
@@ -7,11 +7,13 @@ const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
 const TILE_STATUS_EVENT = "controller-xbox-tile-status";
 const SETTINGS_CHANGED_EVENT = "controller-xbox-settings-changed";
+const HISTORY_CHANGED_EVENT = "controller-xbox-history-changed";
 const BADGE_KEY = "controller-xbox-tile-badge";
 const DETAIL_BADGE_KEY = "controller-xbox-detail-badge";
 const DETAIL_PATCH_FLAG = "__controllerXboxDetailPatched";
 const STORE_DEBUGGER_URL = "http://localhost:8080/json";
 const STORE_SCAN_INTERVAL_MS = 1_500;
+const NOTIFICATION_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 type SupportResponse = {
   success: boolean;
@@ -81,9 +83,27 @@ type NotificationEventsResponse = {
   boosteroid_added_app_ids?: string[];
   boosteroid_maintenance?: number;
   boosteroid_maintenance_app_ids?: string[];
+  app_names?: Record<string, string>;
   update_version?: string;
   error?: string;
 };
+type WatchlistEntry = {
+  app_id: string;
+  title: string;
+  added_at: number;
+  gfn: "available" | "not_available" | "unavailable";
+  boosteroid: "available" | "maintenance" | "not_available" | "unavailable";
+};
+type WatchlistResponse = { success: boolean; entries?: WatchlistEntry[]; error?: string };
+type NotificationHistoryEntry = {
+  id: string;
+  platform: "gfn" | "boosteroid";
+  event_type: "available" | "maintenance";
+  app_id: string;
+  title: string;
+  created_at: number;
+};
+type NotificationHistoryResponse = { success: boolean; entries?: NotificationHistoryEntry[]; error?: string };
 type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 type GfnState = "loading" | "available" | "not_available" | "unavailable";
 type BoosteroidState = "loading" | "available" | "maintenance" | "not_available" | "unavailable";
@@ -140,7 +160,15 @@ const setNotificationPreferences = callable<[
   notifyBoosteroidMaintenance: boolean,
   notifyPluginUpdates: boolean,
 ], SettingsResponse>("set_notification_preferences");
-const getNotificationEvents = callable<[appIds: string[]], NotificationEventsResponse>("get_notification_events");
+const getNotificationEvents = callable<[
+  appIds: string[],
+  appNames: Record<string, string>,
+], NotificationEventsResponse>("get_notification_events");
+const getWatchlist = callable<[], WatchlistResponse>("get_watchlist");
+const addWatchlistGame = callable<[appId: string], WatchlistResponse>("add_watchlist_game");
+const removeWatchlistGame = callable<[appId: string], WatchlistResponse>("remove_watchlist_game");
+const getNotificationHistory = callable<[], NotificationHistoryResponse>("get_notification_history");
+const clearNotificationHistory = callable<[], NotificationHistoryResponse>("clear_notification_history");
 
 const supportStates = new Map<string, BadgeState>();
 const gfnStates = new Map<string, GfnState>();
@@ -160,6 +188,7 @@ let storeScanTimer: number | undefined;
 let storeReconnectTimer: number | undefined;
 let storeCurrentAppIds = new Set<string>();
 let notificationTimer: number | undefined;
+let pluginActive = false;
 let badgeVisibility: BadgeVisibility = {
   show_gfn_badges: true,
   show_boosteroid_badges: true,
@@ -278,40 +307,84 @@ function getSteamLibraryAppIds(): string[] {
   ));
 }
 
+function overviewGameName(overview: any): string | undefined {
+  const name = [overview?.display_name, overview?.strDisplayName, overview?.name, overview?.sort_as]
+    .find((value) => typeof value === "string" && value.trim());
+  return typeof name === "string" ? name.trim() : undefined;
+}
+
+function getSteamLibraryGameNames(): Record<string, string> {
+  const names: Record<string, string> = {};
+  for (const app of getSteamLibraryApps()) {
+    const appId = String(app?.appid ?? "");
+    const name = overviewGameName(app);
+    if (/^\d+$/.test(appId) && name) names[appId] = name;
+  }
+  return names;
+}
+
 function resolveLibraryGameName(appId: string): string {
   const numericAppId = Number(appId);
   const collectionOverview = getSteamLibraryApps().find((app: any) => Number(app?.appid) === numericAppId);
   const appStoreOverview = (globalThis as any).appStore?.GetAppOverviewByAppID?.(numericAppId);
   const steamOverview = (globalThis as any).SteamClient?.Apps?.GetAppOverviewByAppID?.(numericAppId);
   const name = [collectionOverview, appStoreOverview, steamOverview]
-    .flatMap((overview) => [overview?.display_name, overview?.strDisplayName, overview?.name, overview?.sort_as])
-    .find((value) => typeof value === "string" && value.trim());
-  return typeof name === "string" ? name.trim() : "Steam AppID " + appId;
+    .map(overviewGameName)
+    .find(Boolean);
+  return name ?? "Steam AppID " + appId;
 }
 
-function formatNotificationGameNames(appIds: string[] | undefined, count: number): string {
-  const names = (appIds ?? []).slice(0, 3).map(resolveLibraryGameName);
+function formatNotificationGameNames(
+  appIds: string[] | undefined,
+  count: number,
+  backendNames?: Record<string, string>,
+): string {
+  const names = (appIds ?? []).slice(0, 3)
+    .map((appId) => backendNames?.[appId] || resolveLibraryGameName(appId));
   if (!names.length) return String(count) + " játék";
   const remaining = Math.max(0, count - names.length);
   return names.join(", ") + (remaining ? " és még " + String(remaining) + " játék" : "");
 }
 
+function watchlistGfnLabel(state: WatchlistEntry["gfn"]): string {
+  if (state === "available") return "elérhető";
+  if (state === "not_available") return "nem elérhető";
+  return "katalógushiba";
+}
+
+function watchlistBoosteroidLabel(state: WatchlistEntry["boosteroid"]): string {
+  if (state === "available") return "elérhető";
+  if (state === "maintenance") return "karbantartás alatt";
+  if (state === "not_available") return "nem elérhető";
+  return "katalógushiba";
+}
+
+function historyEventLabel(entry: NotificationHistoryEntry): string {
+  if (entry.platform === "gfn") return "Felkerült a GeForce NOW-ra";
+  if (entry.event_type === "maintenance") return "Boosteroid-karbantartás alá került";
+  return "Felkerült a Boosteroidra";
+}
+
 async function checkBackgroundNotifications(attempt = 0): Promise<void> {
   const appIds = getSteamLibraryAppIds();
+  if (!pluginActive) return;
   if (!appIds.length && attempt < 3) {
     notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(attempt + 1), 10_000);
     return;
   }
   notificationTimer = undefined;
   try {
-    const response = await withBackendTimeout(getNotificationEvents(appIds), 180_000);
+    const response = await withBackendTimeout(
+      getNotificationEvents(appIds, getSteamLibraryGameNames()),
+      180_000,
+    );
     if (!response.success) throw new Error(response.error || "Az értesítési ellenőrzés sikertelen.");
     const gfnAdded = response.gfn_added ?? 0;
     if (gfnAdded > 0) {
       toaster.toast({
         title: "GeForce NOW újdonság",
         body: "Mostantól elérhető a GeForce NOW-on: "
-          + formatNotificationGameNames(response.gfn_added_app_ids, gfnAdded) + ".",
+          + formatNotificationGameNames(response.gfn_added_app_ids, gfnAdded, response.app_names) + ".",
       });
     }
     const boosteroidAdded = response.boosteroid_added ?? 0;
@@ -319,7 +392,7 @@ async function checkBackgroundNotifications(attempt = 0): Promise<void> {
       toaster.toast({
         title: "Boosteroid újdonság",
         body: "Mostantól elérhető a Boosteroiden: "
-          + formatNotificationGameNames(response.boosteroid_added_app_ids, boosteroidAdded) + ".",
+          + formatNotificationGameNames(response.boosteroid_added_app_ids, boosteroidAdded, response.app_names) + ".",
       });
     }
     const boosteroidMaintenance = response.boosteroid_maintenance ?? 0;
@@ -327,7 +400,11 @@ async function checkBackgroundNotifications(attempt = 0): Promise<void> {
       toaster.toast({
         title: "Boosteroid karbantartás",
         body: "Karbantartás alá került a Boosteroiden: "
-          + formatNotificationGameNames(response.boosteroid_maintenance_app_ids, boosteroidMaintenance) + ".",
+          + formatNotificationGameNames(
+            response.boosteroid_maintenance_app_ids,
+            boosteroidMaintenance,
+            response.app_names,
+          ) + ".",
       });
     }
     if (response.update_version) {
@@ -336,8 +413,16 @@ async function checkBackgroundNotifications(attempt = 0): Promise<void> {
         body: "Új pluginverzió érhető el: v" + response.update_version + ". Nyisd meg a plugint a telepítéshez.",
       });
     }
+    window.dispatchEvent(new Event(HISTORY_CHANGED_EVENT));
   } catch (error) {
     console.warn("ControllerXbox background notification check failed", error);
+  } finally {
+    if (pluginActive) {
+      notificationTimer = window.setTimeout(
+        () => void checkBackgroundNotifications(),
+        NOTIFICATION_CHECK_INTERVAL_MS,
+      );
+    }
   }
 }
 
@@ -1308,12 +1393,37 @@ function Content() {
   const [visibility, setVisibility] = useState<BadgeVisibility>({ ...badgeVisibility });
   const [notifications, setNotifications] = useState<NotificationPreferences>({ ...notificationPreferences });
   const [settingsWorking, setSettingsWorking] = useState(false);
+  const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
+  const [watchInput, setWatchInput] = useState("");
+  const [watchWorking, setWatchWorking] = useState(false);
+  const [history, setHistory] = useState<NotificationHistoryEntry[]>([]);
+  const [historyWorking, setHistoryWorking] = useState(false);
 
   const refreshStats = async () => {
     try {
       setStats(await withBackendTimeout(getCacheStats()));
     } catch (error) {
       setDiagnosticLog("Cache állapot: " + errorMessage(error));
+    }
+  };
+
+  const refreshWatchlist = async () => {
+    try {
+      const response = await withBackendTimeout(getWatchlist(), 120_000);
+      if (!response.success) throw new Error(response.error || "A figyelőlista betöltése sikertelen.");
+      setWatchlist(response.entries ?? []);
+    } catch (error) {
+      setDiagnosticLog("Figyelőlista: " + errorMessage(error));
+    }
+  };
+
+  const refreshHistory = async () => {
+    try {
+      const response = await withBackendTimeout(getNotificationHistory());
+      if (!response.success) throw new Error(response.error || "Az értesítési előzmények betöltése sikertelen.");
+      setHistory(response.entries ?? []);
+    } catch (error) {
+      setDiagnosticLog("Értesítési előzmények: " + errorMessage(error));
     }
   };
 
@@ -1338,8 +1448,14 @@ function Content() {
 
   useEffect(() => {
     void refreshStats();
+    void refreshWatchlist();
+    void refreshHistory();
     void refreshUpdateInfo(true);
     const onCacheChanged = () => void refreshStats();
+    const onHistoryChanged = () => {
+      void refreshHistory();
+      void refreshWatchlist();
+    };
     const onTileStatus = (event: Event) => {
       const detail = (event as CustomEvent<string>).detail;
       if (detail) setStatus(detail);
@@ -1368,10 +1484,12 @@ function Content() {
       }
     };
     window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
+    window.addEventListener(HISTORY_CHANGED_EVENT, onHistoryChanged);
     window.addEventListener(TILE_STATUS_EVENT, onTileStatus);
     window.addEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged);
     return () => {
       window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
+      window.removeEventListener(HISTORY_CHANGED_EVENT, onHistoryChanged);
       window.removeEventListener(TILE_STATUS_EVENT, onTileStatus);
       window.removeEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged);
     };
@@ -1428,6 +1546,57 @@ function Content() {
     }
   };
 
+  const addWatchedGame = async () => {
+    const appId = watchInput.trim();
+    if (!/^\d+$/.test(appId)) {
+      toaster.toast({ title: "Figyelőlista", body: "Adj meg egy érvényes Steam AppID-t." });
+      return;
+    }
+    setWatchWorking(true);
+    try {
+      const response = await withBackendTimeout(addWatchlistGame(appId), 120_000);
+      if (!response.success) throw new Error(response.error || "A játék felvétele sikertelen.");
+      setWatchlist(response.entries ?? []);
+      setWatchInput("");
+      const added = (response.entries ?? []).find((entry) => entry.app_id === appId);
+      toaster.toast({
+        title: "Figyelőlistához adva",
+        body: added?.title ?? ("Steam AppID " + appId),
+      });
+    } catch (error) {
+      toaster.toast({ title: "Figyelőlista hiba", body: errorMessage(error) });
+    } finally {
+      setWatchWorking(false);
+    }
+  };
+
+  const removeWatchedGame = async (appId: string) => {
+    setWatchWorking(true);
+    try {
+      const response = await withBackendTimeout(removeWatchlistGame(appId), 120_000);
+      if (!response.success) throw new Error(response.error || "A játék eltávolítása sikertelen.");
+      setWatchlist(response.entries ?? []);
+    } catch (error) {
+      toaster.toast({ title: "Figyelőlista hiba", body: errorMessage(error) });
+    } finally {
+      setWatchWorking(false);
+    }
+  };
+
+  const clearHistory = async () => {
+    setHistoryWorking(true);
+    try {
+      const response = await withBackendTimeout(clearNotificationHistory());
+      if (!response.success) throw new Error(response.error || "Az előzmények törlése sikertelen.");
+      setHistory([]);
+      toaster.toast({ title: "Értesítési előzmények", body: "Az előzmények törölve." });
+    } catch (error) {
+      toaster.toast({ title: "Előzménytörlési hiba", body: errorMessage(error) });
+    } finally {
+      setHistoryWorking(false);
+    }
+  };
+
   const clearAndRefresh = async () => {
     setWorking(true);
     setStatus("Cache törlése folyamatban...");
@@ -1441,6 +1610,7 @@ function Content() {
       resetVisibleSupport();
       notifyCacheChanged();
       await refreshStats();
+      await refreshWatchlist();
       setDiagnosticLog("Nincs rögzített hiba.");
     } catch (error) {
       const message = errorMessage(error);
@@ -1548,12 +1718,57 @@ function Content() {
       disabled={settingsWorking}
       onChange={(checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked })}
     /></PanelSectionRow>
+    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Figyelőlista</div></PanelSectionRow>
+    <PanelSectionRow><div>Olyan játékot is figyelhetsz, amely nincs a Steam-könyvtáradban. A Steam AppID a játék Áruház-linkjében szereplő szám.</div></PanelSectionRow>
+    <PanelSectionRow><TextField
+      label="Steam AppID"
+      description="Példa: 1888930"
+      value={watchInput}
+      mustBeNumeric
+      bShowClearAction
+      disabled={watchWorking}
+      onChange={(event) => setWatchInput(event.currentTarget.value)}
+    /></PanelSectionRow>
+    <PanelSectionRow><ButtonItem
+      layout="below"
+      disabled={watchWorking || !watchInput.trim()}
+      onClick={addWatchedGame}
+    >Játék hozzáadása a figyelőlistához</ButtonItem></PanelSectionRow>
+    {watchlist.length ? watchlist.map((entry) =>
+      <PanelSectionRow key={entry.app_id}><ButtonItem
+        layout="below"
+        label={entry.title}
+        description={
+          "Steam AppID: " + entry.app_id
+          + " · GFN: " + watchlistGfnLabel(entry.gfn)
+          + " · Boosteroid: " + watchlistBoosteroidLabel(entry.boosteroid)
+        }
+        disabled={watchWorking}
+        onClick={() => void removeWatchedGame(entry.app_id)}
+      >Eltávolítás</ButtonItem></PanelSectionRow>,
+    ) : <PanelSectionRow><div>A figyelőlista üres.</div></PanelSectionRow>}
+    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Értesítési előzmények</div></PanelSectionRow>
+    <PanelSectionRow><div>A legutóbbi 100 GFN-, Boosteroid- és karbantartási változás helyben megmarad.</div></PanelSectionRow>
+    {history.length ? history.map((entry) =>
+      <PanelSectionRow key={entry.id}><div style={{ padding: "6px 0" }}>
+        <div style={{ fontWeight: 700 }}>{entry.title}</div>
+        <div>{historyEventLabel(entry)}</div>
+        <div style={{ opacity: 0.7, fontSize: "12px" }}>
+          {new Date(entry.created_at * 1000).toLocaleString("hu-HU")} · Steam AppID: {entry.app_id}
+        </div>
+      </div></PanelSectionRow>,
+    ) : <PanelSectionRow><div>Még nincs rögzített értesítési esemény.</div></PanelSectionRow>}
+    {history.length ? <PanelSectionRow><ButtonItem
+      layout="below"
+      disabled={historyWorking}
+      onClick={clearHistory}
+    >Értesítési előzmények törlése</ButtonItem></PanelSectionRow> : null}
     <PanelSectionRow><div>A könyvtári és Steam Áruház-bélyegképek jelölése: teli kontroller = teljes támogatás; félig kitöltött kontroller = részleges támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat.</div></PanelSectionRow>
     <PanelSectionRow><div>A Könyvtárban megnyitott játék oldalán a három jelvény jobb felül, a ProtonDB-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
     <PanelSectionRow><div>A megnyitott Steam Áruház-játék oldalán a három jelvény jobb alul, a ProtonDB Store-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
     <PanelSectionRow><div>GeForce NOW: zöld GFN = játszható; szürke GFN = nincs a katalógusban; narancssárga GFN? = a katalógus nem érhető el.</div></PanelSectionRow>
     <PanelSectionRow><div>Boosteroid: kék logó = elérhető; sárga logó = karbantartás alatt; szürke logó = nincs a katalógusban; narancssárga logó = a katalógus nem érhető el.</div></PanelSectionRow>
-    <PanelSectionRow><div>A háttérellenőrzés egyszer értesít az új GFN- és Boosteroid-játékokról, a Boosteroid-karbantartásról és az új pluginverziókról.</div></PanelSectionRow>
+    <PanelSectionRow><div>A háttérellenőrzés a Steam-könyvtárat és a figyelőlistát is vizsgálja, majd hatóránként újra lefut.</div></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..."}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats ? "GFN-katalógus: " + String(stats.gfn_catalog_entries ?? 0) + " Steam AppID; " + (stats.gfn_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A GFN-katalógus állapotának betöltése folyamatban..."}</div></PanelSectionRow>
@@ -1572,6 +1787,7 @@ function Content() {
 }
 
 export default definePlugin(() => {
+  pluginActive = true;
   void loadBadgeVisibility();
   notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(), 10_000);
   const removeTilePatch = patchLibraryTiles();
@@ -1583,6 +1799,7 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <span>✓</span>,
     onDismount: () => {
+      pluginActive = false;
       if (notificationTimer !== undefined) window.clearTimeout(notificationTimer);
       notificationTimer = undefined;
       removeStorePatch();

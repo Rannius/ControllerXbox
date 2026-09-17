@@ -42,6 +42,10 @@ BOOSTEROID_CACHE_TTL_SECONDS = 24 * 60 * 60
 BOOSTEROID_CACHE_SCHEMA_VERSION = 3
 SETTINGS_SCHEMA_VERSION = 1
 NOTIFICATION_SCHEMA_VERSION = 1
+WATCHLIST_SCHEMA_VERSION = 1
+NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
+WATCHLIST_MAX_ENTRIES = 200
+NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
 BOOSTEROID_STEAM_APP_ID_OVERRIDES = {
@@ -95,17 +99,22 @@ class Plugin:
         self._boosteroid_cache_path = Path(settings_directory) / "boosteroid-catalog-cache.json"
         self._settings_path = Path(settings_directory) / "controller-xbox-settings.json"
         self._notification_state_path = Path(settings_directory) / "controller-xbox-notifications.json"
+        self._watchlist_path = Path(settings_directory) / "controller-xbox-watchlist.json"
+        self._notification_history_path = Path(settings_directory) / "controller-xbox-notification-history.json"
+        self._watchlist: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
         self._gfn_lock = asyncio.Lock()
         self._boosteroid_lock = asyncio.Lock()
         self._update_lock = asyncio.Lock()
         self._notification_lock = asyncio.Lock()
+        self._watchlist_lock = asyncio.Lock()
 
     async def _main(self) -> None:
         await self._load_cache()
         await self._load_gfn_cache()
         await self._load_boosteroid_cache()
         await self._load_settings()
+        await self._load_watchlist()
         decky.logger.info("ControllerXbox backend loaded")
 
     async def _unload(self) -> None:
@@ -113,6 +122,7 @@ class Plugin:
         await self._save_gfn_cache()
         await self._save_boosteroid_cache()
         await self._save_settings()
+        await self._save_watchlist()
 
     async def _load_cache(self) -> None:
         try:
@@ -269,6 +279,122 @@ class Plugin:
         await self._save_settings()
         return {"success": True, **self._settings}
 
+    async def _load_watchlist(self) -> None:
+        try:
+            contents = await self._run_blocking(lambda: self._watchlist_path.read_text(encoding="utf-8"))
+            parsed = json.loads(contents)
+            if not isinstance(parsed, dict) or parsed.get("schema_version") != WATCHLIST_SCHEMA_VERSION:
+                return
+            entries = parsed.get("entries", [])
+            if not isinstance(entries, list):
+                return
+            loaded: Dict[str, Dict[str, Any]] = {}
+            for entry in entries[:WATCHLIST_MAX_ENTRIES]:
+                if not isinstance(entry, dict):
+                    continue
+                app_id = str(entry.get("app_id", ""))
+                title = str(entry.get("title", "")).strip()
+                added_at = entry.get("added_at", 0)
+                if (
+                    app_id.isdigit()
+                    and 0 < int(app_id) < 10000000000
+                    and title
+                    and len(title) <= 200
+                    and isinstance(added_at, (int, float))
+                ):
+                    loaded[app_id] = {
+                        "app_id": app_id,
+                        "title": title,
+                        "added_at": float(added_at),
+                    }
+            self._watchlist = loaded
+        except FileNotFoundError:
+            pass
+        except (OSError, json.JSONDecodeError) as error:
+            decky.logger.warning("Ignoring invalid ControllerXbox watchlist: %s", error)
+
+    async def _save_watchlist(self) -> None:
+        payload = json.dumps(
+            {
+                "schema_version": WATCHLIST_SCHEMA_VERSION,
+                "entries": sorted(self._watchlist.values(), key=lambda entry: entry["title"].casefold()),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        await self._run_blocking(
+            self._write_file_atomically,
+            self._watchlist_path,
+            "controller-watchlist-",
+            payload,
+        )
+
+    async def get_watchlist(self) -> Dict[str, Any]:
+        async with self._watchlist_lock:
+            entries = [dict(entry) for entry in self._watchlist.values()]
+        if not entries:
+            return {"success": True, "entries": []}
+        gfn_available, boosteroid_available = await asyncio.gather(
+            self._ensure_gfn_catalog(),
+            self._ensure_boosteroid_catalog(),
+        )
+        async with self._gfn_lock:
+            gfn_app_ids = set(self._gfn_app_ids)
+        async with self._boosteroid_lock:
+            boosteroid_app_ids = set(self._boosteroid_app_ids)
+            maintenance_app_ids = set(self._boosteroid_maintenance_app_ids)
+        return {
+            "success": True,
+            "entries": [
+                {
+                    **entry,
+                    "gfn": (
+                        "available" if entry["app_id"] in gfn_app_ids else "not_available"
+                    ) if gfn_available else "unavailable",
+                    "boosteroid": (
+                        "maintenance"
+                        if entry["app_id"] in maintenance_app_ids
+                        else "available"
+                        if entry["app_id"] in boosteroid_app_ids
+                        else "not_available"
+                    ) if boosteroid_available else "unavailable",
+                }
+                for entry in sorted(entries, key=lambda item: item["title"].casefold())
+            ],
+        }
+
+    async def add_watchlist_game(self, app_id: Any) -> Dict[str, Any]:
+        normalized = str(app_id).strip()
+        if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
+            return {"success": False, "error": "Adj meg egy érvényes Steam AppID-t."}
+        async with self._watchlist_lock:
+            already_present = normalized in self._watchlist
+            if not already_present and len(self._watchlist) >= WATCHLIST_MAX_ENTRIES:
+                return {"success": False, "error": "A figyelőlista legfeljebb 200 játékot tartalmazhat."}
+        if already_present:
+            return await self.get_watchlist()
+        title = await self._run_blocking(self._fetch_steam_title, normalized)
+        if not title:
+            return {"success": False, "error": "A Steam-játék nem található vagy az Áruház nem válaszolt."}
+        async with self._watchlist_lock:
+            self._watchlist[normalized] = {
+                "app_id": normalized,
+                "title": title,
+                "added_at": time.time(),
+            }
+            await self._save_watchlist()
+        await asyncio.gather(self._ensure_gfn_catalog(), self._ensure_boosteroid_catalog())
+        await self._baseline_notification_app(normalized)
+        return await self.get_watchlist()
+
+    async def remove_watchlist_game(self, app_id: Any) -> Dict[str, Any]:
+        normalized = str(app_id).strip()
+        async with self._watchlist_lock:
+            removed = self._watchlist.pop(normalized, None)
+            if removed is not None:
+                await self._save_watchlist()
+        return await self.get_watchlist()
+
     async def _run_blocking(self, function: Any, *args: Any) -> Any:
         """Run blocking file and network operations on Python 3.8 and newer."""
         loop = asyncio.get_event_loop()
@@ -322,6 +448,22 @@ class Plugin:
             return "none"
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
             decky.logger.debug("Steam lookup failed for %s: %s", app_id, error)
+            return None
+
+    def _fetch_steam_title(self, app_id: str) -> Optional[str]:
+        request = urllib.request.Request(
+            STORE_URL.format(app_id=app_id),
+            headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"},
+        )
+        try:
+            with self._open_request(request, timeout=10) as response:
+                result = json.load(response)
+            app = result.get(app_id, {})
+            app_data = app.get("data", {}) if app.get("success") else {}
+            title = str(app_data.get("name", "")).strip()
+            return title[:200] if title else None
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
+            decky.logger.debug("Steam title lookup failed for %s: %s", app_id, error)
             return None
 
     @staticmethod
@@ -873,9 +1015,119 @@ class Plugin:
             decky.logger.warning("Ignoring invalid notification state: %s", error)
             return {}
 
-    async def get_notification_events(self, app_ids: Any) -> Dict[str, Any]:
-        """Return each catalog/update change once for the user's Steam library."""
+    def _read_notification_history(self) -> Dict[str, Any]:
+        try:
+            parsed = json.loads(self._notification_history_path.read_text(encoding="utf-8"))
+            return parsed if isinstance(parsed, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError) as error:
+            decky.logger.warning("Ignoring invalid notification history: %s", error)
+            return {}
+
+    @staticmethod
+    def _valid_app_names(app_names: Any) -> Dict[str, str]:
+        if not isinstance(app_names, dict):
+            return {}
+        valid: Dict[str, str] = {}
+        for app_id, value in list(app_names.items())[:10000]:
+            normalized = str(app_id)
+            title = str(value).strip()
+            if normalized.isdigit() and title:
+                valid[normalized] = title[:200]
+        return valid
+
+    @staticmethod
+    def _valid_notification_history_entries(entries: Any) -> List[Dict[str, Any]]:
+        if not isinstance(entries, list):
+            return []
+        valid: List[Dict[str, Any]] = []
+        for entry in entries[:NOTIFICATION_HISTORY_MAX_ENTRIES]:
+            if not isinstance(entry, dict):
+                continue
+            app_id = str(entry.get("app_id", ""))
+            title = str(entry.get("title", "")).strip()
+            platform = str(entry.get("platform", ""))
+            event_type = str(entry.get("event_type", ""))
+            created_at = entry.get("created_at")
+            event_id = str(entry.get("id", ""))
+            if (
+                app_id.isdigit()
+                and title
+                and platform in {"gfn", "boosteroid"}
+                and event_type in {"available", "maintenance"}
+                and isinstance(created_at, (int, float))
+                and event_id
+            ):
+                valid.append({
+                    "id": event_id[:300],
+                    "platform": platform,
+                    "event_type": event_type,
+                    "app_id": app_id,
+                    "title": title[:200],
+                    "created_at": float(created_at),
+                })
+        return valid
+
+    async def get_notification_history(self) -> Dict[str, Any]:
+        async with self._notification_lock:
+            history = await self._run_blocking(self._read_notification_history)
+        entries = history.get("entries", []) if history.get("schema_version") == NOTIFICATION_HISTORY_SCHEMA_VERSION else []
+        return {"success": True, "entries": self._valid_notification_history_entries(entries)}
+
+    async def clear_notification_history(self) -> Dict[str, Any]:
+        async with self._notification_lock:
+            await self._run_blocking(
+                self._write_file_atomically,
+                self._notification_history_path,
+                "controller-notification-history-",
+                json.dumps(
+                    {"schema_version": NOTIFICATION_HISTORY_SCHEMA_VERSION, "entries": []},
+                    separators=(",", ":"),
+                ),
+            )
+        return {"success": True, "entries": []}
+
+    async def _baseline_notification_app(self, app_id: str) -> None:
+        async with self._gfn_lock:
+            in_gfn = app_id in self._gfn_app_ids
+        async with self._boosteroid_lock:
+            in_boosteroid = app_id in self._boosteroid_app_ids
+            in_maintenance = app_id in self._boosteroid_maintenance_app_ids
+        async with self._notification_lock:
+            state = await self._run_blocking(self._read_notification_state)
+            if state.get("schema_version") != NOTIFICATION_SCHEMA_VERSION:
+                return
+            for key, present in (
+                ("gfn_available", in_gfn),
+                ("boosteroid_available", in_boosteroid),
+                ("boosteroid_maintenance", in_maintenance),
+            ):
+                values = {str(value) for value in state.get(key, []) if str(value).isdigit()}
+                if present:
+                    values.add(app_id)
+                else:
+                    values.discard(app_id)
+                state[key] = sorted(values, key=int)
+            await self._run_blocking(
+                self._write_file_atomically,
+                self._notification_state_path,
+                "controller-notifications-",
+                json.dumps(state, separators=(",", ":")),
+            )
+
+    async def get_notification_events(self, app_ids: Any, app_names: Any = None) -> Dict[str, Any]:
+        """Return each catalog/update change once for the library and watchlist."""
         library_app_ids = self._valid_library_app_ids(app_ids)
+        supplied_names = self._valid_app_names(app_names)
+        async with self._watchlist_lock:
+            watchlist = {app_id: dict(entry) for app_id, entry in self._watchlist.items()}
+        tracked_app_ids = library_app_ids | set(watchlist)
+        known_names = {
+            app_id: supplied_names.get(app_id, str(entry.get("title", "")).strip())
+            for app_id, entry in watchlist.items()
+        }
+        known_names.update(supplied_names)
         gfn_available, boosteroid_available, update = await asyncio.gather(
             self._ensure_gfn_catalog(),
             self._ensure_boosteroid_catalog(),
@@ -883,10 +1135,10 @@ class Plugin:
         )
 
         async with self._gfn_lock:
-            current_gfn = self._gfn_app_ids & library_app_ids
+            current_gfn = self._gfn_app_ids & tracked_app_ids
         async with self._boosteroid_lock:
-            current_boosteroid = self._boosteroid_app_ids & library_app_ids
-            current_maintenance = self._boosteroid_maintenance_app_ids & library_app_ids
+            current_boosteroid = self._boosteroid_app_ids & tracked_app_ids
+            current_maintenance = self._boosteroid_maintenance_app_ids & tracked_app_ids
 
         async with self._notification_lock:
             state = await self._run_blocking(self._read_notification_state)
@@ -934,21 +1186,21 @@ class Plugin:
 
             next_state = {
                 "schema_version": NOTIFICATION_SCHEMA_VERSION,
-                "gfn_initialized": gfn_initialized or bool(gfn_available and library_app_ids),
-                "boosteroid_initialized": boosteroid_initialized or bool(boosteroid_available and library_app_ids),
+                "gfn_initialized": gfn_initialized or bool(gfn_available and tracked_app_ids),
+                "boosteroid_initialized": boosteroid_initialized or bool(boosteroid_available and tracked_app_ids),
                 "gfn_available": (
-                    sorted(current_gfn | (previous_gfn - library_app_ids))
-                    if gfn_available and library_app_ids
+                    sorted(current_gfn | (previous_gfn - tracked_app_ids), key=int)
+                    if gfn_available and tracked_app_ids
                     else sorted(previous_gfn)
                 ),
                 "boosteroid_available": (
-                    sorted(current_boosteroid | (previous_boosteroid - library_app_ids))
-                    if boosteroid_available and library_app_ids
+                    sorted(current_boosteroid | (previous_boosteroid - tracked_app_ids), key=int)
+                    if boosteroid_available and tracked_app_ids
                     else sorted(previous_boosteroid)
                 ),
                 "boosteroid_maintenance": (
-                    sorted(current_maintenance | (previous_maintenance - library_app_ids))
-                    if boosteroid_available and library_app_ids
+                    sorted(current_maintenance | (previous_maintenance - tracked_app_ids), key=int)
+                    if boosteroid_available and tracked_app_ids
                     else sorted(previous_maintenance)
                 ),
                 "last_notified_update": last_notified_update,
@@ -961,9 +1213,55 @@ class Plugin:
                 json.dumps(next_state, separators=(",", ":")),
             )
 
+            history_events = [
+                ("gfn", "available", app_id) for app_id in gfn_added_app_ids
+            ] + [
+                ("boosteroid", "available", app_id) for app_id in boosteroid_added_app_ids
+            ] + [
+                ("boosteroid", "maintenance", app_id) for app_id in boosteroid_maintenance_app_ids
+            ]
+            if history_events:
+                history = await self._run_blocking(self._read_notification_history)
+                previous_entries = self._valid_notification_history_entries(
+                    history.get("entries", [])
+                    if history.get("schema_version") == NOTIFICATION_HISTORY_SCHEMA_VERSION
+                    else []
+                )
+                created_at = time.time()
+                new_entries = [
+                    {
+                        "id": "{}-{}-{}-{}".format(int(created_at * 1000), platform, event_type, app_id),
+                        "platform": platform,
+                        "event_type": event_type,
+                        "app_id": app_id,
+                        "title": known_names.get(app_id) or "Steam AppID {}".format(app_id),
+                        "created_at": created_at,
+                    }
+                    for platform, event_type, app_id in history_events
+                ]
+                await self._run_blocking(
+                    self._write_file_atomically,
+                    self._notification_history_path,
+                    "controller-notification-history-",
+                    json.dumps(
+                        {
+                            "schema_version": NOTIFICATION_HISTORY_SCHEMA_VERSION,
+                            "entries": (new_entries + previous_entries)[:NOTIFICATION_HISTORY_MAX_ENTRIES],
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                )
+
+        event_app_ids = set(gfn_added_app_ids) | set(boosteroid_added_app_ids) | set(boosteroid_maintenance_app_ids)
+        event_names = {
+            app_id: known_names.get(app_id) or "Steam AppID {}".format(app_id)
+            for app_id in event_app_ids
+        }
+
         return {
             "success": True,
-            "tracked_games": len(library_app_ids),
+            "tracked_games": len(tracked_app_ids),
             "gfn_added": (
                 len(gfn_added_app_ids) if self._settings.get("notify_gfn_additions", True) else 0
             ),
@@ -990,6 +1288,7 @@ class Plugin:
                 if self._settings.get("notify_boosteroid_maintenance", True)
                 else []
             ),
+            "app_names": event_names,
             "update_version": update_version,
         }
 
