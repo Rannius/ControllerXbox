@@ -62,6 +62,7 @@ UPDATE_MAX_BYTES = 15 * 1024 * 1024
 UI_RESUME_MIN_SLEEP_SECONDS = 0.5
 UI_RESUME_MAX_AGE_SECONDS = 60.0
 UI_REFRESH_COOLDOWN_SECONDS = 15.0
+UI_GAME_RETURN_MAX_AGE_SECONDS = 60.0
 PLUGIN_MANIFEST_NAMES = {"ControllerXbox", "Deck Play Badges"}
 UPDATE_FILES = [
     ".gitignore",
@@ -128,6 +129,8 @@ class Plugin:
         self._ui_last_attempt_id = ""
         self._ui_last_attempt_sequence = 0
         self._ui_last_outcome = "idle"
+        self._ui_game_return: Optional[Dict[str, Any]] = None
+        self._ui_game_return_outcome = ""
         self._sample_ui_resume_clock()
 
     async def _main(self) -> None:
@@ -288,6 +291,8 @@ class Plugin:
         # Toggling the setting must not replay an earlier wake.
         self._sample_ui_resume_clock()
         self._ui_handled_sequence = self._ui_resume_sequence
+        if not enabled:
+            self._cancel_ui_game_return("cancelled")
         return {"success": True, **self._settings}
 
     @staticmethod
@@ -319,6 +324,7 @@ class Plugin:
         if previous is None or offset - previous < UI_RESUME_MIN_SLEEP_SECONDS:
             return
         self._ui_resume_sequence += 1
+        self._cancel_ui_game_return("superseded")
         self._ui_last_resume_at = time.time()
         self._ui_resume_detected_at = time.monotonic()
         self._ui_last_outcome = "detected" if self._settings["refresh_ui_after_resume"] else "disabled"
@@ -333,6 +339,9 @@ class Plugin:
             await asyncio.sleep(2)
 
     def _expire_ui_resume(self) -> None:
+        if (self._ui_game_return is not None
+                and time.monotonic() - self._ui_last_request_clock > UI_GAME_RETURN_MAX_AGE_SECONDS):
+            self._cancel_ui_game_return("expired")
         if (self._ui_resume_sequence > self._ui_handled_sequence
                 and time.monotonic() - self._ui_resume_detected_at > UI_RESUME_MAX_AGE_SECONDS):
             self._ui_handled_sequence = self._ui_resume_sequence
@@ -353,10 +362,12 @@ class Plugin:
             "last_resume_at": self._ui_last_resume_at,
             "last_request_at": self._ui_last_request_at,
             "last_outcome": self._ui_last_outcome,
+            "game_return": self._ui_game_return,
+            "game_return_outcome": self._ui_game_return_outcome,
         }
 
     async def begin_ui_refresh(self, trigger: Any, session_id: Any, sequence: Any,
-                               guard: Any) -> Dict[str, Any]:
+                               guard: Any, app_id: Any = 0, context_id: Any = "") -> Dict[str, Any]:
         """Consume a wake BEFORE the UI can restart, including across reloads."""
         if trigger not in ("manual", "automatic") or guard not in ("ready", "locked", "lock_unknown"):
             return {"success": False, "allowed": False, "reason": "invalid"}
@@ -380,6 +391,15 @@ class Plugin:
         self._ui_last_request_at = time.time()
         self._ui_last_request_clock = time.monotonic()
         self._ui_last_outcome = "requested"
+        self._ui_game_return = None
+        self._ui_game_return_outcome = ""
+        if (type(app_id) is int and 0 < app_id <= 0xffffffff
+                and isinstance(context_id, str) and 0 < len(context_id) <= 128):
+            self._ui_game_return = {
+                "attempt_id": self._ui_last_attempt_id, "app_id": app_id,
+                "origin_context_id": context_id,
+            }
+            self._ui_game_return_outcome = "pending"
         decky.logger.info("Steam UI reload requested (%s, resume %s)", trigger, self._ui_resume_sequence)
         return {"success": True, "allowed": True, "attempt_id": self._ui_last_attempt_id}
 
@@ -389,7 +409,37 @@ class Plugin:
                 or outcome not in ("native_error", "unconfirmed", "cancelled", "locked", "lock_unknown")):
             return {"success": False}
         self._ui_last_outcome = outcome
+        self._cancel_ui_game_return("cancelled")
         decky.logger.info("Steam UI reload outcome: %s", outcome)
+        return {"success": True}
+
+    def _cancel_ui_game_return(self, outcome: str) -> None:
+        if self._ui_game_return is not None:
+            self._ui_game_return = None
+            self._ui_game_return_outcome = outcome
+
+    async def claim_ui_game_return(self, attempt_id: Any, context_id: Any,
+                                   guard: Any) -> Dict[str, Any]:
+        self._sample_ui_resume_clock()
+        self._expire_ui_resume()
+        pending = self._ui_game_return
+        if (pending is None or attempt_id != pending["attempt_id"]
+                or not isinstance(context_id, str) or not 0 < len(context_id) <= 128
+                or context_id == pending["origin_context_id"]):
+            return {"success": True, "allowed": False}
+        if guard not in ("ready", "locked", "lock_unknown"):
+            return {"success": False, "allowed": False}
+        # Consume before navigation so another frontend instance cannot repeat it.
+        self._cancel_ui_game_return("requested" if guard == "ready" else guard)
+        return {"success": True, "allowed": guard == "ready", "app_id": pending["app_id"]}
+
+    async def finish_ui_game_return(self, attempt_id: Any, outcome: Any) -> Dict[str, Any]:
+        if (attempt_id != self._ui_last_attempt_id or not attempt_id
+                or self._ui_last_attempt_sequence != self._ui_resume_sequence
+                or self._ui_game_return_outcome != "requested"
+                or outcome not in ("requested", "failed", "not_running", "cancelled", "locked", "lock_unknown")):
+            return {"success": False}
+        self._ui_game_return_outcome = outcome
         return {"success": True}
 
     async def set_badge_visibility(self, show_gfn_badges: Any, show_boosteroid_badges: Any) -> Dict[str, Any]:

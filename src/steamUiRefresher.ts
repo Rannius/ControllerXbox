@@ -8,10 +8,13 @@ export type UiResumeSnapshot = {
   last_resume_at: number;
   last_request_at: number;
   last_outcome: string;
+  game_return?: { attempt_id: string; app_id: number; origin_context_id: string } | null;
+  game_return_outcome?: string;
 };
 export type UiRefreshPermission = {
   success: boolean; allowed: boolean; reason?: string; attempt_id?: string;
 };
+export type UiGameReturnPermission = { success: boolean; allowed: boolean; app_id?: number };
 export type RefreshTrigger = "manual" | "automatic";
 export type RefreshGuard = "ready" | "locked" | "lock_unknown";
 export type UiRefreshStatus = {
@@ -19,11 +22,17 @@ export type UiRefreshStatus = {
 };
 
 type Environment = {
+  contextId: string;
   browser?: { RestartJSContext?: () => void };
   // These backend calls must have bounded timeouts supplied by the caller.
   getResumeStatus(): Promise<UiResumeSnapshot>;
-  beginRefresh(trigger: RefreshTrigger, session: string, sequence: number, guard: RefreshGuard): Promise<UiRefreshPermission>;
+  beginRefresh(trigger: RefreshTrigger, session: string, sequence: number, guard: RefreshGuard, appId: number, contextId: string): Promise<UiRefreshPermission>;
   finishRefresh(attempt: string, outcome: string): Promise<unknown>;
+  claimGameReturn(attempt: string, contextId: string, guard: RefreshGuard): Promise<UiGameReturnPermission>;
+  finishGameReturn(attempt: string, outcome: string): Promise<unknown>;
+  getRunningGameId(): number | undefined;
+  isGameRunning(appId: number): boolean;
+  returnToGame(appId: number): boolean;
   isLocked(): boolean;
   setTimeout(callback: () => void, delay: number): number;
   clearTimeout(timer: number): void;
@@ -50,6 +59,21 @@ export function uiRefreshOutcomeMessage(outcome: string): string {
     too_early: "Várakozás az ébresztés utáni három másodpercre.",
   };
   return messages[outcome] ?? "Ismeretlen frissítési állapot.";
+}
+
+export function gameReturnOutcomeMessage(outcome: string): string {
+  const messages: Record<string, string> = {
+    pending: "Várakozás a futó játékhoz való visszatérésre.",
+    requested: "Visszatérés a futó játékhoz kérve.",
+    failed: "A játékhoz való visszatérés hibába ütközött.",
+    not_running: "A megjegyzett játék már nem fut.",
+    expired: "A játékhoz való visszatérés ideje lejárt; a Steam nem jelezte időben a futó játékot.",
+    cancelled: "A játékhoz való visszatérés leállítva.",
+    superseded: "Az újabb ébresztés felülírta a korábbi visszatérést.",
+    locked: "A zárolási képernyő miatt kimaradt a játékhoz való visszatérés.",
+    lock_unknown: "A zárolási állapot nem ellenőrizhető; a játékhoz való visszatérés kimaradt.",
+  };
+  return messages[outcome] ?? "";
 }
 
 // Detect real suspend in the Linux backend, independently of Steam callbacks.
@@ -89,6 +113,8 @@ export class SteamUiRefresher {
       this.update({ resume, monitorMessage: this.automaticAvailable
         ? "Linux ébresztésfigyelés működik."
         : this.automaticUnavailableReason });
+      await this.restoreGame(resume);
+      if (this.disposed) return;
       // A response already in flight must not undo a newly saved toggle.
       if (revision === this.settingsRevision) {
         this.enabled = resume.enabled;
@@ -109,6 +135,30 @@ export class SteamUiRefresher {
   }
 
   refresh(): void { this.schedule("manual"); }
+
+  private async restoreGame(resume: UiResumeSnapshot): Promise<void> {
+    const pending = resume.game_return;
+    if (!pending || pending.origin_context_id === this.env.contextId || this.attempt) return;
+    try {
+      const guard = this.guard();
+      // Steam repopulates RunningApps asynchronously after the JS restart.
+      // Leave the ticket pending until this exact app appears, or it expires.
+      if (guard === "ready" && !this.env.isGameRunning(pending.app_id)) return;
+      const claim = await this.env.claimGameReturn(pending.attempt_id, this.env.contextId, guard);
+      if (!claim.success || !claim.allowed) return;
+      let outcome = "cancelled";
+      if (!this.disposed && !this.attempt) {
+        const currentGuard = this.guard();
+        outcome = currentGuard !== "ready" ? currentGuard
+          : claim.app_id === pending.app_id && this.env.returnToGame(pending.app_id) ? "requested" : "not_running";
+      }
+      await this.env.finishGameReturn(pending.attempt_id, outcome);
+      if (!this.disposed) this.update({ message: gameReturnOutcomeMessage(outcome) });
+    } catch (error) {
+      try { await this.env.finishGameReturn(pending.attempt_id, "failed"); } catch { /* Diagnostic only. */ }
+      if (!this.disposed) this.update({ message: gameReturnOutcomeMessage("failed") + " " + String(error) });
+    }
+  }
 
   private schedule(trigger: RefreshTrigger, resume?: UiResumeSnapshot): void {
     if (this.disposed || !this.available || this.attempt) return;
@@ -136,8 +186,10 @@ export class SteamUiRefresher {
   private async run(attempt: Attempt): Promise<void> {
     let id: string | undefined;
     try {
+      let appId = 0;
+      try { appId = this.env.getRunningGameId() ?? 0; } catch { /* Reload still works without a game target. */ }
       const claim = await this.env.beginRefresh(attempt.trigger,
-        attempt.resume?.session_id ?? "", attempt.resume?.sequence ?? 0, this.guard());
+        attempt.resume?.session_id ?? "", attempt.resume?.sequence ?? 0, this.guard(), appId, this.env.contextId);
       id = claim.attempt_id;
       if (this.disposed || attempt.cancelled) {
         if (claim.allowed && id) await this.finish(id, "cancelled");

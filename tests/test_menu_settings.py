@@ -211,6 +211,79 @@ class ResumeMonitorTest(PluginTestCase):
         self.assertEqual(state["last_outcome"], "detected")
         self.assertTrue(state["pending"])
 
+    async def test_game_target_survives_ui_reload_and_only_new_context_can_claim_once(self):
+        reload = await self.claim(trigger="manual", app_id=570, context_id="old-ui")
+        ticket = (await self.plugin.get_ui_resume_status())["game_return"]
+        self.assertEqual(ticket["app_id"], 570)
+        self.assertEqual(ticket["origin_context_id"], "old-ui")
+        self.assertFalse((await self.plugin.claim_ui_game_return(reload["attempt_id"], "old-ui", "ready"))["allowed"])
+        self.assertFalse((await self.plugin.claim_ui_game_return("stale", "new-ui", "ready"))["allowed"])
+        self.assertFalse((await self.plugin.claim_ui_game_return(reload["attempt_id"], "", "ready"))["allowed"])
+        returned = await self.plugin.claim_ui_game_return(reload["attempt_id"], "new-ui", "ready")
+        self.assertTrue(returned["allowed"])
+        self.assertEqual(returned["app_id"], 570)
+        self.assertFalse((await self.plugin.claim_ui_game_return(reload["attempt_id"], "third-ui", "ready"))["allowed"])
+        self.assertIsNone((await self.plugin.get_ui_resume_status())["game_return"])
+        self.assertIsNone((await self.plugin_type().get_ui_resume_status())["game_return"], "backend restart must not resurrect a target")
+
+    async def test_game_return_expires_without_reopening_a_game(self):
+        reload = await self.claim(trigger="manual", app_id=570, context_id="old-ui")
+        self.elapsed += 61
+        self.assertFalse((await self.plugin.claim_ui_game_return(reload["attempt_id"], "new-ui", "ready"))["allowed"])
+        state = await self.plugin.get_ui_resume_status()
+        self.assertIsNone(state["game_return"])
+        self.assertEqual(state["game_return_outcome"], "expired")
+
+    async def test_reload_failure_or_cancellation_also_clears_game_return(self):
+        for reason in ("native_error", "unconfirmed", "cancelled", "locked", "lock_unknown"):
+            self.elapsed += 15
+            reload = await self.claim(trigger="manual", app_id=570, context_id="old-ui")
+            await self.plugin.finish_ui_refresh(reload["attempt_id"], reason)
+            self.assertFalse((await self.plugin.claim_ui_game_return(reload["attempt_id"], "new-ui", "ready"))["allowed"])
+
+    async def test_disabled_feature_and_new_wake_cancel_pending_game_return(self):
+        await self.enable()
+        await self.claim(trigger="manual", app_id=570, context_id="old-ui")
+        await self.plugin.set_ui_refresh_enabled(False)
+        self.assertIsNone((await self.plugin.get_ui_resume_status())["game_return"])
+        self.elapsed += 15
+        await self.claim(trigger="manual", app_id=570, context_id="old-ui")
+        self.wake()
+        state = await self.plugin.get_ui_resume_status()
+        self.assertIsNone(state["game_return"])
+        self.assertEqual(state["game_return_outcome"], "superseded")
+
+    async def test_locked_replacement_ui_consumes_return_without_permission(self):
+        for guard in ("locked", "lock_unknown"):
+            self.elapsed += 15
+            reload = await self.claim(trigger="manual", app_id=570, context_id="old-ui")
+            self.assertFalse((await self.plugin.claim_ui_game_return(reload["attempt_id"], "new-ui", guard))["allowed"])
+            self.assertFalse((await self.plugin.claim_ui_game_return(reload["attempt_id"], "new-ui", "ready"))["allowed"])
+            self.assertEqual((await self.plugin.get_ui_resume_status())["game_return_outcome"], guard)
+
+    async def test_invalid_or_missing_target_does_not_break_reload_or_create_game_return(self):
+        for app_id, context_id in ((0, "old"), (-1, "old"), (True, "old"), ("570", "old"),
+                                   (2 ** 32, "old"), (570, ""), (570, None), (570, "x" * 129)):
+            self.elapsed += 15
+            self.assertTrue((await self.claim(trigger="manual", app_id=app_id, context_id=context_id))["allowed"])
+            self.assertIsNone((await self.plugin.get_ui_resume_status())["game_return"])
+        self.elapsed += 15
+        self.assertTrue((await self.claim(trigger="manual", app_id=4000000000, context_id="old"))["allowed"])
+        self.assertEqual((await self.plugin.get_ui_resume_status())["game_return"]["app_id"], 4000000000)
+
+    async def test_game_return_outcome_is_bound_to_claimed_current_request(self):
+        reload = await self.claim(trigger="manual", app_id=570, context_id="old-ui")
+        token = reload["attempt_id"]
+        self.assertFalse((await self.plugin.finish_ui_game_return(token, "failed"))["success"])
+        await self.plugin.claim_ui_game_return(token, "new-ui", "ready")
+        self.assertFalse((await self.plugin.finish_ui_game_return("stale", "failed"))["success"])
+        self.assertTrue((await self.plugin.finish_ui_game_return(token, "failed"))["success"])
+        self.assertEqual((await self.plugin.get_ui_resume_status())["game_return_outcome"], "failed")
+        self.elapsed += 15
+        await self.claim(trigger="manual", app_id=123, context_id="new-ui")
+        self.assertFalse((await self.plugin.finish_ui_game_return(token, "requested"))["success"])
+        self.assertEqual((await self.plugin.get_ui_resume_status())["game_return"]["app_id"], 123)
+
 
 class LinuxClockTest(PluginTestCase):
     def test_boottime_minus_monotonic_and_delayed_or_invalid_reads(self):

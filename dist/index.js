@@ -38,6 +38,20 @@ function uiRefreshOutcomeMessage(outcome) {
     };
     return messages[outcome] ?? "Ismeretlen frissítési állapot.";
 }
+function gameReturnOutcomeMessage(outcome) {
+    const messages = {
+        pending: "Várakozás a futó játékhoz való visszatérésre.",
+        requested: "Visszatérés a futó játékhoz kérve.",
+        failed: "A játékhoz való visszatérés hibába ütközött.",
+        not_running: "A megjegyzett játék már nem fut.",
+        expired: "A játékhoz való visszatérés ideje lejárt; a Steam nem jelezte időben a futó játékot.",
+        cancelled: "A játékhoz való visszatérés leállítva.",
+        superseded: "Az újabb ébresztés felülírta a korábbi visszatérést.",
+        locked: "A zárolási képernyő miatt kimaradt a játékhoz való visszatérés.",
+        lock_unknown: "A zárolási állapot nem ellenőrizhető; a játékhoz való visszatérés kimaradt.",
+    };
+    return messages[outcome] ?? "";
+}
 // Detect real suspend in the Linux backend, independently of Steam callbacks.
 // The backend consumes the wake before the native call, surviving JS reloads.
 class SteamUiRefresher {
@@ -74,6 +88,9 @@ class SteamUiRefresher {
             this.update({ resume, monitorMessage: this.automaticAvailable
                     ? "Linux ébresztésfigyelés működik."
                     : this.automaticUnavailableReason });
+            await this.restoreGame(resume);
+            if (this.disposed)
+                return;
             // A response already in flight must not undo a newly saved toggle.
             if (revision === this.settingsRevision) {
                 this.enabled = resume.enabled;
@@ -99,6 +116,38 @@ class SteamUiRefresher {
         }
     }
     refresh() { this.schedule("manual"); }
+    async restoreGame(resume) {
+        const pending = resume.game_return;
+        if (!pending || pending.origin_context_id === this.env.contextId || this.attempt)
+            return;
+        try {
+            const guard = this.guard();
+            // Steam repopulates RunningApps asynchronously after the JS restart.
+            // Leave the ticket pending until this exact app appears, or it expires.
+            if (guard === "ready" && !this.env.isGameRunning(pending.app_id))
+                return;
+            const claim = await this.env.claimGameReturn(pending.attempt_id, this.env.contextId, guard);
+            if (!claim.success || !claim.allowed)
+                return;
+            let outcome = "cancelled";
+            if (!this.disposed && !this.attempt) {
+                const currentGuard = this.guard();
+                outcome = currentGuard !== "ready" ? currentGuard
+                    : claim.app_id === pending.app_id && this.env.returnToGame(pending.app_id) ? "requested" : "not_running";
+            }
+            await this.env.finishGameReturn(pending.attempt_id, outcome);
+            if (!this.disposed)
+                this.update({ message: gameReturnOutcomeMessage(outcome) });
+        }
+        catch (error) {
+            try {
+                await this.env.finishGameReturn(pending.attempt_id, "failed");
+            }
+            catch { /* Diagnostic only. */ }
+            if (!this.disposed)
+                this.update({ message: gameReturnOutcomeMessage("failed") + " " + String(error) });
+        }
+    }
     schedule(trigger, resume) {
         if (this.disposed || !this.available || this.attempt)
             return;
@@ -129,7 +178,12 @@ class SteamUiRefresher {
     async run(attempt) {
         let id;
         try {
-            const claim = await this.env.beginRefresh(attempt.trigger, attempt.resume?.session_id ?? "", attempt.resume?.sequence ?? 0, this.guard());
+            let appId = 0;
+            try {
+                appId = this.env.getRunningGameId() ?? 0;
+            }
+            catch { /* Reload still works without a game target. */ }
+            const claim = await this.env.beginRefresh(attempt.trigger, attempt.resume?.session_id ?? "", attempt.resume?.sequence ?? 0, this.guard(), appId, this.env.contextId);
             id = claim.attempt_id;
             if (this.disposed || attempt.cancelled) {
                 if (claim.allowed && id)
@@ -196,6 +250,48 @@ class SteamUiRefresher {
     }
 }
 
+function appId(value) {
+    if (typeof value !== "number" && typeof value !== "string")
+        return undefined;
+    const id = Number(value);
+    return Number.isInteger(id) && id > 0 && id <= 0xffffffff ? id : undefined;
+}
+function currentRunningGame(store) {
+    try {
+        const main = appId(store?.MainRunningAppID) ?? appId(store?.MainRunningApp?.appid);
+        if (main)
+            return main;
+        const running = store?.RunningApps;
+        // Without Steam's primary selection, multiple games are ambiguous.
+        return running?.length === 1 ? appId(running[0].appid) : undefined;
+    }
+    catch {
+        return undefined;
+    }
+}
+function isGameRunning(store, id) {
+    try {
+        return Array.isArray(store?.RunningApps) && store.RunningApps.some((app) => appId(app?.appid) === id);
+    }
+    catch {
+        return false;
+    }
+}
+function returnToRunningGame(store, id, navigate) {
+    if (!isGameRunning(store, id))
+        return false;
+    if (typeof store?.SetRunningApp !== "function")
+        throw new Error("A Steam játékválasztása nem érhető el.");
+    // This is Game Mode's Resume path. RaiseWindowForGame can be a no-op in
+    // gamescope, and RunGame could accidentally launch a game that has exited.
+    store.SetRunningApp(id);
+    if (typeof store.NavigateToRunningApp === "function")
+        store.NavigateToRunningApp();
+    else
+        navigate("/apprunning");
+    return true;
+}
+
 const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
 const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
@@ -225,6 +321,8 @@ const setUiRefreshEnabled = callable("set_ui_refresh_enabled");
 const getUiResumeStatus = callable("get_ui_resume_status");
 const beginUiRefresh = callable("begin_ui_refresh");
 const finishUiRefresh = callable("finish_ui_refresh");
+const claimUiGameReturn = callable("claim_ui_game_return");
+const finishUiGameReturn = callable("finish_ui_game_return");
 const setBadgeVisibility = callable("set_badge_visibility");
 const setNotificationPreferences = callable("set_notification_preferences");
 const getNotificationEvents = callable("get_notification_events");
@@ -2015,7 +2113,7 @@ function Content() {
         return SP_JSX.jsxs(DFL.PanelSection, { title: "El\u0151zm\u00E9nyek", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), history.length ? history.map((entry) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { padding: "6px 0" }, children: [SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: entry.title }), SP_JSX.jsx("div", { children: historyEventLabel(entry) }), SP_JSX.jsxs("div", { style: { opacity: 0.7, fontSize: "12px" }, children: [new Date(entry.created_at * 1000).toLocaleString("hu-HU"), " \u00B7 Steam AppID: ", entry.app_id] })] }) }, entry.id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "M\u00E9g nincs r\u00F6gz\u00EDtett esem\u00E9ny." }) }), history.length ? SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: historyWorking, onClick: clearHistory, children: "El\u0151zm\u00E9nyek t\u00F6rl\u00E9se" }) }) : null] });
     return SP_JSX.jsxs(DFL.PanelSection, { title: "Deck Play Badges", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", description: "K\u00EDs\u00E9rleti seg\u00EDts\u00E9g a beragadt STEAM \u00E9s \u2026 gombhoz. A Steam fel\u00FClete \u00E1tmenetileg elt\u0171nik. Els\u0151 pr\u00F3ba el\u0151tt ments a j\u00E1t\u00E9kban.", disabled: uiStatus.working || !steamUiRefresher?.available, onClick: () => void steamUiRefresher?.refresh(), children: "Steam fel\u00FClet \u00FAjrat\u00F6lt\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: uiStatus.message }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "12px", opacity: 0.85 }, children: [SP_JSX.jsx("div", { children: uiStatus.monitorMessage ?? "Ébresztésfigyelés ellenőrzése…" }), SP_JSX.jsxs("div", { children: ["Utols\u00F3 \u00E9szlelt \u00E9breszt\u00E9s: ", uiStatus.resume?.last_resume_at
                                     ? new Date(uiStatus.resume.last_resume_at * 1000).toLocaleString("hu-HU") : "még nincs"] }), SP_JSX.jsxs("div", { children: ["Utols\u00F3 \u00FAjrat\u00F6lt\u00E9si k\u00E9r\u00E9s: ", uiStatus.resume?.last_request_at
-                                    ? new Date(uiStatus.resume.last_request_at * 1000).toLocaleString("hu-HU") : "még nincs"] }), SP_JSX.jsx("div", { children: uiRefreshOutcomeMessage(uiStatus.resume?.last_outcome ?? "idle") })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
+                                    ? new Date(uiStatus.resume.last_request_at * 1000).toLocaleString("hu-HU") : "még nincs"] }), SP_JSX.jsx("div", { children: uiRefreshOutcomeMessage(uiStatus.resume?.last_outcome ?? "idle") }), uiStatus.resume?.game_return_outcome ? SP_JSX.jsx("div", { children: gameReturnOutcomeMessage(uiStatus.resume.game_return_outcome) }) : null] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
                         ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
                             + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
                             + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
@@ -2027,10 +2125,16 @@ function Content() {
 var index = DFL.definePlugin(() => {
     pluginActive = true;
     steamUiRefresher = new SteamUiRefresher({
+        contextId: globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36) + "-" + Math.random().toString(36).slice(2),
         browser: window.SteamClient?.Browser,
         getResumeStatus: () => withBackendTimeout(getUiResumeStatus(), 5_000),
-        beginRefresh: (trigger, session, sequence, guard) => withBackendTimeout(beginUiRefresh(trigger, session, sequence, guard), 5_000),
+        beginRefresh: (trigger, session, sequence, guard, appId, contextId) => withBackendTimeout(beginUiRefresh(trigger, session, sequence, guard, appId, contextId), 5_000),
         finishRefresh: (attempt, outcome) => withBackendTimeout(finishUiRefresh(attempt, outcome), 5_000),
+        claimGameReturn: (attempt, contextId, guard) => withBackendTimeout(claimUiGameReturn(attempt, contextId, guard), 5_000),
+        finishGameReturn: (attempt, outcome) => withBackendTimeout(finishUiGameReturn(attempt, outcome), 5_000),
+        getRunningGameId: () => currentRunningGame(window.SteamUIStore),
+        isGameRunning: (appId) => isGameRunning(window.SteamUIStore, appId),
+        returnToGame: (appId) => returnToRunningGame(window.SteamUIStore, appId, (path) => DFL.Navigation.Navigate(path)),
         isLocked: () => {
             if (typeof window.securitystore?.IsLockScreenActive !== "function") {
                 throw new Error("A Steam zárolási állapota nem ellenőrizhető.");

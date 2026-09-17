@@ -1,7 +1,8 @@
-import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
+import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, Navigation, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
 import { createElement, Fragment, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { SteamUiRefresher, UiRefreshStatus, UiResumeSnapshot, UiRefreshPermission, RefreshTrigger, RefreshGuard, uiRefreshOutcomeMessage } from "./steamUiRefresher";
+import { SteamUiRefresher, UiRefreshStatus, UiResumeSnapshot, UiRefreshPermission, UiGameReturnPermission, RefreshTrigger, RefreshGuard, uiRefreshOutcomeMessage, gameReturnOutcomeMessage } from "./steamUiRefresher";
+import { currentRunningGame, isGameRunning, returnToRunningGame, RunningGameStore } from "./steamGameFocus";
 
 const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
@@ -178,9 +179,11 @@ const getSettings = callable<[], SettingsResponse>("get_settings");
 const setUiRefreshEnabled = callable<[enabled: boolean], SettingsResponse>("set_ui_refresh_enabled");
 const getUiResumeStatus = callable<[], UiResumeSnapshot>("get_ui_resume_status");
 const beginUiRefresh = callable<
-  [trigger: RefreshTrigger, session: string, sequence: number, guard: RefreshGuard], UiRefreshPermission
+  [trigger: RefreshTrigger, session: string, sequence: number, guard: RefreshGuard, appId: number, contextId: string], UiRefreshPermission
 >("begin_ui_refresh");
 const finishUiRefresh = callable<[attempt: string, outcome: string], { success: boolean }>("finish_ui_refresh");
+const claimUiGameReturn = callable<[attempt: string, contextId: string, guard: RefreshGuard], UiGameReturnPermission>("claim_ui_game_return");
+const finishUiGameReturn = callable<[attempt: string, outcome: string], { success: boolean }>("finish_ui_game_return");
 const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean], SettingsResponse>("set_badge_visibility");
 const setNotificationPreferences = callable<[
   notifyGfnAdditions: boolean,
@@ -2097,6 +2100,7 @@ function Content() {
       <div>Utolsó újratöltési kérés: {uiStatus.resume?.last_request_at
         ? new Date(uiStatus.resume.last_request_at * 1000).toLocaleString("hu-HU") : "még nincs"}</div>
       <div>{uiRefreshOutcomeMessage(uiStatus.resume?.last_outcome ?? "idle")}</div>
+      {uiStatus.resume?.game_return_outcome ? <div>{gameReturnOutcomeMessage(uiStatus.resume.game_return_outcome)}</div> : null}
     </div></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("watchlist")}>
       Figyelőlista ({watchlist.length})
@@ -2128,10 +2132,16 @@ function Content() {
 export default definePlugin(() => {
   pluginActive = true;
   steamUiRefresher = new SteamUiRefresher({
+    contextId: globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36) + "-" + Math.random().toString(36).slice(2),
     browser: window.SteamClient?.Browser,
     getResumeStatus: () => withBackendTimeout(getUiResumeStatus(), 5_000),
-    beginRefresh: (trigger, session, sequence, guard) => withBackendTimeout(beginUiRefresh(trigger, session, sequence, guard), 5_000),
+    beginRefresh: (trigger, session, sequence, guard, appId, contextId) => withBackendTimeout(beginUiRefresh(trigger, session, sequence, guard, appId, contextId), 5_000),
     finishRefresh: (attempt, outcome) => withBackendTimeout(finishUiRefresh(attempt, outcome), 5_000),
+    claimGameReturn: (attempt, contextId, guard) => withBackendTimeout(claimUiGameReturn(attempt, contextId, guard), 5_000),
+    finishGameReturn: (attempt, outcome) => withBackendTimeout(finishUiGameReturn(attempt, outcome), 5_000),
+    getRunningGameId: () => currentRunningGame(window.SteamUIStore as RunningGameStore),
+    isGameRunning: (appId) => isGameRunning(window.SteamUIStore as RunningGameStore, appId),
+    returnToGame: (appId) => returnToRunningGame(window.SteamUIStore as RunningGameStore, appId, (path) => Navigation.Navigate(path)),
     isLocked: () => {
       if (typeof window.securitystore?.IsLockScreenActive !== "function") {
         throw new Error("A Steam zárolási állapota nem ellenőrizhető.");
