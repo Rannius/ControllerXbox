@@ -173,3 +173,111 @@ test("partial registration failure releases the first subscription", () => {
   assert.equal(released, true);
   assert.equal(f.refresher.automaticAvailable, false);
 });
+
+function modernFixture(options = {}) {
+  let prepare, resume, wake, active = 0;
+  const subscription = () => {
+    active++;
+    return { unregister() { active--; } };
+  };
+  const user = {
+    RegisterForPrepareForSystemSuspendProgress(callback) {
+      assert.equal(this, user);
+      prepare = callback;
+      // Native APIs may emit their current state while registering.
+      callback({ state: 5, bGameSuspended: false });
+      return subscription();
+    },
+    RegisterForResumeSuspendedGamesProgress(callback) {
+      assert.equal(this, user);
+      resume = callback;
+      callback({ state: 1, bGameSuspended: false });
+      return subscription();
+    },
+  };
+  const sleepManager = {
+    RegisterForNotifyResumeFromSuspend(callback) {
+      assert.equal(this, sleepManager);
+      wake = callback;
+      return subscription();
+    },
+  };
+  const f = fixture({ noSystem: true, environment: {
+    user,
+    ...(options.sleepManager ? { sleepManager } : {}),
+    ...options.environment,
+  } });
+  return {
+    ...f,
+    prepare: (state, bGameSuspended = false) => prepare?.({ state, bGameSuspended }),
+    resumeProgress: (state) => resume?.({ state }),
+    wake: () => wake?.(),
+    active: () => active,
+  };
+}
+
+test("modern Steam without System suspend APIs enables the automatic switch", () => {
+  const f = modernFixture();
+  assert.equal(f.refresher.automaticAvailable, true);
+  f.refresher.setEnabled(true);
+  f.prepare(5); f.prepare(1);
+  f.resumeProgress(3); f.advance(5_000);
+  assert.equal(f.restarts(), 0, "do not restart during resume progress");
+  f.resumeProgress(1); f.resumeProgress(1);
+  f.advance(2_999);
+  assert.equal(f.restarts(), 0);
+  f.advance(1);
+  assert.equal(f.restarts(), 1);
+  f.refresher.dispose();
+  assert.equal(f.active(), 0);
+});
+
+test("modern registration and replayed completed states cannot cause a reload loop", () => {
+  const f = modernFixture();
+  f.refresher.setEnabled(true);
+  f.prepare(0); f.prepare(1, true); f.resumeProgress(1);
+  f.advance(60_000);
+  assert.equal(f.restarts(), 0);
+  assert.equal(f.refresher.status.working, false);
+});
+
+test("SleepManager wake works with User preparation and no legacy System APIs", () => {
+  const f = modernFixture({ sleepManager: true });
+  assert.equal(f.refresher.automaticAvailable, true);
+  assert.equal(f.active(), 2, "subscribe to exactly one wake source");
+  f.refresher.setEnabled(true);
+  f.wake(); f.advance(10_000);
+  assert.equal(f.restarts(), 0);
+  f.prepare(2); f.prepare(5); f.prepare(1);
+  f.wake(); f.wake(); f.advance(3_000);
+  assert.equal(f.restarts(), 1);
+  f.refresher.dispose();
+  assert.equal(f.active(), 0);
+});
+
+test("throwing legacy stubs fall back to modern events; abandoned callbacks stay inert", () => {
+  let legacyWake;
+  const f = modernFixture({ environment: { system: {
+    RegisterForOnResumeFromSuspend(callback) {
+      legacyWake = callback;
+      throw new Error("removed native method");
+    },
+    RegisterForOnSuspendRequest() { throw new Error("removed native method"); },
+  } } });
+  assert.equal(f.refresher.automaticAvailable, true);
+  f.refresher.setEnabled(true); f.prepare(5); f.prepare(1);
+  legacyWake(); f.advance(10_000);
+  assert.equal(f.restarts(), 0);
+  f.resumeProgress(1); f.advance(3_000);
+  assert.equal(f.restarts(), 1);
+});
+
+test("modern pending wake is cancelled on another suspend or unload", () => {
+  const f = modernFixture();
+  f.refresher.setEnabled(true); f.prepare(5); f.resumeProgress(1);
+  f.advance(2_999); f.prepare(2); f.advance(5_000);
+  assert.equal(f.restarts(), 0);
+  f.resumeProgress(1); f.refresher.dispose(); f.advance(5_000);
+  assert.equal(f.restarts(), 0);
+  assert.equal(f.active(), 0);
+});

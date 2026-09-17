@@ -1,7 +1,7 @@
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
 import { createElement, Fragment, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { SteamUiRefresher, UiRefreshStatus } from "./steamUiRefresher";
+import { SleepManager, SteamUiRefresher, UiRefreshStatus } from "./steamUiRefresher";
 
 const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
@@ -1947,11 +1947,11 @@ function Content() {
       label="Felületfrissítés ébresztés után"
       description="Kísérleti: ébresztés után újratölti a Steam felületét. A felület átmenetileg eltűnhet. Előbb próbáld ki kézzel; alapból kikapcsolva."
       checked={autoUiRefresh}
-      disabled={settingsWorking || !steamUiRefresher?.automaticAvailable}
+      disabled={settingsWorking || (!autoUiRefresh && !steamUiRefresher?.automaticAvailable)}
       onChange={(checked) => void updateUiRefresh(checked)}
     /></PanelSectionRow>
     {!steamUiRefresher?.automaticAvailable ? <PanelSectionRow><div>
-      Az automatikus ébresztésfigyelés ezen a Steam-verzión nem érhető el.
+      {steamUiRefresher?.automaticUnavailableReason ?? "A felületfrissítő nem érhető el."}
     </div></PanelSectionRow> : null}
     <PanelSectionRow><div style={{ fontWeight: 700 }}>Jelvények</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
@@ -2113,8 +2113,18 @@ function Content() {
 
 export default definePlugin(() => {
   pluginActive = true;
+  let sleepManager: SleepManager | undefined;
+  try {
+    sleepManager = findModuleExport((value) =>
+      typeof value?.RegisterForNotifyResumeFromSuspend === "function",
+    ) as SleepManager | undefined;
+  } catch (error) {
+    console.warn("Deck Play Badges could not locate Steam's sleep manager", error);
+  }
   steamUiRefresher = new SteamUiRefresher({
     system: window.SteamClient?.System,
+    user: window.SteamClient?.User,
+    sleepManager,
     browser: window.SteamClient?.Browser,
     isLocked: () => {
       if (typeof window.securitystore?.IsLockScreenActive !== "function") {

@@ -1,6 +1,6 @@
 {
   "name": "controller-xbox",
-  "version": "1.0.46",
+  "version": "1.0.47",
   "description": "Deck Play Badges for controller support, GeForce NOW, and Boosteroid availability",
   "type": "module",
   "main": "dist/index.js",
