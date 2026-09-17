@@ -277,8 +277,14 @@ async function reloadUpdatedPlugin(): Promise<"reloaded" | "restarting" | "faile
   try {
     const loader = (window as any).DeckyPluginLoader;
     if (typeof loader?.reloadPlugin === "function") {
-      await loader.reloadPlugin("ControllerXbox");
-      return "reloaded";
+      for (const pluginName of ["Deck Play Badges", "ControllerXbox"]) {
+        try {
+          await loader.reloadPlugin(pluginName);
+          return "reloaded";
+        } catch {
+          // Try the other name while installations migrate between manifests.
+        }
+      }
     }
   } catch {
     // The UI will provide a manual restart instruction.

@@ -22,6 +22,8 @@ Version 1.0.36 adds a built-in updater for developer-mode installations. Install
 
 Version 1.0.43 introduces the **Deck Play Badges** display name. Its update notification is checked separately from the slower cloud catalogs and is only marked as delivered after the frontend has displayed it, preventing catalog timeouts from silently consuming an update alert.
 
+Version 1.0.44 is the compatibility bridge for changing Decky's manifest-level plugin identifier. Its updater accepts both the legacy `ControllerXbox` name and the new `Deck Play Badges` name, and its reload path can address either identity. Install this bridge before a release that changes the manifest name.
+
 Official Decky Plugin Store publication can still provide Decky's own managed update button later, but it is no longer required for updating a developer-mode installation.
 
 ## Decky ZIP packaging contract

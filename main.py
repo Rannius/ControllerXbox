@@ -57,6 +57,7 @@ GITHUB_LATEST_RELEASE_URL = "https://api.github.com/repos/{}/releases/latest".fo
 GITHUB_RELEASE_TAG_URL = "https://api.github.com/repos/{}/releases/tags/v{{}}".format(GITHUB_REPOSITORY)
 GITHUB_DOWNLOAD_PREFIX = "https://github.com/{}/releases/download/".format(GITHUB_REPOSITORY)
 UPDATE_MAX_BYTES = 15 * 1024 * 1024
+PLUGIN_MANIFEST_NAMES = {"ControllerXbox", "Deck Play Badges"}
 UPDATE_FILES = [
     ".gitignore",
     "LICENSE",
@@ -668,8 +669,8 @@ class Plugin:
         if str(package.get("version", "")) != expected_version:
             raise ValueError("A ZIP verziószáma nem egyezik a kiadással.")
         manifest = json.loads(archive.read("ControllerXbox/plugin.json").decode("utf-8"))
-        if str(manifest.get("name", "")) != "ControllerXbox":
-            raise ValueError("A ZIP nem a ControllerXbox plugin telepítője.")
+        if str(manifest.get("name", "")) not in PLUGIN_MANIFEST_NAMES:
+            raise ValueError("A ZIP nem a Deck Play Badges plugin telepítője.")
 
     def _apply_update_blocking(self, expected_version: str) -> Dict[str, Any]:
         if not re.fullmatch(r"\d+\.\d+\.\d+", str(expected_version)):
@@ -685,8 +686,8 @@ class Plugin:
             if not plugin_directory.is_dir():
                 raise OSError("A Decky pluginmappa nem található.")
             current_manifest = json.loads((plugin_directory / "plugin.json").read_text(encoding="utf-8"))
-            if str(current_manifest.get("name", "")) != "ControllerXbox":
-                raise ValueError("A Decky pluginmappa nem a ControllerXboxhoz tartozik.")
+            if str(current_manifest.get("name", "")) not in PLUGIN_MANIFEST_NAMES:
+                raise ValueError("A Decky pluginmappa nem a Deck Play Badgeshez tartozik.")
 
             with tempfile.TemporaryDirectory(prefix="controllerxbox-update-") as temporary_directory_value:
                 temporary_directory = Path(temporary_directory_value)
