@@ -1383,7 +1383,7 @@ function patchLibraryTiles(): () => void {
 
 function Content() {
   const [stats, setStats] = useState<CacheStats>();
-  const [status, setStatus] = useState("A könyvtári csempék, játékoldalak és Steam Áruház jelölése indul. Nyisd meg vagy frissítsd a kívánt nézetet.");
+  const [status, setStatus] = useState("A jelvények aktívak.");
   const [diagnosticLog, setDiagnosticLog] = useState("Nincs rögzített hiba.");
   const [working, setWorking] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse>();
@@ -1677,14 +1677,12 @@ function Content() {
     <PanelSectionRow><div style={{ fontWeight: 700 }}>Megjelenített jelvények</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="GeForce NOW jelvények"
-      description="GFN-jelvények megjelenítése a Könyvtárban és a Steam Áruházban."
       checked={visibility.show_gfn_badges}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked })}
     /></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Boosteroid jelvények"
-      description="Boosteroid-jelvények megjelenítése a Könyvtárban és a Steam Áruházban."
       checked={visibility.show_boosteroid_badges}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked })}
@@ -1692,37 +1690,31 @@ function Content() {
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Értesítések</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Új GeForce NOW-játékok"
-      description="Jelzés, ha egy könyvtári játékod újonnan elérhetővé válik."
       checked={notifications.notify_gfn_additions}
       disabled={settingsWorking}
       onChange={(checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked })}
     /></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Új Boosteroid-játékok"
-      description="Jelzés, ha egy könyvtári játékod újonnan elérhetővé válik."
       checked={notifications.notify_boosteroid_additions}
       disabled={settingsWorking}
       onChange={(checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked })}
     /></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Boosteroid-karbantartás"
-      description="Jelzés, ha egy játékod karbantartás alá kerül."
       checked={notifications.notify_boosteroid_maintenance}
       disabled={settingsWorking}
       onChange={(checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked })}
     /></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Pluginfrissítések"
-      description="Jelzés, ha új stabil ControllerXbox-verzió érhető el."
       checked={notifications.notify_plugin_updates}
       disabled={settingsWorking}
       onChange={(checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked })}
     /></PanelSectionRow>
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Figyelőlista</div></PanelSectionRow>
-    <PanelSectionRow><div>Olyan játékot is figyelhetsz, amely nincs a Steam-könyvtáradban. A Steam AppID a játék Áruház-linkjében szereplő szám.</div></PanelSectionRow>
     <PanelSectionRow><TextField
       label="Steam AppID"
-      description="Példa: 1888930"
       value={watchInput}
       mustBeNumeric
       bShowClearAction
@@ -1733,7 +1725,7 @@ function Content() {
       layout="below"
       disabled={watchWorking || !watchInput.trim()}
       onClick={addWatchedGame}
-    >Játék hozzáadása a figyelőlistához</ButtonItem></PanelSectionRow>
+    >Hozzáadás</ButtonItem></PanelSectionRow>
     {watchlist.length ? watchlist.map((entry) =>
       <PanelSectionRow key={entry.app_id}><ButtonItem
         layout="below"
@@ -1747,8 +1739,7 @@ function Content() {
         onClick={() => void removeWatchedGame(entry.app_id)}
       >Eltávolítás</ButtonItem></PanelSectionRow>,
     ) : <PanelSectionRow><div>A figyelőlista üres.</div></PanelSectionRow>}
-    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Értesítési előzmények</div></PanelSectionRow>
-    <PanelSectionRow><div>A legutóbbi 100 GFN-, Boosteroid- és karbantartási változás helyben megmarad.</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Előzmények</div></PanelSectionRow>
     {history.length ? history.map((entry) =>
       <PanelSectionRow key={entry.id}><div style={{ padding: "6px 0" }}>
         <div style={{ fontWeight: 700 }}>{entry.title}</div>
@@ -1763,17 +1754,14 @@ function Content() {
       disabled={historyWorking}
       onClick={clearHistory}
     >Értesítési előzmények törlése</ButtonItem></PanelSectionRow> : null}
-    <PanelSectionRow><div>A könyvtári és Steam Áruház-bélyegképek jelölése: teli kontroller = teljes támogatás; félig kitöltött kontroller = részleges támogatás; piros × = nincs támogatás; narancssárga ? = nincs Steam-adat.</div></PanelSectionRow>
-    <PanelSectionRow><div>A Könyvtárban megnyitott játék oldalán a három jelvény jobb felül, a ProtonDB-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
-    <PanelSectionRow><div>A megnyitott Steam Áruház-játék oldalán a három jelvény jobb alul, a ProtonDB Store-jelvénnyel egy vonalban jelenik meg.</div></PanelSectionRow>
-    <PanelSectionRow><div>GeForce NOW: zöld GFN = játszható; szürke GFN = nincs a katalógusban; narancssárga GFN? = a katalógus nem érhető el.</div></PanelSectionRow>
-    <PanelSectionRow><div>Boosteroid: kék logó = elérhető; sárga logó = karbantartás alatt; szürke logó = nincs a katalógusban; narancssárga logó = a katalógus nem érhető el.</div></PanelSectionRow>
-    <PanelSectionRow><div>A háttérellenőrzés a Steam-könyvtárat és a figyelőlistát is vizsgálja, majd hatóránként újra lefut.</div></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
-    <PanelSectionRow><div>{stats ? String(stats.entries) + " játék van memóriában; " + String(stats.fresh_entries) + " bejegyzés friss (" + String(stats.ttl_days) + " napos cache)." : "A cache-számláló betöltése folyamatban..."}</div></PanelSectionRow>
-    <PanelSectionRow><div>{stats ? "GFN-katalógus: " + String(stats.gfn_catalog_entries ?? 0) + " Steam AppID; " + (stats.gfn_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A GFN-katalógus állapotának betöltése folyamatban..."}</div></PanelSectionRow>
-    <PanelSectionRow><div>{stats ? "Boosteroid-katalógus: " + String(stats.boosteroid_catalog_entries ?? 0) + " Steam AppID; " + (stats.boosteroid_cache_fresh ? "friss (24 óránként ellenőrizve)." : "frissítésre vár.") : "A Boosteroid-katalógus állapotának betöltése folyamatban..."}</div></PanelSectionRow>
-    <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hibanapló: {diagnosticLog}</div></PanelSectionRow>
+    <PanelSectionRow><div>{stats
+      ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
+        + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
+        + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
+      : "Állapot betöltése..."}</div></PanelSectionRow>
+    {diagnosticLog !== "Nincs rögzített hiba." ?
+      <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hiba: {diagnosticLog}</div></PanelSectionRow> : null}
     <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={backendCheck}>Látható játékok újraellenőrzése</ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={clearAndRefresh}>Cache törlése és újraellenőrzés</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Pluginfrissítés</div></PanelSectionRow>
