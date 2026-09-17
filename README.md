@@ -24,6 +24,8 @@ Version 1.0.43 introduces the **Deck Play Badges** display name. Its update noti
 
 Version 1.0.44 is the compatibility bridge for changing Decky's manifest-level plugin identifier. Its updater accepts both the legacy `ControllerXbox` name and the new `Deck Play Badges` name, and its reload path can address either identity. Install this bridge before a release that changes the manifest name.
 
+Version 1.0.45 changes the Decky manifest name itself to **Deck Play Badges**, so the new name appears in Decky's plugin sidebar after a full Steam restart. The package name, ZIP root, release asset name, repository, and settings location retain their legacy identifiers to preserve update and data compatibility.
+
 Official Decky Plugin Store publication can still provide Decky's own managed update button later, but it is no longer required for updating a developer-mode installation.
 
 ## Decky ZIP packaging contract
