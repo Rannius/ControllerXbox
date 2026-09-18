@@ -1,8 +1,6 @@
-import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, Navigation, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
+import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
 import { createElement, Fragment, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { SteamUiRefresher, UiRefreshStatus, UiResumeSnapshot, UiRefreshPermission, UiGameReturnPermission, RefreshTrigger, RefreshGuard, uiRefreshOutcomeMessage, gameReturnOutcomeMessage } from "./steamUiRefresher";
-import { currentRunningGame, isGameRunning, returnToRunningGame, RunningGameStore } from "./steamGameFocus";
 
 const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
@@ -10,7 +8,6 @@ const CACHE_CHANGED_EVENT = "controller-xbox-cache-changed";
 const TILE_STATUS_EVENT = "controller-xbox-tile-status";
 const SETTINGS_CHANGED_EVENT = "controller-xbox-settings-changed";
 const HISTORY_CHANGED_EVENT = "controller-xbox-history-changed";
-const UI_REFRESH_EVENT = "controller-xbox-ui-refresh";
 const BADGE_KEY = "controller-xbox-tile-badge";
 const DETAIL_BADGE_KEY = "controller-xbox-detail-badge";
 const DETAIL_PATCH_FLAG = "__controllerXboxDetailPatched";
@@ -80,7 +77,7 @@ type NotificationPreferences = {
   notify_boosteroid_maintenance: boolean;
   notify_plugin_updates: boolean;
 };
-type PluginSettings = BadgeVisibility & NotificationPreferences & { refresh_ui_after_resume: boolean };
+type PluginSettings = BadgeVisibility & NotificationPreferences;
 type SettingsResponse = PluginSettings & { success: boolean; error?: string };
 type NotificationEventsResponse = {
   success: boolean;
@@ -176,14 +173,6 @@ const acknowledgeUpdateNotification = callable<
 const applyUpdate = callable<[expectedVersion: string], UpdateApplyResponse>("apply_update");
 const restartPluginLoader = callable<[], { success: boolean }>("restart_plugin_loader");
 const getSettings = callable<[], SettingsResponse>("get_settings");
-const setUiRefreshEnabled = callable<[enabled: boolean], SettingsResponse>("set_ui_refresh_enabled");
-const getUiResumeStatus = callable<[], UiResumeSnapshot>("get_ui_resume_status");
-const beginUiRefresh = callable<
-  [trigger: RefreshTrigger, session: string, sequence: number, guard: RefreshGuard, appId: number, contextId: string], UiRefreshPermission
->("begin_ui_refresh");
-const finishUiRefresh = callable<[attempt: string, outcome: string], { success: boolean }>("finish_ui_refresh");
-const claimUiGameReturn = callable<[attempt: string, contextId: string, guard: RefreshGuard], UiGameReturnPermission>("claim_ui_game_return");
-const finishUiGameReturn = callable<[attempt: string, outcome: string], { success: boolean }>("finish_ui_game_return");
 const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean], SettingsResponse>("set_badge_visibility");
 const setNotificationPreferences = callable<[
   notifyGfnAdditions: boolean,
@@ -231,8 +220,6 @@ let storeReconnectTimer: number | undefined;
 let storeCurrentAppIds = new Set<string>();
 let notificationTimer: number | undefined;
 let pluginActive = false;
-let steamUiRefresher: SteamUiRefresher | undefined;
-let refreshUiAfterResume = false;
 let watchedGames = new Map<string, WatchlistEntry>();
 const watchlistListeners = new Set<() => void>();
 const watchlistMutations = new Set<string>();
@@ -368,19 +355,10 @@ async function loadBadgeVisibility(): Promise<void> {
         notify_boosteroid_maintenance: response.notify_boosteroid_maintenance ?? true,
         notify_plugin_updates: response.notify_plugin_updates ?? true,
       });
-      applyUiRefreshSetting(response.refresh_ui_after_resume ?? false);
     }
   } catch (error) {
     console.warn("ControllerXbox badge settings could not be loaded", error);
   }
-}
-
-function applyUiRefreshSetting(enabled: boolean): void {
-  refreshUiAfterResume = enabled;
-  steamUiRefresher?.setEnabled(enabled);
-  window.dispatchEvent(new CustomEvent(SETTINGS_CHANGED_EVENT, {
-    detail: { refresh_ui_after_resume: enabled },
-  }));
 }
 
 function getSteamLibraryApps(): any[] {
@@ -1574,10 +1552,6 @@ function Content() {
   const [visibility, setVisibility] = useState<BadgeVisibility>({ ...badgeVisibility });
   const [notifications, setNotifications] = useState<NotificationPreferences>({ ...notificationPreferences });
   const [settingsWorking, setSettingsWorking] = useState(false);
-  const [autoUiRefresh, setAutoUiRefresh] = useState(refreshUiAfterResume);
-  const [uiStatus, setUiStatus] = useState<UiRefreshStatus>(() => steamUiRefresher?.status ?? {
-    working: false, message: "A felületfrissítő nem érhető el.",
-  });
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
   const [watchWorking, setWatchWorking] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1661,9 +1635,6 @@ function Content() {
     const onSettingsChanged = (event: Event) => {
       const detail = (event as CustomEvent<Partial<PluginSettings>>).detail;
       if (!detail) return;
-      if (typeof detail.refresh_ui_after_resume === "boolean") {
-        setAutoUiRefresh(detail.refresh_ui_after_resume);
-      }
       if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean") {
         setVisibility((current) => ({
           show_gfn_badges: detail.show_gfn_badges ?? current.show_gfn_badges,
@@ -1684,15 +1655,12 @@ function Content() {
         }));
       }
     };
-    const onUiRefresh = (event: Event) => setUiStatus((event as CustomEvent<UiRefreshStatus>).detail);
-    window.addEventListener(UI_REFRESH_EVENT, onUiRefresh);
     window.addEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
     window.addEventListener(HISTORY_CHANGED_EVENT, onHistoryChanged);
     window.addEventListener(TILE_STATUS_EVENT, onTileStatus);
     window.addEventListener(SETTINGS_CHANGED_EVENT, onSettingsChanged);
     watchlistListeners.add(onWatchlistChanged);
     return () => {
-      window.removeEventListener(UI_REFRESH_EVENT, onUiRefresh);
       window.removeEventListener(CACHE_CHANGED_EVENT, onCacheChanged);
       window.removeEventListener(HISTORY_CHANGED_EVENT, onHistoryChanged);
       window.removeEventListener(TILE_STATUS_EVENT, onTileStatus);
@@ -1704,19 +1672,6 @@ function Content() {
   useEffect(() => {
     pageRef.current = page;
   }, [page]);
-
-  const updateUiRefresh = async (enabled: boolean) => {
-    setSettingsWorking(true);
-    try {
-      const response = await withBackendTimeout(setUiRefreshEnabled(enabled));
-      if (!response.success) throw new Error(response.error || "A beállítás mentése sikertelen.");
-      applyUiRefreshSetting(response.refresh_ui_after_resume);
-    } catch (error) {
-      toaster.toast({ title: "Beállítási hiba", body: errorMessage(error) });
-    } finally {
-      setSettingsWorking(false);
-    }
-  };
 
   const updateVisibility = async (next: BadgeVisibility) => {
     const previous = visibility;
@@ -1952,16 +1907,6 @@ function Content() {
 
   if (page === "settings") return <PanelSection title="Beállítások">
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
-    <PanelSectionRow><ToggleField
-      label="Felületfrissítés ébresztés után"
-      description="Kísérleti: ébresztés után újratölti a Steam felületét. A felület átmenetileg eltűnhet. Előbb próbáld ki kézzel; alapból kikapcsolva."
-      checked={autoUiRefresh}
-      disabled={settingsWorking || (!autoUiRefresh && !steamUiRefresher?.automaticAvailable)}
-      onChange={(checked) => void updateUiRefresh(checked)}
-    /></PanelSectionRow>
-    {!steamUiRefresher?.automaticAvailable ? <PanelSectionRow><div>
-      {steamUiRefresher?.automaticUnavailableReason ?? "A felületfrissítő nem érhető el."}
-    </div></PanelSectionRow> : null}
     <PanelSectionRow><div style={{ fontWeight: 700 }}>Jelvények</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="GeForce NOW"
@@ -2086,22 +2031,6 @@ function Content() {
   </PanelSection>;
 
   return <PanelSection title="Deck Play Badges">
-    <PanelSectionRow><ButtonItem
-      layout="below"
-      description="Kísérleti segítség a beragadt STEAM és … gombhoz. A Steam felülete átmenetileg eltűnik. Első próba előtt ments a játékban."
-      disabled={uiStatus.working || !steamUiRefresher?.available}
-      onClick={() => void steamUiRefresher?.refresh()}
-    >Steam felület újratöltése</ButtonItem></PanelSectionRow>
-    <PanelSectionRow><div>{uiStatus.message}</div></PanelSectionRow>
-    <PanelSectionRow><div style={{ fontSize: "12px", opacity: 0.85 }}>
-      <div>{uiStatus.monitorMessage ?? "Ébresztésfigyelés ellenőrzése…"}</div>
-      <div>Utolsó észlelt ébresztés: {uiStatus.resume?.last_resume_at
-        ? new Date(uiStatus.resume.last_resume_at * 1000).toLocaleString("hu-HU") : "még nincs"}</div>
-      <div>Utolsó újratöltési kérés: {uiStatus.resume?.last_request_at
-        ? new Date(uiStatus.resume.last_request_at * 1000).toLocaleString("hu-HU") : "még nincs"}</div>
-      <div>{uiRefreshOutcomeMessage(uiStatus.resume?.last_outcome ?? "idle")}</div>
-      {uiStatus.resume?.game_return_outcome ? <div>{gameReturnOutcomeMessage(uiStatus.resume.game_return_outcome)}</div> : null}
-    </div></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("watchlist")}>
       Figyelőlista ({watchlist.length})
     </ButtonItem></PanelSectionRow>
@@ -2131,27 +2060,6 @@ function Content() {
 
 export default definePlugin(() => {
   pluginActive = true;
-  steamUiRefresher = new SteamUiRefresher({
-    contextId: globalThis.crypto?.randomUUID?.() ?? Date.now().toString(36) + "-" + Math.random().toString(36).slice(2),
-    browser: window.SteamClient?.Browser,
-    getResumeStatus: () => withBackendTimeout(getUiResumeStatus(), 5_000),
-    beginRefresh: (trigger, session, sequence, guard, appId, contextId) => withBackendTimeout(beginUiRefresh(trigger, session, sequence, guard, appId, contextId), 5_000),
-    finishRefresh: (attempt, outcome) => withBackendTimeout(finishUiRefresh(attempt, outcome), 5_000),
-    claimGameReturn: (attempt, contextId, guard) => withBackendTimeout(claimUiGameReturn(attempt, contextId, guard), 5_000),
-    finishGameReturn: (attempt, outcome) => withBackendTimeout(finishUiGameReturn(attempt, outcome), 5_000),
-    getRunningGameId: () => currentRunningGame(window.SteamUIStore as RunningGameStore),
-    isGameRunning: (appId) => isGameRunning(window.SteamUIStore as RunningGameStore, appId),
-    returnToGame: (appId) => returnToRunningGame(window.SteamUIStore as RunningGameStore, appId, (path) => Navigation.Navigate(path)),
-    isLocked: () => {
-      if (typeof window.securitystore?.IsLockScreenActive !== "function") {
-        throw new Error("A Steam zárolási állapota nem ellenőrizhető.");
-      }
-      return window.securitystore.IsLockScreenActive();
-    },
-    setTimeout: (callback, delay) => window.setTimeout(callback, delay),
-    clearTimeout: (timer) => window.clearTimeout(timer),
-    report: (status) => window.dispatchEvent(new CustomEvent(UI_REFRESH_EVENT, { detail: status })),
-  });
   void loadBadgeVisibility();
   void loadWatchlistState();
   notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(), 10_000);
@@ -2165,8 +2073,6 @@ export default definePlugin(() => {
     icon: <span>✓</span>,
     onDismount: () => {
       pluginActive = false;
-      steamUiRefresher?.dispose();
-      steamUiRefresher = undefined;
       if (notificationTimer !== undefined) window.clearTimeout(notificationTimer);
       notificationTimer = undefined;
       removeStorePatch();
