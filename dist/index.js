@@ -1,3 +1,7 @@
+// Shared static markup keeps the flag identical in React and Steam Store views.
+// The 2:1 tricolour remains crisp at the small sizes used on game covers.
+const HUNGARIAN_BADGE_HTML = '<span role="img" aria-label="Hivatalos magyar nyelvi támogatás" title="Hivatalos magyar nyelvi támogatás a Steam adatai szerint" style="box-sizing:border-box;width:34px;height:24px;display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;border-radius:5px;background:rgba(6,9,18,.92);box-shadow:0 1px 5px rgba(0,0,0,.85),inset 0 0 0 1px rgba(255,255,255,.12);pointer-events:none"><svg xmlns="http://www.w3.org/2000/svg" width="28" height="14" viewBox="0 0 30 15" aria-hidden="true" style="display:block;border-radius:2px;overflow:hidden"><path fill="#ce2939" d="M0 0h30v5H0z"/><path fill="#fff" d="M0 5h30v5H0z"/><path fill="#477050" d="M0 10h30v5H0z"/><rect x=".5" y=".5" width="29" height="14" rx="1.5" fill="none" stroke="#fff" stroke-opacity=".18"/></svg></span>';
+
 const manifest = {"name":"Deck Play Badges"};
 const API_VERSION = 2;
 const internalAPIConnection = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit;
@@ -56,6 +60,7 @@ const getNotificationHistory = callable("get_notification_history");
 const clearNotificationHistory = callable("clear_notification_history");
 const markNotificationHistoryRead = callable("mark_notification_history_read");
 const supportStates = new Map();
+const hungarianStates = new Map();
 const gfnStates = new Map();
 const boosteroidStates = new Map();
 const visibleAppIds = new Map();
@@ -80,6 +85,7 @@ const watchlistMutations = new Set();
 let badgeVisibility = {
     show_gfn_badges: true,
     show_boosteroid_badges: true,
+    show_hungarian_badges: true,
 };
 let notificationPreferences = {
     notify_gfn_additions: true,
@@ -205,6 +211,7 @@ async function loadBadgeVisibility() {
             applyBadgeVisibility({
                 show_gfn_badges: response.show_gfn_badges,
                 show_boosteroid_badges: response.show_boosteroid_badges,
+                show_hungarian_badges: response.show_hungarian_badges ?? true,
             });
             applyNotificationPreferences({
                 notify_gfn_additions: response.notify_gfn_additions ?? true,
@@ -437,6 +444,8 @@ async function flushSupportBatch() {
     if (supportResult.status === "fulfilled") {
         const response = supportResult.value;
         for (const appId of appIds) {
+            const language = response.hungarian?.[appId];
+            hungarianStates.set(appId, typeof language === "boolean" ? language : null);
             const level = response.levels?.[appId];
             const value = response.support?.[appId];
             if (level === "full")
@@ -454,8 +463,10 @@ async function flushSupportBatch() {
         }
     }
     else {
-        for (const appId of appIds)
+        for (const appId of appIds) {
             supportStates.set(appId, "unavailable");
+            hungarianStates.set(appId, null);
+        }
         console.warn("ControllerXbox controller lookup failed", supportResult.reason);
     }
     if (gfnResult.status === "fulfilled" && gfnResult.value.success) {
@@ -518,6 +529,7 @@ function queueSupportLookup(appId) {
 }
 function resetVisibleSupport() {
     supportStates.clear();
+    hungarianStates.clear();
     gfnStates.clear();
     boosteroidStates.clear();
     pendingAppIds.clear();
@@ -668,12 +680,16 @@ function BoosteroidBadge({ state }) {
 }
 function XboxTileBadge({ appId }) {
     const appIdText = String(appId);
+    const [visibility, setVisibility] = SP_REACT.useState(badgeVisibility);
+    const [hungarian, setHungarian] = SP_REACT.useState(() => hungarianStates.get(appIdText) === true);
     const [state, setState] = SP_REACT.useState(() => supportStates.get(appIdText) ?? "loading");
     const [gfnState, setGfnState] = SP_REACT.useState(() => gfnStates.get(appIdText) ?? "loading");
     const [boosteroidState, setBoosteroidState] = SP_REACT.useState(() => boosteroidStates.get(appIdText) ?? "loading");
     SP_REACT.useEffect(() => {
         visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
         const listener = () => {
+            setVisibility(badgeVisibility);
+            setHungarian(hungarianStates.get(appIdText) === true);
             setState(supportStates.get(appIdText) ?? "loading");
             setGfnState(gfnStates.get(appIdText) ?? "loading");
             setBoosteroidState(boosteroidStates.get(appIdText) ?? "loading");
@@ -702,10 +718,12 @@ function XboxTileBadge({ appId }) {
             transform: "scale(.88)",
             transformOrigin: "top left",
             pointerEvents: "none",
-        }, children: [SP_JSX.jsx(ControllerBadge, { state: state, appId: appId }), badgeVisibility.show_gfn_badges ? SP_JSX.jsx(GfnBadge, { state: gfnState }) : null, badgeVisibility.show_boosteroid_badges ? SP_JSX.jsx(BoosteroidBadge, { state: boosteroidState }) : null] });
+        }, children: [SP_JSX.jsx(ControllerBadge, { state: state, appId: appId }), visibility.show_gfn_badges ? SP_JSX.jsx(GfnBadge, { state: gfnState }) : null, visibility.show_boosteroid_badges ? SP_JSX.jsx(BoosteroidBadge, { state: boosteroidState }) : null, visibility.show_hungarian_badges && hungarian ? SP_JSX.jsx("span", { style: { display: "inline-flex" }, dangerouslySetInnerHTML: { __html: HUNGARIAN_BADGE_HTML } }) : null] });
 }
 function LibraryDetailBadges({ appId }) {
     const appIdText = String(appId);
+    const [visibility, setVisibility] = SP_REACT.useState(badgeVisibility);
+    const [hungarian, setHungarian] = SP_REACT.useState(() => hungarianStates.get(appIdText) === true);
     const [state, setState] = SP_REACT.useState(() => supportStates.get(appIdText) ?? "loading");
     const [gfnState, setGfnState] = SP_REACT.useState(() => gfnStates.get(appIdText) ?? "loading");
     const [boosteroidState, setBoosteroidState] = SP_REACT.useState(() => boosteroidStates.get(appIdText) ?? "loading");
@@ -715,6 +733,8 @@ function LibraryDetailBadges({ appId }) {
     SP_REACT.useEffect(() => {
         visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
         const listener = () => {
+            setVisibility(badgeVisibility);
+            setHungarian(hungarianStates.get(appIdText) === true);
             setState(supportStates.get(appIdText) ?? "loading");
             setGfnState(gfnStates.get(appIdText) ?? "loading");
             setBoosteroidState(boosteroidStates.get(appIdText) ?? "loading");
@@ -794,7 +814,7 @@ function LibraryDetailBadges({ appId }) {
             transform: "scale(.95)",
             transformOrigin: "top right",
             pointerEvents: "auto",
-        }, children: [SP_JSX.jsx(ControllerBadge, { state: state, appId: appId }), badgeVisibility.show_gfn_badges ? SP_JSX.jsx(GfnBadge, { state: gfnState }) : null, badgeVisibility.show_boosteroid_badges ? SP_JSX.jsx(BoosteroidBadge, { state: boosteroidState }) : null, SP_JSX.jsx(WatchStarButton, { appId: appId })] });
+        }, children: [SP_JSX.jsx(ControllerBadge, { state: state, appId: appId }), visibility.show_gfn_badges ? SP_JSX.jsx(GfnBadge, { state: gfnState }) : null, visibility.show_boosteroid_badges ? SP_JSX.jsx(BoosteroidBadge, { state: boosteroidState }) : null, visibility.show_hungarian_badges && hungarian ? SP_JSX.jsx("span", { style: { display: "inline-flex" }, dangerouslySetInnerHTML: { __html: HUNGARIAN_BADGE_HTML } }) : null, SP_JSX.jsx(WatchStarButton, { appId: appId })] });
 }
 function patchLibraryDetails() {
     const renderPatches = new Set();
@@ -881,6 +901,8 @@ function buildStoreBadgeScript(states, visibility, watchedAppIds) {
       const watchedAppIds = new Set(${serializedWatchedAppIds});
       const showGfn = ${visibility.show_gfn_badges ? "true" : "false"};
       const showBoosteroid = ${visibility.show_boosteroid_badges ? "true" : "false"};
+      const showHungarian = ${visibility.show_hungarian_badges ? "true" : "false"};
+      const hungarianBadge = ${JSON.stringify(HUNGARIAN_BADGE_HTML)};
       const controllerPath = ${JSON.stringify(controllerPath)};
       const boosteroidPath = ${JSON.stringify(boosteroidPath)};
       const detailId = 'controller-xbox-store-detail-badges';
@@ -931,7 +953,8 @@ function buildStoreBadgeScript(states, visibility, watchedAppIds) {
         if (!state) return '';
         return controllerBadge(state.controller, appId, suffix) +
           (showGfn ? gfnBadge(state.gfn) : '') +
-          (showBoosteroid ? boosteroidBadge(state.boosteroid) : '');
+          (showBoosteroid ? boosteroidBadge(state.boosteroid) : '') +
+          (showHungarian && state.hungarian === true ? hungarianBadge : '');
       }
 
       let style = document.getElementById('controller-xbox-store-style');
@@ -953,7 +976,7 @@ function buildStoreBadgeScript(states, visibility, watchedAppIds) {
           document.body.appendChild(detail);
         }
         const isWatched = watchedAppIds.has(pageId);
-        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
+        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + states[pageId].hungarian + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
         if (detail.getAttribute('data-state-key') !== key) {
           detail.innerHTML = badgesHtml(pageId, 'detail');
           const watchButton = document.createElement('button');
@@ -994,10 +1017,10 @@ function buildStoreBadgeScript(states, visibility, watchedAppIds) {
         let badge = Array.from(host.children).find(function(child) { return child.classList?.contains(cardClass); });
         if (!badge) {
           badge = document.createElement('div');
-          badge.className = 'cxc-store-badges ' + cardClass;
+          badge.className = 'cxc-store-badges cxc-store-card-badges ' + cardClass;
           host.appendChild(badge);
         }
-        const key = appId + ':' + states[appId].controller + ':' + states[appId].gfn + ':' + states[appId].boosteroid + ':' + showGfn + ':' + showBoosteroid;
+        const key = appId + ':' + states[appId].controller + ':' + states[appId].gfn + ':' + states[appId].boosteroid + ':' + states[appId].hungarian + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid;
         badge.setAttribute('data-cxc-appid', appId);
         if (badge.getAttribute('data-state-key') !== key) {
           badge.innerHTML = badgesHtml(appId, 'card-' + usedHosts.size);
@@ -1042,6 +1065,7 @@ function renderStoreBadges() {
             controller: supportStates.get(appId) ?? "loading",
             gfn: gfnStates.get(appId) ?? "loading",
             boosteroid: boosteroidStates.get(appId) ?? "loading",
+            hungarian: hungarianStates.get(appId) === true,
         };
     }
     void sendStoreRuntime(buildStoreBadgeScript(states, badgeVisibility, new Set(watchedGames.keys()))).catch((error) => {
@@ -1403,6 +1427,7 @@ function patchLibraryTiles() {
             tileIconRowClass = "";
             supportListeners.clear();
             supportStates.clear();
+            hungarianStates.clear();
             gfnStates.clear();
             boosteroidStates.clear();
             visibleAppIds.clear();
@@ -1520,10 +1545,11 @@ function Content() {
             const detail = event.detail;
             if (!detail)
                 return;
-            if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean") {
+            if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean" || typeof detail.show_hungarian_badges === "boolean") {
                 setVisibility((current) => ({
                     show_gfn_badges: detail.show_gfn_badges ?? current.show_gfn_badges,
                     show_boosteroid_badges: detail.show_boosteroid_badges ?? current.show_boosteroid_badges,
+                    show_hungarian_badges: detail.show_hungarian_badges ?? current.show_hungarian_badges,
                 }));
             }
             if (typeof detail.notify_gfn_additions === "boolean" ||
@@ -1560,12 +1586,13 @@ function Content() {
         setVisibility(next);
         applyBadgeVisibility(next);
         try {
-            const response = await withBackendTimeout(setBadgeVisibility(next.show_gfn_badges, next.show_boosteroid_badges));
+            const response = await withBackendTimeout(setBadgeVisibility(next.show_gfn_badges, next.show_boosteroid_badges, next.show_hungarian_badges));
             if (!response.success)
                 throw new Error(response.error || "A beállítás mentése sikertelen.");
             applyBadgeVisibility({
                 show_gfn_badges: response.show_gfn_badges,
                 show_boosteroid_badges: response.show_boosteroid_badges,
+                show_hungarian_badges: response.show_hungarian_badges ?? true,
             });
         }
         catch (error) {
@@ -1789,7 +1816,7 @@ function Content() {
         }
     };
     if (page === "settings")
-        return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
+        return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Z\u00E1szl\u00F3 a Steam \u00E1ltal hivatalosan magyar nyelv\u0171k\u00E9nt jel\u00F6lt j\u00E1t\u00E9kokon. A jelz\u00E9s \u00F6nmag\u00E1ban nem jelent magyar szinkront.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
     if (page === "watchlist")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Figyel\u0151lista", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "J\u00E1t\u00E9kn\u00E9v vagy Steam AppID", value: searchQuery, bShowClearAction: true, disabled: searchWorking || watchWorking, onChange: (event) => setSearchQuery(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: searchWorking || watchWorking || searchQuery.trim().length < 2, onClick: searchForGames, children: "Keres\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW figyel\u00E9se", checked: newWatchGfn, disabled: watchWorking, onChange: setNewWatchGfn }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid figyel\u00E9se", checked: newWatchBoosteroid, disabled: watchWorking, onChange: setNewWatchBoosteroid }) }), searchResults.map((entry) => {
                     const alreadyWatched = watchedGames.has(entry.app_id);

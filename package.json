@@ -1,7 +1,7 @@
 {
   "name": "controller-xbox",
-  "version": "1.0.50",
-  "description": "Deck Play Badges for controller support, GeForce NOW, and Boosteroid availability",
+  "version": "1.0.51",
+  "description": "Deck Play Badges for controller support, official Hungarian language support, GeForce NOW, and Boosteroid availability",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

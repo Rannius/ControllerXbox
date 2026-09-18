@@ -1,3 +1,4 @@
+import { HUNGARIAN_BADGE_HTML } from "./hungarianBadge";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
 import { createElement, Fragment, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -19,6 +20,7 @@ type SupportResponse = {
   success: boolean;
   support?: Record<string, boolean>;
   levels?: Record<string, "full" | "partial" | "none">;
+  hungarian?: Record<string, boolean | null>;
   unavailable?: string[];
 };
 type GfnResponse = {
@@ -70,6 +72,7 @@ type UpdateNotificationResponse = {
 type BadgeVisibility = {
   show_gfn_badges: boolean;
   show_boosteroid_badges: boolean;
+  show_hungarian_badges: boolean;
 };
 type NotificationPreferences = {
   notify_gfn_additions: boolean;
@@ -173,7 +176,7 @@ const acknowledgeUpdateNotification = callable<
 const applyUpdate = callable<[expectedVersion: string], UpdateApplyResponse>("apply_update");
 const restartPluginLoader = callable<[], { success: boolean }>("restart_plugin_loader");
 const getSettings = callable<[], SettingsResponse>("get_settings");
-const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean], SettingsResponse>("set_badge_visibility");
+const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean, showHungarianBadges: boolean], SettingsResponse>("set_badge_visibility");
 const setNotificationPreferences = callable<[
   notifyGfnAdditions: boolean,
   notifyBoosteroidAdditions: boolean,
@@ -202,6 +205,7 @@ const clearNotificationHistory = callable<[], NotificationHistoryResponse>("clea
 const markNotificationHistoryRead = callable<[], NotificationHistoryResponse>("mark_notification_history_read");
 
 const supportStates = new Map<string, BadgeState>();
+const hungarianStates = new Map<string, boolean | null>();
 const gfnStates = new Map<string, GfnState>();
 const boosteroidStates = new Map<string, BoosteroidState>();
 const visibleAppIds = new Map<string, number>();
@@ -226,6 +230,7 @@ const watchlistMutations = new Set<string>();
 let badgeVisibility: BadgeVisibility = {
   show_gfn_badges: true,
   show_boosteroid_badges: true,
+  show_hungarian_badges: true,
 };
 let notificationPreferences: NotificationPreferences = {
   notify_gfn_additions: true,
@@ -348,6 +353,7 @@ async function loadBadgeVisibility(): Promise<void> {
       applyBadgeVisibility({
         show_gfn_badges: response.show_gfn_badges,
         show_boosteroid_badges: response.show_boosteroid_badges,
+        show_hungarian_badges: response.show_hungarian_badges ?? true,
       });
       applyNotificationPreferences({
         notify_gfn_additions: response.notify_gfn_additions ?? true,
@@ -607,6 +613,8 @@ async function flushSupportBatch(): Promise<void> {
   if (supportResult.status === "fulfilled") {
     const response = supportResult.value;
     for (const appId of appIds) {
+      const language = response.hungarian?.[appId];
+      hungarianStates.set(appId, typeof language === "boolean" ? language : null);
       const level = response.levels?.[appId];
       const value = response.support?.[appId];
       if (level === "full") supportStates.set(appId, "full");
@@ -617,7 +625,10 @@ async function flushSupportBatch(): Promise<void> {
       else supportStates.set(appId, "unavailable");
     }
   } else {
-    for (const appId of appIds) supportStates.set(appId, "unavailable");
+    for (const appId of appIds) {
+      supportStates.set(appId, "unavailable");
+      hungarianStates.set(appId, null);
+    }
     console.warn("ControllerXbox controller lookup failed", supportResult.reason);
   }
 
@@ -668,6 +679,7 @@ function queueSupportLookup(appId: string): void {
 
 function resetVisibleSupport(): void {
   supportStates.clear();
+  hungarianStates.clear();
   gfnStates.clear();
   boosteroidStates.clear();
   pendingAppIds.clear();
@@ -844,6 +856,8 @@ function BoosteroidBadge({ state }: { state: BoosteroidState }) {
 
 function XboxTileBadge({ appId }: { appId: number }) {
   const appIdText = String(appId);
+  const [visibility, setVisibility] = useState(badgeVisibility);
+  const [hungarian, setHungarian] = useState(() => hungarianStates.get(appIdText) === true);
   const [state, setState] = useState<BadgeState>(() => supportStates.get(appIdText) ?? "loading");
   const [gfnState, setGfnState] = useState<GfnState>(() => gfnStates.get(appIdText) ?? "loading");
   const [boosteroidState, setBoosteroidState] = useState<BoosteroidState>(() => boosteroidStates.get(appIdText) ?? "loading");
@@ -851,6 +865,8 @@ function XboxTileBadge({ appId }: { appId: number }) {
   useEffect(() => {
     visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
     const listener = () => {
+      setVisibility(badgeVisibility);
+      setHungarian(hungarianStates.get(appIdText) === true);
       setState(supportStates.get(appIdText) ?? "loading");
       setGfnState(gfnStates.get(appIdText) ?? "loading");
       setBoosteroidState(boosteroidStates.get(appIdText) ?? "loading");
@@ -880,13 +896,16 @@ function XboxTileBadge({ appId }: { appId: number }) {
     pointerEvents: "none",
   }}>
     <ControllerBadge state={state} appId={appId} />
-    {badgeVisibility.show_gfn_badges ? <GfnBadge state={gfnState} /> : null}
-    {badgeVisibility.show_boosteroid_badges ? <BoosteroidBadge state={boosteroidState} /> : null}
+    {visibility.show_gfn_badges ? <GfnBadge state={gfnState} /> : null}
+    {visibility.show_boosteroid_badges ? <BoosteroidBadge state={boosteroidState} /> : null}
+    {visibility.show_hungarian_badges && hungarian ? <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: HUNGARIAN_BADGE_HTML }} /> : null}
   </span>;
 }
 
 function LibraryDetailBadges({ appId }: { appId: number }) {
   const appIdText = String(appId);
+  const [visibility, setVisibility] = useState(badgeVisibility);
+  const [hungarian, setHungarian] = useState(() => hungarianStates.get(appIdText) === true);
   const [state, setState] = useState<BadgeState>(() => supportStates.get(appIdText) ?? "loading");
   const [gfnState, setGfnState] = useState<GfnState>(() => gfnStates.get(appIdText) ?? "loading");
   const [boosteroidState, setBoosteroidState] = useState<BoosteroidState>(() => boosteroidStates.get(appIdText) ?? "loading");
@@ -897,6 +916,8 @@ function LibraryDetailBadges({ appId }: { appId: number }) {
   useEffect(() => {
     visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
     const listener = () => {
+      setVisibility(badgeVisibility);
+      setHungarian(hungarianStates.get(appIdText) === true);
       setState(supportStates.get(appIdText) ?? "loading");
       setGfnState(gfnStates.get(appIdText) ?? "loading");
       setBoosteroidState(boosteroidStates.get(appIdText) ?? "loading");
@@ -985,8 +1006,9 @@ function LibraryDetailBadges({ appId }: { appId: number }) {
     }}
   >
     <ControllerBadge state={state} appId={appId} />
-    {badgeVisibility.show_gfn_badges ? <GfnBadge state={gfnState} /> : null}
-    {badgeVisibility.show_boosteroid_badges ? <BoosteroidBadge state={boosteroidState} /> : null}
+    {visibility.show_gfn_badges ? <GfnBadge state={gfnState} /> : null}
+    {visibility.show_boosteroid_badges ? <BoosteroidBadge state={boosteroidState} /> : null}
+    {visibility.show_hungarian_badges && hungarian ? <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: HUNGARIAN_BADGE_HTML }} /> : null}
     <WatchStarButton appId={appId} />
   </span>;
 }
@@ -1059,7 +1081,7 @@ function buildStoreScanScript(): string {
 }
 
 function buildStoreBadgeScript(
-  states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState }>,
+  states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState; hungarian: boolean }>,
   visibility: BadgeVisibility,
   watchedAppIds: Set<string>,
 ): string {
@@ -1073,6 +1095,8 @@ function buildStoreBadgeScript(
       const watchedAppIds = new Set(${serializedWatchedAppIds});
       const showGfn = ${visibility.show_gfn_badges ? "true" : "false"};
       const showBoosteroid = ${visibility.show_boosteroid_badges ? "true" : "false"};
+      const showHungarian = ${visibility.show_hungarian_badges ? "true" : "false"};
+      const hungarianBadge = ${JSON.stringify(HUNGARIAN_BADGE_HTML)};
       const controllerPath = ${JSON.stringify(controllerPath)};
       const boosteroidPath = ${JSON.stringify(boosteroidPath)};
       const detailId = 'controller-xbox-store-detail-badges';
@@ -1123,7 +1147,8 @@ function buildStoreBadgeScript(
         if (!state) return '';
         return controllerBadge(state.controller, appId, suffix) +
           (showGfn ? gfnBadge(state.gfn) : '') +
-          (showBoosteroid ? boosteroidBadge(state.boosteroid) : '');
+          (showBoosteroid ? boosteroidBadge(state.boosteroid) : '') +
+          (showHungarian && state.hungarian === true ? hungarianBadge : '');
       }
 
       let style = document.getElementById('controller-xbox-store-style');
@@ -1145,7 +1170,7 @@ function buildStoreBadgeScript(
           document.body.appendChild(detail);
         }
         const isWatched = watchedAppIds.has(pageId);
-        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
+        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + states[pageId].hungarian + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
         if (detail.getAttribute('data-state-key') !== key) {
           detail.innerHTML = badgesHtml(pageId, 'detail');
           const watchButton = document.createElement('button');
@@ -1186,10 +1211,10 @@ function buildStoreBadgeScript(
         let badge = Array.from(host.children).find(function(child) { return child.classList?.contains(cardClass); });
         if (!badge) {
           badge = document.createElement('div');
-          badge.className = 'cxc-store-badges ' + cardClass;
+          badge.className = 'cxc-store-badges cxc-store-card-badges ' + cardClass;
           host.appendChild(badge);
         }
-        const key = appId + ':' + states[appId].controller + ':' + states[appId].gfn + ':' + states[appId].boosteroid + ':' + showGfn + ':' + showBoosteroid;
+        const key = appId + ':' + states[appId].controller + ':' + states[appId].gfn + ':' + states[appId].boosteroid + ':' + states[appId].hungarian + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid;
         badge.setAttribute('data-cxc-appid', appId);
         if (badge.getAttribute('data-state-key') !== key) {
           badge.innerHTML = badgesHtml(appId, 'card-' + usedHosts.size);
@@ -1228,12 +1253,13 @@ function sendStoreRuntime(expression: string, returnByValue = false): Promise<un
 
 function renderStoreBadges(): void {
   if (!storeWebSocketReady || !storeCurrentAppIds.size) return;
-  const states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState }> = {};
+  const states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState; hungarian: boolean }> = {};
   for (const appId of storeCurrentAppIds) {
     states[appId] = {
       controller: supportStates.get(appId) ?? "loading",
       gfn: gfnStates.get(appId) ?? "loading",
       boosteroid: boosteroidStates.get(appId) ?? "loading",
+      hungarian: hungarianStates.get(appId) === true,
     };
   }
   void sendStoreRuntime(buildStoreBadgeScript(states, badgeVisibility, new Set(watchedGames.keys()))).catch((error) => {
@@ -1524,6 +1550,7 @@ function patchLibraryTiles(): () => void {
       tileIconRowClass = "";
       supportListeners.clear();
       supportStates.clear();
+      hungarianStates.clear();
       gfnStates.clear();
       boosteroidStates.clear();
       visibleAppIds.clear();
@@ -1635,10 +1662,11 @@ function Content() {
     const onSettingsChanged = (event: Event) => {
       const detail = (event as CustomEvent<Partial<PluginSettings>>).detail;
       if (!detail) return;
-      if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean") {
+      if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean" || typeof detail.show_hungarian_badges === "boolean") {
         setVisibility((current) => ({
           show_gfn_badges: detail.show_gfn_badges ?? current.show_gfn_badges,
           show_boosteroid_badges: detail.show_boosteroid_badges ?? current.show_boosteroid_badges,
+          show_hungarian_badges: detail.show_hungarian_badges ?? current.show_hungarian_badges,
         }));
       }
       if (
@@ -1680,12 +1708,13 @@ function Content() {
     applyBadgeVisibility(next);
     try {
       const response = await withBackendTimeout(
-        setBadgeVisibility(next.show_gfn_badges, next.show_boosteroid_badges),
+        setBadgeVisibility(next.show_gfn_badges, next.show_boosteroid_badges, next.show_hungarian_badges),
       );
       if (!response.success) throw new Error(response.error || "A beállítás mentése sikertelen.");
       applyBadgeVisibility({
         show_gfn_badges: response.show_gfn_badges,
         show_boosteroid_badges: response.show_boosteroid_badges,
+        show_hungarian_badges: response.show_hungarian_badges ?? true,
       });
     } catch (error) {
       setVisibility(previous);
@@ -1908,6 +1937,13 @@ function Content() {
   if (page === "settings") return <PanelSection title="Beállítások">
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ fontWeight: 700 }}>Jelvények</div></PanelSectionRow>
+    <PanelSectionRow><ToggleField
+      label="Magyar zászló"
+      description="Zászló a Steam által hivatalosan magyar nyelvűként jelölt játékokon. A jelzés önmagában nem jelent magyar szinkront."
+      checked={visibility.show_hungarian_badges}
+      disabled={settingsWorking}
+      onChange={(checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked })}
+    /></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="GeForce NOW"
       checked={visibility.show_gfn_badges}

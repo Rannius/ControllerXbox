@@ -8,6 +8,7 @@ and require no API key.
 import asyncio
 import concurrent.futures
 import functools
+import html
 import json
 import os
 import re
@@ -34,7 +35,7 @@ except ImportError:
 
 
 CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 6
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
 GFN_CACHE_TTL_SECONDS = 24 * 60 * 60
 GFN_URL = "https://api-prod.nvidia.com/services/gfngames/v1/gameList"
@@ -84,6 +85,7 @@ class Plugin:
         self._settings: Dict[str, bool] = {
             "show_gfn_badges": True,
             "show_boosteroid_badges": True,
+            "show_hungarian_badges": True,
             "notify_gfn_additions": True,
             "notify_boosteroid_additions": True,
             "notify_boosteroid_maintenance": True,
@@ -219,6 +221,7 @@ class Plugin:
                 for key in (
                     "show_gfn_badges",
                     "show_boosteroid_badges",
+                    "show_hungarian_badges",
                     "notify_gfn_additions",
                     "notify_boosteroid_additions",
                     "notify_boosteroid_maintenance",
@@ -246,13 +249,17 @@ class Plugin:
     async def get_settings(self) -> Dict[str, Any]:
         return {"success": True, **self._settings}
 
-    async def set_badge_visibility(self, show_gfn_badges: Any, show_boosteroid_badges: Any) -> Dict[str, Any]:
-        if not isinstance(show_gfn_badges, bool) or not isinstance(show_boosteroid_badges, bool):
+    async def set_badge_visibility(self, show_gfn_badges: Any, show_boosteroid_badges: Any,
+                                   show_hungarian_badges: Any = None) -> Dict[str, Any]:
+        if (not isinstance(show_gfn_badges, bool) or not isinstance(show_boosteroid_badges, bool)
+                or (show_hungarian_badges is not None and not isinstance(show_hungarian_badges, bool))):
             return {"success": False, "error": "A jelvénybeállítás értéke érvénytelen."}
         self._settings.update({
             "show_gfn_badges": show_gfn_badges,
             "show_boosteroid_badges": show_boosteroid_badges,
         })
+        if show_hungarian_badges is not None:
+            self._settings["show_hungarian_badges"] = show_hungarian_badges
         await self._save_settings()
         return {"success": True, **self._settings}
 
@@ -504,7 +511,18 @@ class Plugin:
             and now - entry["checked_at"] < CACHE_TTL_SECONDS
         )
 
-    def _fetch_support(self, app_id: str) -> Optional[str]:
+    @staticmethod
+    def _hungarian_support(languages: Any) -> Optional[bool]:
+        # STORE_URL explicitly requests English. Only parse the actual language
+        # list; the HTML after <br> describes the full-audio asterisk.
+        if not isinstance(languages, str) or not languages.strip():
+            return None
+        language_list = re.split(r"<br\s*/?>", languages, maxsplit=1, flags=re.IGNORECASE)[0]
+        plain = html.unescape(re.sub(r"<[^>]*>", "", language_list))
+        names = [name.strip().rstrip("*").strip().casefold() for name in plain.split(",")]
+        return "hungarian" in names if any(names) else None
+
+    def _fetch_support(self, app_id: str) -> Optional[Dict[str, Any]]:
         request = urllib.request.Request(
             STORE_URL.format(app_id=app_id),
             headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"},
@@ -516,14 +534,21 @@ class Plugin:
             if not app.get("success"):
                 return None
             app_data = app.get("data", {})
+            if not isinstance(app_data, dict):
+                return None
             categories = app_data.get("categories", [])
             category_ids = {str(category.get("id")) for category in categories if isinstance(category, dict)}
             controller_support = str(app_data.get("controller_support", "")).lower()
             if "28" in category_ids or controller_support == "full":
-                return "full"
-            if "18" in category_ids or controller_support == "partial":
-                return "partial"
-            return "none"
+                level = "full"
+            elif "18" in category_ids or controller_support == "partial":
+                level = "partial"
+            else:
+                level = "none"
+            return {
+                "controller_support_level": level,
+                "hungarian": self._hungarian_support(app_data.get("supported_languages")),
+            }
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
             decky.logger.debug("Steam lookup failed for %s: %s", app_id, error)
             return None
@@ -1459,11 +1484,12 @@ class Plugin:
         }
 
     async def get_controller_support(self, app_ids: Any) -> Dict[str, Any]:
-        """Return official partial or full controller support for the supplied app IDs."""
+        """Return official controller and Hungarian language support from one Steam lookup."""
         requested = self._valid_app_ids(app_ids)
         now = time.time()
         results: Dict[str, bool] = {}
         levels: Dict[str, str] = {}
+        hungarian: Dict[str, Optional[bool]] = {}
         missing: List[str] = []
         unavailable: List[str] = []
 
@@ -1475,6 +1501,8 @@ class Plugin:
                     if level in {"full", "partial", "none"}:
                         levels[app_id] = level
                         results[app_id] = level != "none"
+                        language = entry.get("hungarian")
+                        hungarian[app_id] = language if isinstance(language, bool) else None
                     else:
                         missing.append(app_id)
                 else:
@@ -1483,24 +1511,28 @@ class Plugin:
         fetched = await asyncio.gather(*(self._run_blocking(self._fetch_support, app_id) for app_id in missing))
         changed = False
         async with self._lock:
-            for app_id, level in zip(missing, fetched):
-                if level is not None:
+            for app_id, details in zip(missing, fetched):
+                if details is not None:
+                    level = details["controller_support_level"]
                     self._cache[app_id] = {
                         "schema_version": CACHE_SCHEMA_VERSION,
-                        "controller_support_level": level,
+                        **details,
                         "checked_at": now,
                     }
                     levels[app_id] = level
                     results[app_id] = level != "none"
+                    hungarian[app_id] = details["hungarian"]
                     changed = True
                 else:
                     unavailable.append(app_id)
+                    hungarian[app_id] = None
         if changed:
             await self._save_cache()
         return {
             "success": True,
             "support": results,
             "levels": levels,
+            "hungarian": hungarian,
             "unavailable": unavailable,
             "cached_for_days": 30,
         }
