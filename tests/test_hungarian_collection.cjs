@@ -16,13 +16,15 @@ function fixture() {
   let creations = 0;
   const store = {
     userCollections: [],
+    collectionsFromStorage: new Map(),
+    m_cloudStorageMap: {StoreObject() {}},
     NewUnsavedCollection(name) {
       creations++;
       const members = new Set();
       const c = {
         displayName:name, apps:members,
         AsDragDropCollection:()=>({AddApps:apps=>apps.forEach(a=>members.add(a.appid)), RemoveApps:apps=>apps.forEach(a=>members.delete(a.appid))}),
-        async Save(){saved.push([...members]);if(!store.userCollections.includes(c))store.userCollections.push(c);},
+        async Save(){store.collectionsFromStorage.set(c.displayName,c);saved.push([...members]);if(!store.userCollections.includes(c))store.userCollections.push(c);},
       };
       return c;
     },
@@ -128,4 +130,57 @@ test('curator confirmation survives a failed Steam appdetails lookup',async()=>{
   f.deps.lookup=async()=>({success:true,unavailable:['1','2'],hungarian:{'1':true,'2':null},hungarian_sources:{'1':'curator'}});
   await f.step();
   assert.deepEqual([...f.store.userCollections[0].apps],[1]);
+});
+
+test('startup never evaluates the shared userCollections getter and resumes when storage arrives',async()=>{
+  const f=fixture();let reads=0;
+  const map=f.store.collectionsFromStorage;
+  const savedCollections=f.store.userCollections;
+  Object.defineProperty(f.store,'userCollections',{get(){reads++;throw new TypeError("Cannot read properties of undefined (reading 'values')");}});
+  f.store.collectionsFromStorage=undefined;
+  await f.step();
+  assert.equal(reads,0);assert.equal(f.requests.length,0);assert.equal(f.creations,0);
+  f.store.collectionsFromStorage=map;
+  // Saving uses Steam's storage, never the dangerous computed UI getter.
+  const create=f.store.NewUnsavedCollection.bind(f.store);
+  f.store.NewUnsavedCollection=name=>{const c=create(name);c.Save=async()=>{map.set(name,c);savedCollections.push(c);};return c;};
+  await f.step();
+  assert.equal(reads,0);assert.equal(f.creations,1);assert.equal(map.size,1);
+});
+
+test('storage replacement during a request prevents writes to the new account',async()=>{
+  const f=fixture();let finish;
+  f.deps.lookup=()=>new Promise(resolve=>finish=resolve);
+  const work=f.manager.tick();
+  for(let i=0;i<10&&!finish;i++)await Promise.resolve();
+  f.store.collectionsFromStorage=new Map();
+  finish({success:true,hungarian:{'1':true,'2':false}});await work;
+  assert.equal(f.creations,0);
+});
+
+test('live progress publishes current titles before the request and saved count only after Save',async()=>{
+  const f=fixture();let finishLookup,finishSave;
+  f.apps[0].display_name='Satisfactory';
+  const stages=[];f.manager.subscribe(()=>stages.push({...f.manager.progress}));
+  f.deps.lookup=()=>new Promise(resolve=>finishLookup=resolve);
+  const create=f.store.NewUnsavedCollection.bind(f.store);
+  f.store.NewUnsavedCollection=name=>{const c=create(name),save=c.Save;c.Save=async()=>{await new Promise(resolve=>finishSave=resolve);await save();};return c;};
+  const work=f.manager.tick();
+  for(let i=0;i<10&&!finishLookup;i++)await Promise.resolve();
+  assert.equal(f.manager.progress.phase,'checking');assert.match(f.manager.progress.current,/Satisfactory/);
+  finishLookup({success:true,hungarian:{'1':true,'2':false}});
+  for(let i=0;i<10&&!finishSave;i++)await Promise.resolve();
+  assert.equal(f.manager.progress.phase,'saving');assert.equal(f.manager.progress.checked,2);
+  assert.equal(f.manager.progress.collected,0);
+  finishSave();await work;
+  assert.equal(f.manager.progress.collected,1);assert.equal(f.manager.progress.total,5);
+  assert.ok(stages.some(s=>s.phase==='cache'));
+});
+
+test('curator still loading never appears complete and keeps a short refresh interval',async()=>{
+  const f=fixture();
+  f.deps.cached=async()=>({success:true,hungarian:Object.fromEntries(f.apps.map(a=>[a.appid,null])),curator_status:'loading'});
+  await f.step();
+  assert.equal(f.manager.progress.checked,5);assert.equal(f.manager.progress.unknown,5);
+  assert.equal(f.manager.progress.phase,'between');assert.equal([...f.timers.values()][0].ms,5000);
 });

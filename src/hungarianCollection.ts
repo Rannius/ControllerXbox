@@ -1,6 +1,6 @@
 export const HUNGARIAN_COLLECTION_NAME = "🇭🇺 Magyar nyelvű játékok";
 
-type App = { appid: number; app_type?: number; BIsModOrShortcut?: () => boolean };
+type App = { appid: number; app_type?: number; display_name?: string; strDisplayName?: string; name?: string; BIsModOrShortcut?: () => boolean };
 type Languages = Record<string, boolean | null>;
 type Sources = Record<string, "steam" | "curator" | null>;
 type LanguageResponse = {
@@ -17,8 +17,24 @@ type Collection = {
   Save(): Promise<void>;
 };
 type Store = {
-  userCollections: Collection[];
+  allAppsCollection?: { allApps?: App[]; apps?: Iterable<App> };
+  collectionsFromStorage?: { values(): IterableIterator<Collection> };
+  m_cloudStorageMap?: { StoreObject: unknown };
   NewUnsavedCollection(name: string, filter: undefined, apps: App[]): Collection;
+};
+// Steam's userCollections computed getter calls .values() before storage exists.
+// Do not evaluate it, even inside try/catch: MobX shares that computed failure
+// with Steam's own library views. Use the storage map after initialization.
+export function readyCollectionStore(store: Store | undefined): store is Store {
+  return !!store && typeof store.collectionsFromStorage?.values === "function"
+    && typeof store.m_cloudStorageMap?.StoreObject === "function"
+    && typeof store.NewUnsavedCollection === "function";
+}
+
+export type CollectionProgress = {
+  phase: "waiting" | "cache" | "checking" | "saving" | "between" | "done" | "error" | "paused";
+  total: number; checked: number; found: number; collected: number; unknown: number;
+  current: string; nextCheckAt: number;
 };
 type Dependencies = {
   getStore(): Store | undefined;
@@ -30,13 +46,14 @@ type Dependencies = {
 
 export class HungarianCollection {
   status = "Magyar gyűjtemény: várakozás a beállításokra.";
+  progress: CollectionProgress = { phase: "waiting", total: 0, checked: 0, found: 0, collected: 0, unknown: 0, current: "", nextCheckAt: 0 };
   private listeners = new Set<(status: string) => void>();
   private enabled = false;
   private revision = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private running = false;
   private retryAfter = new Map<string, number>();
-  private unsaved?: { store: Store; collection: Collection };
+  private unsaved?: { store: Store; storage: Store["collectionsFromStorage"]; collection: Collection };
 
   constructor(private deps: Dependencies) {}
 
@@ -46,19 +63,19 @@ export class HungarianCollection {
     return () => { this.listeners.delete(listener); };
   }
 
-  private report(status: string): void {
-    if (status === this.status) return;
+  private report(status: string, progress: Partial<CollectionProgress> = {}): void {
+    this.progress = { ...this.progress, ...progress };
     this.status = status;
     for (const listener of this.listeners) listener(status);
   }
 
   settingsUnavailable(): void {
-    if (!this.enabled) this.report("Magyar gyűjtemény: a backend nem válaszol. A beállítások betöltését újrapróbáljuk.");
+    if (!this.enabled) this.report("A backend nem válaszol. A beállítások betöltését újrapróbáljuk.", { phase: "error" });
   }
 
   setEnabled(enabled: boolean): void {
     if (enabled === this.enabled) {
-      if (!enabled) this.report("Magyar gyűjtemény: gyűjtés szüneteltetve. A meglévő gyűjtemény megmarad.");
+      if (!enabled) this.report("Gyűjtés szüneteltetve. A meglévő gyűjtemény megmarad.", { phase: "paused", current: "", nextCheckAt: 0 });
       return;
     }
     this.enabled = enabled;
@@ -66,10 +83,10 @@ export class HungarianCollection {
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
     if (enabled) {
-      this.report("Magyar gyűjtemény: könyvtár ellenőrzése…");
+      this.report("Könyvtár betöltése…", { phase: "waiting", current: "", nextCheckAt: 0 });
       this.schedule(1000);
     } else {
-      this.report("Magyar gyűjtemény: gyűjtés szüneteltetve. A meglévő gyűjtemény megmarad.");
+      this.report("Gyűjtés szüneteltetve. A meglévő gyűjtemény megmarad.", { phase: "paused", current: "", nextCheckAt: 0 });
     }
   }
 
@@ -93,15 +110,16 @@ export class HungarianCollection {
       .map(app => [String(app.appid), app])).values());
   }
 
-  private async sync(store: Store, apps: App[], languages: Languages): Promise<void> {
+  private async sync(store: Store, apps: App[], languages: Languages): Promise<number> {
     const positive = apps.filter(app => languages[String(app.appid)] === true);
-    const existing = store.userCollections.find(c => c.displayName === HUNGARIAN_COLLECTION_NAME);
-    const pending = this.unsaved?.store === store ? this.unsaved.collection : undefined;
+    if (!readyCollectionStore(store)) throw new Error("Várakozás a Steam gyűjteménykezelőjére.");
+    const existing = Array.from(store.collectionsFromStorage!.values()).find(c => c.displayName === HUNGARIAN_COLLECTION_NAME);
+    const pending = this.unsaved?.store === store && this.unsaved.storage === store.collectionsFromStorage ? this.unsaved.collection : undefined;
     let collection = existing ?? pending;
-    if (!collection && !positive.length) return;
+    if (!collection && !positive.length) return 0;
     if (!collection) {
       collection = store.NewUnsavedCollection(HUNGARIAN_COLLECTION_NAME, undefined, []);
-      this.unsaved = { store, collection };
+      this.unsaved = { store, storage: store.collectionsFromStorage, collection };
     }
     if (typeof collection?.apps?.has !== "function" || typeof collection.Save !== "function"
         || typeof collection.AsDragDropCollection !== "function") {
@@ -115,7 +133,7 @@ export class HungarianCollection {
       if (typeof editable?.AddApps !== "function" || (remove.length && typeof editable.RemoveApps !== "function")) {
         throw new Error("A Steam gyűjtemény nem módosítható.");
       }
-      this.unsaved = { store, collection };
+      this.unsaved = { store, storage: store.collectionsFromStorage, collection };
       if (add.length) editable.AddApps(add);
       if (remove.length) editable.RemoveApps(remove);
     }
@@ -123,6 +141,7 @@ export class HungarianCollection {
       await collection.Save();
       this.unsaved = undefined;
     }
+    return apps.filter(app => collection!.apps.has(app.appid)).length;
   }
 
   private async tick(): Promise<void> {
@@ -133,21 +152,30 @@ export class HungarianCollection {
     let delay = 5000;
     try {
       const store = this.deps.getStore();
-      if (!store || !Array.isArray(store.userCollections) || typeof store.NewUnsavedCollection !== "function") {
+      if (!readyCollectionStore(store)) {
         throw new Error("Várakozás a Steam gyűjteménykezelőjére.");
       }
+      const storage = store.collectionsFromStorage;
       const apps = this.apps();
       if (!apps.length) throw new Error("Várakozás a Steam könyvtárára.");
       const ids = apps.map(app => String(app.appid));
+      this.report("Mentett nyelvi adatok és kurátortalálatok betöltése…", { phase: "cache", total: ids.length, current: "", nextCheckAt: 0 });
       const cached = await this.deps.cached(ids);
       if (!current()) return;
       if (!cached.success) throw new Error("A nyelvi gyorsítótár nem érhető el.");
       const languages = { ...cached.hungarian };
       const sources = { ...cached.hungarian_sources };
+      const counts = (list: App[]) => ({ total: list.length,
+        checked: list.filter(app => Object.prototype.hasOwnProperty.call(languages, String(app.appid))).length,
+        found: list.filter(app => languages[String(app.appid)] === true).length,
+        unknown: list.filter(app => languages[String(app.appid)] === null).length });
       const pending = ids.filter(id => !Object.prototype.hasOwnProperty.call(languages, id));
       // Two games per round, at least five seconds apart; no full-library burst.
       const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now()).slice(0, 2);
       if (batch.length) {
+        this.report("Steam nyelvi adatok ellenőrzése…", { ...counts(apps), phase: "checking",
+          current: batch.map(id => { const app = apps.find(a => String(a.appid) === id)!;
+            return app.display_name || app.strDisplayName || app.name || `Steam AppID ${id}`; }).join(" · ") });
         const result = await this.deps.lookup(batch);
         if (!current()) return;
         if (!result.success) throw new Error("A Steam nyelvi adatai nem érhetők el.");
@@ -163,22 +191,24 @@ export class HungarianCollection {
         }
         if (batch.every(id => this.retryAfter.has(id))) delay = 60_000;
       }
-      if (!current() || this.deps.getStore() !== store) return;
+      if (!current() || this.deps.getStore() !== store || store.collectionsFromStorage !== storage) return;
       this.deps.onLanguages(languages, sources);
       // Re-read ownership after I/O, including account/library changes.
       const currentApps = this.apps();
-      await this.sync(store, currentApps, languages);
+      this.report("Magyar gyűjtemény egyeztetése és mentése…", { ...counts(currentApps), phase: "saving", current: "" });
+      const collected = await this.sync(store, currentApps, languages);
       if (!current()) return;
       const checked = currentApps.filter(app => Object.prototype.hasOwnProperty.call(languages, String(app.appid))).length;
       const found = currentApps.filter(app => languages[String(app.appid)] === true).length;
-      this.report(`Magyar gyűjtemény: ${found} magyar játék · ${checked}/${currentApps.length} ellenőrizve.`
+      if (!pending.length || !batch.length) delay = cached.curator_status === "loading" ? 5000 : 60_000;
+      this.report(`${found} magyar játék · ${checked}/${currentApps.length} ellenőrizve.`
         + (checked < currentApps.length ? " A keresés a háttérben folytatódik."
           : found ? " Könyvtár → Gyűjtemények." : " Nincs igazolt magyar találat.")
         + (cached.curator_status === "loading" ? " Magyar Felirat: lista betöltése…"
-          : cached.curator_status === "unavailable" ? " A Magyar Felirat listája még nem érhető el; később újrapróbáljuk." : ""));
-      if (!pending.length || !batch.length) delay = 60_000;
+          : cached.curator_status === "unavailable" ? " A Magyar Felirat listája még nem érhető el; később újrapróbáljuk." : ""),
+        { ...counts(currentApps), collected, current: "", phase: checked === currentApps.length && cached.curator_status !== "loading" && cached.curator_status !== "unavailable" ? "done" : "between", nextCheckAt: Date.now() + delay });
     } catch (error) {
-      if (current()) this.report("Magyar gyűjtemény: " + (error instanceof Error ? error.message : String(error)));
+      if (current()) this.report(error instanceof Error ? error.message : String(error), { phase: "error", current: "", nextCheckAt: Date.now() + 60_000 });
       delay = 60_000;
     } finally {
       this.running = false;

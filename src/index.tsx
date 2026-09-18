@@ -1,5 +1,7 @@
 import { getHungarianBadgeHtml, HungarianSource } from "./hungarianBadge";
-import { HungarianCollection } from "./hungarianCollection";
+import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
+import { HungarianProgress, CuratorProgress } from "./HungarianProgress";
+import { HungarianCollection, readyCollectionStore } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
 import { createElement, Fragment, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -73,6 +75,8 @@ type UpdateNotificationResponse = {
   error?: string;
 };
 type BadgeVisibility = {
+  library_badge_percent?: number;
+  store_badge_percent?: number;
   show_gfn_badges: boolean;
   show_boosteroid_badges: boolean;
   show_hungarian_badges: boolean;
@@ -178,6 +182,9 @@ const acknowledgeUpdateNotification = callable<
 >("acknowledge_update_notification");
 const applyUpdate = callable<[expectedVersion: string], UpdateApplyResponse>("apply_update");
 const restartPluginLoader = callable<[], { success: boolean }>("restart_plugin_loader");
+const setBadgeSizes = callable<[library: number, store: number], SettingsResponse>("set_badge_sizes");
+const getCuratorProgress = callable<[], CuratorProgress>("get_hungarian_curator_progress");
+const loadCuratorProgress = () => withBackendTimeout(getCuratorProgress());
 const getSettings = callable<[], SettingsResponse>("get_settings");
 const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean, showHungarianBadges: boolean], SettingsResponse>("set_badge_visibility");
 const setNotificationPreferences = callable<[
@@ -373,6 +380,8 @@ async function loadBadgeVisibility(): Promise<void> {
         show_gfn_badges: response.show_gfn_badges,
         show_boosteroid_badges: response.show_boosteroid_badges,
         show_hungarian_badges: response.show_hungarian_badges ?? true,
+        library_badge_percent: response.library_badge_percent ?? 100,
+        store_badge_percent: response.store_badge_percent ?? 100,
       });
       applyNotificationPreferences({
         notify_gfn_additions: response.notify_gfn_additions ?? true,
@@ -403,7 +412,9 @@ async function loadBadgeVisibility(): Promise<void> {
 
 function getSteamLibraryApps(): any[] {
   try {
-    const collection = (globalThis as any).collectionStore?.allAppsCollection;
+    const store = (globalThis as any).collectionStore;
+    if (!readyCollectionStore(store)) return [];
+    const collection = store.allAppsCollection;
     const rawApps = collection?.allApps ?? collection?.apps;
     return Array.isArray(rawApps)
       ? rawApps
@@ -981,14 +992,14 @@ function XboxTileBadge({ appId }: { appId: number }) {
     top: "6px",
     left: "6px",
     // Compensate for the visual scale so wrapping follows the tile's real width.
-    width: "calc((100% - 12px) / 0.88)",
+    width: `calc((100% - 12px) / ${0.88 * (visibility.library_badge_percent ?? 100) / 100})`,
     zIndex: 100,
     display: "inline-flex",
     flexWrap: "wrap",
     justifyContent: "center",
     alignItems: "center",
     gap: "3px",
-    transform: "scale(.88)",
+    transform: `scale(${0.88 * (visibility.library_badge_percent ?? 100) / 100})`,
     transformOrigin: "top left",
     pointerEvents: "none",
   }}>
@@ -1099,7 +1110,10 @@ function LibraryDetailBadges({ appId }: { appId: number }) {
       display: "inline-flex",
       alignItems: "center",
       gap: "3px",
-      transform: "scale(.95)",
+      transform: `scale(${0.95 * (visibility.library_badge_percent ?? 100) / 100})`,
+      maxWidth: `calc((100% - ${position.right + 20}px) / ${0.95 * (visibility.library_badge_percent ?? 100) / 100})`,
+      flexWrap: "wrap",
+      justifyContent: "center",
       transformOrigin: "top right",
       pointerEvents: "auto",
     }}
@@ -1184,6 +1198,7 @@ function buildStoreBadgeScript(
   visibility: BadgeVisibility,
   watchedAppIds: Set<string>,
 ): string {
+  const scale = Math.max(50, Math.min(200, visibility.store_badge_percent ?? 100)) / 100;
   const serializedStates = JSON.stringify(states).replace(/</g, "\\u003c");
   const serializedWatchedAppIds = JSON.stringify(Array.from(watchedAppIds)).replace(/</g, "\\u003c");
   const controllerPath = "M5.4 5.5h13.2c1.5 0 2.8 1 3.2 2.5l1.1 5c.4 1.8-.9 3.5-2.7 3.5-.8 0-1.5-.3-2-.9L15.6 13H8.4l-2.6 2.6c-.5.6-1.2.9-2 .9-1.8 0-3.1-1.7-2.7-3.5l1.1-5c.4-1.5 1.7-2.5 3.2-2.5Z";
@@ -1255,9 +1270,9 @@ function buildStoreBadgeScript(
       if (!style) {
         style = document.createElement('style');
         style.id = 'controller-xbox-store-style';
-        style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;transform:scale(.95);transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;width:calc((100% - 8px) / .72);flex-wrap:wrap;justify-content:center;z-index:9999;transform:scale(.72);transform-origin:top left}.cxc-store-card-badges>span{flex-shrink:0}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}.cxc-watch{width:30px;height:24px;padding:0;border:0;border-radius:6px;background:rgba(24,31,40,.92);color:#fff;font:bold 18px/24px Arial,sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:auto;cursor:pointer}.cxc-watch.is-watched{background:#d9a400;color:#111}';
         (document.head || document.documentElement).appendChild(style);
       }
+      style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;max-width:calc((100vw - 40px) / ${.95 * scale});flex-wrap:wrap;justify-content:center;transform:scale(${.95 * scale});transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;width:calc((100% - 8px) / ${.72 * scale});flex-wrap:wrap;justify-content:center;z-index:9999;transform:scale(${.72 * scale});transform-origin:top left}.cxc-store-card-badges>span{flex-shrink:0}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}.cxc-watch{width:30px;height:24px;padding:0;border:0;border-radius:6px;background:rgba(24,31,40,.92);color:#fff;font:bold 18px/24px Arial,sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:auto;cursor:pointer}.cxc-watch.is-watched{background:#d9a400;color:#111}';
 
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       const pageId = pageMatch ? pageMatch[1] : '';
@@ -1681,8 +1696,6 @@ function Content() {
   const [visibility, setVisibility] = useState<BadgeVisibility>({ ...badgeVisibility });
   const [notifications, setNotifications] = useState<NotificationPreferences>({ ...notificationPreferences });
   const [settingsWorking, setSettingsWorking] = useState(false);
-  const [collectionStatus, setCollectionStatus] = useState(hungarianCollection.status);
-  useEffect(() => hungarianCollection.subscribe(setCollectionStatus), []);
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
   const [watchWorking, setWatchWorking] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1771,6 +1784,8 @@ function Content() {
           show_gfn_badges: detail.show_gfn_badges ?? current.show_gfn_badges,
           show_boosteroid_badges: detail.show_boosteroid_badges ?? current.show_boosteroid_badges,
           show_hungarian_badges: detail.show_hungarian_badges ?? current.show_hungarian_badges,
+          library_badge_percent: detail.library_badge_percent ?? current.library_badge_percent,
+          store_badge_percent: detail.store_badge_percent ?? current.store_badge_percent,
         }));
       }
       if (
@@ -1819,6 +1834,8 @@ function Content() {
         show_gfn_badges: response.show_gfn_badges,
         show_boosteroid_badges: response.show_boosteroid_badges,
         show_hungarian_badges: response.show_hungarian_badges ?? true,
+        library_badge_percent: response.library_badge_percent ?? 100,
+        store_badge_percent: response.store_badge_percent ?? 100,
       });
     } catch (error) {
       setVisibility(previous);
@@ -2039,6 +2056,13 @@ function Content() {
     }
   };
 
+  const saveSizes = async (sizes: BadgeSizes) => {
+    const response = await withBackendTimeout(setBadgeSizes(sizes.library_badge_percent, sizes.store_badge_percent));
+    if (!response.success) throw new Error(response.error || "Az ikonméret mentése sikertelen.");
+    applyBadgeVisibility({ ...badgeVisibility, library_badge_percent: response.library_badge_percent ?? 100,
+      store_badge_percent: response.store_badge_percent ?? 100 });
+  };
+
   if (page === "settings") return <PanelSection title="Beállítások">
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ fontWeight: 700 }}>Jelvények</div></PanelSectionRow>
@@ -2061,6 +2085,8 @@ function Content() {
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked })}
     /></PanelSectionRow>
+    <BadgeSizeSettings initial={{ library_badge_percent: visibility.library_badge_percent ?? 100,
+      store_badge_percent: visibility.store_badge_percent ?? 100 }} save={saveSizes} />
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Értesítések</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Új GeForce NOW-játékok"
@@ -2180,7 +2206,7 @@ function Content() {
     </ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>Beállítások</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
-    <PanelSectionRow><div>{collectionStatus}</div></PanelSectionRow>
+    <PanelSectionRow><HungarianProgress manager={hungarianCollection} loadCurator={loadCuratorProgress} /></PanelSectionRow>
     <PanelSectionRow><div>{stats
       ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
         + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)

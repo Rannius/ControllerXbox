@@ -159,6 +159,7 @@ class Plugin:
         self._hungarian_curator_attempted_at = 0.0
         self._hungarian_curator_last_error = ""
         self._hungarian_curator_task: Optional[asyncio.Task] = None
+        self._hungarian_curator_progress = {"checked": 0, "total": 0}
         self._gfn_app_ids: Set[str] = set()
         self._gfn_checked_at = 0.0
         self._gfn_last_error = ""
@@ -166,7 +167,9 @@ class Plugin:
         self._boosteroid_maintenance_app_ids: Set[str] = set()
         self._boosteroid_checked_at = 0.0
         self._boosteroid_last_error = ""
-        self._settings: Dict[str, bool] = {
+        self._settings: Dict[str, Any] = {
+            "library_badge_percent": 100,
+            "store_badge_percent": 100,
             "show_gfn_badges": True,
             "show_boosteroid_badges": True,
             "show_hungarian_badges": True,
@@ -282,6 +285,7 @@ class Plugin:
                 if record["recommended"]:
                     app_ids.add(app_id)
             start += len(parser.records)
+            self._hungarian_curator_progress = {"checked": start, "total": total}
             if start == total:
                 if not app_ids:
                     raise ValueError("Empty Hungarian curator catalog")
@@ -296,6 +300,7 @@ class Plugin:
                 or now - self._hungarian_curator_attempted_at < HUNGARIAN_CURATOR_RETRY_SECONDS):
             return
         self._hungarian_curator_attempted_at = now
+        self._hungarian_curator_progress = {"checked": 0, "total": 0}
         self._hungarian_curator_task = asyncio.create_task(self._refresh_hungarian_curator())
 
     async def _refresh_hungarian_curator(self) -> None:
@@ -321,6 +326,14 @@ class Plugin:
                 await task
             except asyncio.CancelledError:
                 pass
+
+    async def get_hungarian_curator_progress(self) -> Dict[str, Any]:
+        # Memory-only snapshot: opening the panel never waits for an HTTP request.
+        loading = self._hungarian_curator_task is not None and not self._hungarian_curator_task.done()
+        return {"success": True, **self._hungarian_curator_progress,
+                "status": "loading" if loading else ("cached" if self._hungarian_curator_checked_at else "unavailable"),
+                "entries": len(self._hungarian_curator_app_ids),
+                "stale": bool(self._hungarian_curator_last_error)}
 
     def _merge_hungarian_sources(self, requested: Any, official: Dict[str, Optional[bool]]) -> Dict[str, Any]:
         languages = dict(official)
@@ -425,6 +438,10 @@ class Plugin:
                 ):
                     if isinstance(parsed.get(key), bool):
                         self._settings[key] = parsed[key]
+                for key in ("library_badge_percent", "store_badge_percent"):
+                    value = parsed.get(key)
+                    if type(value) is int and 50 <= value <= 200:
+                        self._settings[key] = value
         except FileNotFoundError:
             pass
         except (OSError, json.JSONDecodeError) as error:
@@ -443,6 +460,13 @@ class Plugin:
         )
 
     async def get_settings(self) -> Dict[str, Any]:
+        return {"success": True, **self._settings}
+
+    async def set_badge_sizes(self, library_badge_percent: Any, store_badge_percent: Any) -> Dict[str, Any]:
+        if not all(type(value) is int and 50 <= value <= 200 for value in (library_badge_percent, store_badge_percent)):
+            return {"success": False, "error": "Az ikonméret 50 és 200% közötti egész szám lehet."}
+        self._settings.update({"library_badge_percent": library_badge_percent, "store_badge_percent": store_badge_percent})
+        await self._save_settings()
         return {"success": True, **self._settings}
 
     async def set_badge_visibility(self, show_gfn_badges: Any, show_boosteroid_badges: Any,

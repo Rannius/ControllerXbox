@@ -75,6 +75,30 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(settings["show_boosteroid_badges"])
         self.assertTrue(settings["show_hungarian_badges"])
 
+    async def test_independent_badge_sizes_persist_and_reject_invalid_values(self):
+        self.assertEqual((await self.plugin.get_settings())["store_badge_percent"], 100)
+        result = await self.plugin.set_badge_sizes(85, 175)
+        self.assertTrue(result["success"])
+        reloaded = self.plugin_type()
+        await reloaded._load_settings()
+        settings = await reloaded.get_settings()
+        self.assertEqual(settings["library_badge_percent"], 85)
+        self.assertEqual(settings["store_badge_percent"], 175)
+        for invalid in (True, None, "150", 49, 201, 150.5):
+            self.assertFalse((await self.plugin.set_badge_sizes(100, invalid))["success"])
+        self.assertEqual((await self.plugin.get_settings())["library_badge_percent"], 85)
+
+    async def test_curator_progress_is_memory_only_even_while_fetch_is_blocked(self):
+        self.plugin._hungarian_curator_checked_at = 0
+        self.plugin._hungarian_curator_progress = {"checked": 100, "total": 775}
+        blocked = asyncio.Event()
+        self.plugin._hungarian_curator_task = asyncio.create_task(blocked.wait())
+        with patch.object(self.plugin, "_open_request", side_effect=AssertionError("must not network")):
+            result = await asyncio.wait_for(self.plugin.get_hungarian_curator_progress(), timeout=0.2)
+        self.assertEqual(result["status"], "loading")
+        self.assertEqual(result["checked"], 100)
+        self.assertEqual(result["total"], 775)
+
     async def test_hungarian_preference_persists_and_old_callers_preserve_it(self):
         result = await self.plugin.set_badge_visibility(True, True, False)
         self.assertTrue(result["success"])
