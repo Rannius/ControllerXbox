@@ -1,4 +1,4 @@
-import { HUNGARIAN_BADGE_HTML } from "./hungarianBadge";
+import { getHungarianBadgeHtml, HungarianSource } from "./hungarianBadge";
 import { HungarianCollection } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
@@ -22,6 +22,8 @@ type SupportResponse = {
   support?: Record<string, boolean>;
   levels?: Record<string, "full" | "partial" | "none">;
   hungarian?: Record<string, boolean | null>;
+  hungarian_sources?: Record<string, HungarianSource>;
+  curator_status?: "loading" | "cached" | "unavailable";
   unavailable?: string[];
 };
 type GfnResponse = {
@@ -207,6 +209,8 @@ const markNotificationHistoryRead = callable<[], NotificationHistoryResponse>("m
 
 const supportStates = new Map<string, BadgeState>();
 const hungarianStates = new Map<string, boolean | null>();
+const hungarianSources = new Map<string, HungarianSource>();
+let curatorBadgeTimer: number | undefined;
 const gfnStates = new Map<string, GfnState>();
 const boosteroidStates = new Map<string, BoosteroidState>();
 const visibleAppIds = new Map<string, number>();
@@ -302,6 +306,10 @@ async function reloadUpdatedPlugin(): Promise<"reloaded" | "restarting" | "faile
 function applyBadgeVisibility(next: BadgeVisibility): void {
   badgeVisibility = next;
   hungarianCollection.setEnabled(pluginActive && next.show_hungarian_badges);
+  if (!next.show_hungarian_badges && curatorBadgeTimer !== undefined) {
+    window.clearTimeout(curatorBadgeTimer);
+    curatorBadgeTimer = undefined;
+  }
   for (const listener of supportListeners) listener();
   renderStoreBadges();
   window.dispatchEvent(new CustomEvent<Partial<PluginSettings>>(SETTINGS_CHANGED_EVENT, { detail: next }));
@@ -393,21 +401,53 @@ function getSteamLibraryAppIds(): string[] {
 }
 
 const getHungarianLibraryCache = callable<[appIds: string[]], SupportResponse>("get_hungarian_library_cache");
+
+function scheduleCuratorBadgeRefresh(status: SupportResponse["curator_status"]): void {
+  if (!pluginActive || !badgeVisibility.show_hungarian_badges || status === "cached"
+      || !status || curatorBadgeTimer !== undefined) return;
+  curatorBadgeTimer = window.setTimeout(() => {
+    curatorBadgeTimer = undefined;
+    void (async () => {
+      try {
+        const ids = Array.from(new Set([...visibleAppIds.keys(), ...storeCurrentAppIds]));
+        if (!ids.length || !pluginActive || !badgeVisibility.show_hungarian_badges) return;
+        const response = await withBackendTimeout(getHungarianLibraryCache(ids));
+        if (!pluginActive || !badgeVisibility.show_hungarian_badges) return;
+        if (response.success) {
+          for (const [id, value] of Object.entries(response.hungarian ?? {})) hungarianStates.set(id, value);
+          for (const [id, source] of Object.entries(response.hungarian_sources ?? {})) hungarianSources.set(id, source);
+          for (const listener of supportListeners) listener();
+          renderStoreBadges();
+        }
+        scheduleCuratorBadgeRefresh(response.curator_status ?? "unavailable");
+      } catch {
+        scheduleCuratorBadgeRefresh("unavailable");
+      }
+    })();
+  }, status === "loading" ? 5000 : 60_000);
+}
+
 const hungarianCollection = new HungarianCollection({
   getStore: () => (globalThis as any).collectionStore,
   getApps: getSteamLibraryApps,
   cached: async ids => {
     const hungarian: NonNullable<SupportResponse["hungarian"]> = {};
+    const hungarian_sources: NonNullable<SupportResponse["hungarian_sources"]> = {};
+    let curator_status: SupportResponse["curator_status"];
     for (let offset = 0; offset < ids.length; offset += 10000) {
       const result = await withBackendTimeout(getHungarianLibraryCache(ids.slice(offset, offset + 10000)));
       if (!result.success) return result;
       Object.assign(hungarian, result.hungarian);
+      Object.assign(hungarian_sources, result.hungarian_sources);
+      curator_status = result.curator_status;
+      scheduleCuratorBadgeRefresh(curator_status);
     }
-    return { success: true, hungarian };
+    return { success: true, hungarian, hungarian_sources, curator_status };
   },
   lookup: ids => withBackendTimeout(getControllerSupport(ids), 60_000),
-  onLanguages: languages => {
+  onLanguages: (languages, sources) => {
     for (const [id, value] of Object.entries(languages)) hungarianStates.set(id, value);
+    for (const [id, source] of Object.entries(sources)) hungarianSources.set(id, source);
     for (const listener of supportListeners) listener();
     renderStoreBadges();
   },
@@ -635,9 +675,11 @@ async function flushSupportBatch(): Promise<void> {
 
   if (supportResult.status === "fulfilled") {
     const response = supportResult.value;
+    scheduleCuratorBadgeRefresh(response.curator_status);
     for (const appId of appIds) {
       const language = response.hungarian?.[appId];
       hungarianStates.set(appId, typeof language === "boolean" ? language : null);
+      hungarianSources.set(appId, response.hungarian_sources?.[appId] ?? null);
       const level = response.levels?.[appId];
       const value = response.support?.[appId];
       if (level === "full") supportStates.set(appId, "full");
@@ -651,6 +693,7 @@ async function flushSupportBatch(): Promise<void> {
     for (const appId of appIds) {
       supportStates.set(appId, "unavailable");
       hungarianStates.set(appId, null);
+      hungarianSources.set(appId, null);
     }
     console.warn("ControllerXbox controller lookup failed", supportResult.reason);
   }
@@ -703,6 +746,7 @@ function queueSupportLookup(appId: string): void {
 function resetVisibleSupport(): void {
   supportStates.clear();
   hungarianStates.clear();
+  hungarianSources.clear();
   gfnStates.clear();
   boosteroidStates.clear();
   pendingAppIds.clear();
@@ -881,6 +925,7 @@ function XboxTileBadge({ appId }: { appId: number }) {
   const appIdText = String(appId);
   const [visibility, setVisibility] = useState(badgeVisibility);
   const [hungarian, setHungarian] = useState(() => hungarianStates.get(appIdText) === true);
+  const [hungarianSource, setHungarianSource] = useState(() => hungarianSources.get(appIdText) ?? null);
   const [state, setState] = useState<BadgeState>(() => supportStates.get(appIdText) ?? "loading");
   const [gfnState, setGfnState] = useState<GfnState>(() => gfnStates.get(appIdText) ?? "loading");
   const [boosteroidState, setBoosteroidState] = useState<BoosteroidState>(() => boosteroidStates.get(appIdText) ?? "loading");
@@ -890,6 +935,7 @@ function XboxTileBadge({ appId }: { appId: number }) {
     const listener = () => {
       setVisibility(badgeVisibility);
       setHungarian(hungarianStates.get(appIdText) === true);
+      setHungarianSource(hungarianSources.get(appIdText) ?? null);
       setState(supportStates.get(appIdText) ?? "loading");
       setGfnState(gfnStates.get(appIdText) ?? "loading");
       setBoosteroidState(boosteroidStates.get(appIdText) ?? "loading");
@@ -925,7 +971,7 @@ function XboxTileBadge({ appId }: { appId: number }) {
     <ControllerBadge state={state} appId={appId} />
     {visibility.show_gfn_badges ? <GfnBadge state={gfnState} /> : null}
     {visibility.show_boosteroid_badges ? <BoosteroidBadge state={boosteroidState} /> : null}
-    {visibility.show_hungarian_badges && hungarian ? <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: HUNGARIAN_BADGE_HTML }} /> : null}
+    {visibility.show_hungarian_badges && hungarian ? <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: getHungarianBadgeHtml(hungarianSource) }} /> : null}
   </span>;
 }
 
@@ -933,6 +979,7 @@ function LibraryDetailBadges({ appId }: { appId: number }) {
   const appIdText = String(appId);
   const [visibility, setVisibility] = useState(badgeVisibility);
   const [hungarian, setHungarian] = useState(() => hungarianStates.get(appIdText) === true);
+  const [hungarianSource, setHungarianSource] = useState(() => hungarianSources.get(appIdText) ?? null);
   const [state, setState] = useState<BadgeState>(() => supportStates.get(appIdText) ?? "loading");
   const [gfnState, setGfnState] = useState<GfnState>(() => gfnStates.get(appIdText) ?? "loading");
   const [boosteroidState, setBoosteroidState] = useState<BoosteroidState>(() => boosteroidStates.get(appIdText) ?? "loading");
@@ -945,6 +992,7 @@ function LibraryDetailBadges({ appId }: { appId: number }) {
     const listener = () => {
       setVisibility(badgeVisibility);
       setHungarian(hungarianStates.get(appIdText) === true);
+      setHungarianSource(hungarianSources.get(appIdText) ?? null);
       setState(supportStates.get(appIdText) ?? "loading");
       setGfnState(gfnStates.get(appIdText) ?? "loading");
       setBoosteroidState(boosteroidStates.get(appIdText) ?? "loading");
@@ -1035,7 +1083,7 @@ function LibraryDetailBadges({ appId }: { appId: number }) {
     <ControllerBadge state={state} appId={appId} />
     {visibility.show_gfn_badges ? <GfnBadge state={gfnState} /> : null}
     {visibility.show_boosteroid_badges ? <BoosteroidBadge state={boosteroidState} /> : null}
-    {visibility.show_hungarian_badges && hungarian ? <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: HUNGARIAN_BADGE_HTML }} /> : null}
+    {visibility.show_hungarian_badges && hungarian ? <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: getHungarianBadgeHtml(hungarianSource) }} /> : null}
     <WatchStarButton appId={appId} />
   </span>;
 }
@@ -1108,7 +1156,7 @@ function buildStoreScanScript(): string {
 }
 
 function buildStoreBadgeScript(
-  states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState; hungarian: boolean }>,
+  states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState; hungarian: boolean; hungarianSource: HungarianSource }>,
   visibility: BadgeVisibility,
   watchedAppIds: Set<string>,
 ): string {
@@ -1123,7 +1171,8 @@ function buildStoreBadgeScript(
       const showGfn = ${visibility.show_gfn_badges ? "true" : "false"};
       const showBoosteroid = ${visibility.show_boosteroid_badges ? "true" : "false"};
       const showHungarian = ${visibility.show_hungarian_badges ? "true" : "false"};
-      const hungarianBadge = ${JSON.stringify(HUNGARIAN_BADGE_HTML)};
+      const hungarianBadge = ${JSON.stringify(getHungarianBadgeHtml("steam"))};
+      const curatorBadge = ${JSON.stringify(getHungarianBadgeHtml("curator"))};
       const controllerPath = ${JSON.stringify(controllerPath)};
       const boosteroidPath = ${JSON.stringify(boosteroidPath)};
       const detailId = 'controller-xbox-store-detail-badges';
@@ -1175,7 +1224,7 @@ function buildStoreBadgeScript(
         return controllerBadge(state.controller, appId, suffix) +
           (showGfn ? gfnBadge(state.gfn) : '') +
           (showBoosteroid ? boosteroidBadge(state.boosteroid) : '') +
-          (showHungarian && state.hungarian === true ? hungarianBadge : '');
+          (showHungarian && state.hungarian === true ? (state.hungarianSource === 'curator' ? curatorBadge : hungarianBadge) : '');
       }
 
       let style = document.getElementById('controller-xbox-store-style');
@@ -1197,7 +1246,7 @@ function buildStoreBadgeScript(
           document.body.appendChild(detail);
         }
         const isWatched = watchedAppIds.has(pageId);
-        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + states[pageId].hungarian + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
+        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + states[pageId].hungarian + ':' + states[pageId].hungarianSource + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
         if (detail.getAttribute('data-state-key') !== key) {
           detail.innerHTML = badgesHtml(pageId, 'detail');
           const watchButton = document.createElement('button');
@@ -1241,7 +1290,7 @@ function buildStoreBadgeScript(
           badge.className = 'cxc-store-badges cxc-store-card-badges ' + cardClass;
           host.appendChild(badge);
         }
-        const key = appId + ':' + states[appId].controller + ':' + states[appId].gfn + ':' + states[appId].boosteroid + ':' + states[appId].hungarian + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid;
+        const key = appId + ':' + states[appId].controller + ':' + states[appId].gfn + ':' + states[appId].boosteroid + ':' + states[appId].hungarian + ':' + states[appId].hungarianSource + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid;
         badge.setAttribute('data-cxc-appid', appId);
         if (badge.getAttribute('data-state-key') !== key) {
           badge.innerHTML = badgesHtml(appId, 'card-' + usedHosts.size);
@@ -1280,13 +1329,14 @@ function sendStoreRuntime(expression: string, returnByValue = false): Promise<un
 
 function renderStoreBadges(): void {
   if (!storeWebSocketReady || !storeCurrentAppIds.size) return;
-  const states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState; hungarian: boolean }> = {};
+  const states: Record<string, { controller: BadgeState; gfn: GfnState; boosteroid: BoosteroidState; hungarian: boolean; hungarianSource: HungarianSource }> = {};
   for (const appId of storeCurrentAppIds) {
     states[appId] = {
       controller: supportStates.get(appId) ?? "loading",
       gfn: gfnStates.get(appId) ?? "loading",
       boosteroid: boosteroidStates.get(appId) ?? "loading",
       hungarian: hungarianStates.get(appId) === true,
+      hungarianSource: hungarianSources.get(appId) ?? null,
     };
   }
   void sendStoreRuntime(buildStoreBadgeScript(states, badgeVisibility, new Set(watchedGames.keys()))).catch((error) => {
@@ -1578,6 +1628,7 @@ function patchLibraryTiles(): () => void {
       supportListeners.clear();
       supportStates.clear();
       hungarianStates.clear();
+      hungarianSources.clear();
       gfnStates.clear();
       boosteroidStates.clear();
       visibleAppIds.clear();
@@ -1968,7 +2019,7 @@ function Content() {
     <PanelSectionRow><div style={{ fontWeight: 700 }}>Jelvények</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Magyar zászló"
-      description="Hivatalos magyar nyelvi jelzés és automatikus Magyar nyelvű játékok gyűjtemény. Kikapcsolva a gyűjtés szünetel, a gyűjtemény megmarad. A jelzés önmagában nem jelent magyar szinkront."
+      description="Magyar nyelv a Steam nyelvi listája vagy a Magyar Felirat kurátor alapján. A teljes könyvtárból magyar gyűjteményt készít. Kikapcsolva a gyűjtés szünetel, a gyűjtemény megmarad."
       checked={visibility.show_hungarian_badges}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked })}
@@ -2140,6 +2191,8 @@ export default definePlugin(() => {
     onDismount: () => {
       pluginActive = false;
       hungarianCollection.stop();
+      if (curatorBadgeTimer !== undefined) window.clearTimeout(curatorBadgeTimer);
+      curatorBadgeTimer = undefined;
       if (notificationTimer !== undefined) window.clearTimeout(notificationTimer);
       notificationTimer = undefined;
       removeStorePatch();

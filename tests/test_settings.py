@@ -1,4 +1,5 @@
 import ast
+import asyncio
 import importlib.util
 import io
 import json
@@ -28,8 +29,12 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.plugin = module.Plugin()
         self.schema_version = module.SETTINGS_SCHEMA_VERSION
         self.cache_schema_version = module.CACHE_SCHEMA_VERSION
+        self.parser_type = module.HungarianCuratorParser
+        # Ordinary tests use an already-fetched empty catalog and never network.
+        self.plugin._hungarian_curator_checked_at = time.time()
 
     async def asyncTearDown(self):
+        await self.plugin._stop_hungarian_curator_refresh()
         self.directory.cleanup()
 
     async def test_legacy_refresh_setting_is_ignored_and_other_preferences_survive(self):
@@ -147,7 +152,79 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.plugin, "_fetch_support") as fetch:
             result = await self.plugin.get_hungarian_library_cache(["10", "20", "30", "40", "50", "bad"])
         fetch.assert_not_called()
-        self.assertEqual(result, {"success": True, "hungarian": {"10": True, "20": False, "50": None}})
+        self.assertTrue(result["success"])
+        self.assertEqual(result["hungarian"], {"10": True, "20": False, "50": None})
+
+    @staticmethod
+    def curator_card(app_id, recommended=True):
+        return ('<div class="recommendation"><div><a data-ds-appid="{0}" '
+                'href="https://store.steampowered.com/app/{0}/?curator_clanid=34235089">Game</a></div>'
+                '<span class="{1}">Review</span><div class="recommendation_desc">Magyar Felirat</div></div>').format(
+                    app_id, "color_recommended" if recommended else "color_not_recommended")
+
+    def test_curator_pagination_uses_only_recommended_cards_and_no_account_data(self):
+        first = {"success": 1, "start": "0", "pagesize": "2", "total_count": 3,
+                 "results_html": '<a data-ds-appid="999">Unrelated</a>' + self.curator_card("526870") + self.curator_card("20", False)}
+        second = {"success": 1, "start": "2", "pagesize": "2", "total_count": 3,
+                  "results_html": self.curator_card("30")}
+        with patch.object(self.plugin, "_open_request", side_effect=[io.StringIO(json.dumps(first)), io.StringIO(json.dumps(second))]) as request:
+            self.assertEqual(self.plugin._fetch_hungarian_curator_catalog(), {"526870", "30"})
+        self.assertIn("start=2", request.call_args_list[1].args[0].full_url)
+        self.assertNotIn("Cookie", dict(request.call_args.args[0].header_items()))
+
+    def test_curator_incomplete_page_is_rejected(self):
+        data = {"success": 1, "start": 0, "pagesize": 2, "total_count": 2,
+                "results_html": self.curator_card("526870")}
+        with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(data))):
+            with self.assertRaisesRegex(ValueError, "Incomplete"):
+                self.plugin._fetch_hungarian_curator_catalog()
+
+    async def test_curator_matches_whole_library_even_with_old_negative_or_missing_steam_cache(self):
+        self.plugin._hungarian_curator_app_ids = {"526870", "999"}
+        self.plugin._cache["526870"] = {"schema_version": self.cache_schema_version,
+                                        "checked_at": time.time(), "hungarian": False, "controller_support_level": "full"}
+        with patch.object(self.plugin, "_fetch_support") as fetch:
+            library = await self.plugin.get_hungarian_library_cache(["526870", "999", "10"])
+            tile = await self.plugin.get_controller_support(["526870"])
+        fetch.assert_not_called()
+        self.assertEqual(library["hungarian"], {"526870": True, "999": True})
+        self.assertEqual(tile["hungarian"], {"526870": True})
+        self.assertEqual(tile["hungarian_sources"], {"526870": "curator"})
+
+    async def test_curator_success_persists_and_failure_retains_previous_catalog(self):
+        with patch.object(self.plugin, "_fetch_hungarian_curator_catalog", return_value={"526870"}):
+            await self.plugin._refresh_hungarian_curator()
+        reloaded = self.plugin_type()
+        await reloaded._load_hungarian_curator_cache()
+        self.assertEqual(reloaded._hungarian_curator_app_ids, {"526870"})
+        checked_at = self.plugin._hungarian_curator_checked_at
+        with patch.object(self.plugin, "_fetch_hungarian_curator_catalog", side_effect=ValueError("incomplete catalog")):
+            await self.plugin._refresh_hungarian_curator()
+        self.assertEqual(self.plugin._hungarian_curator_app_ids, {"526870"})
+        self.assertEqual(self.plugin._hungarian_curator_checked_at, checked_at)
+
+    def test_source_priority_and_missing_curator_does_not_claim_combined_negative(self):
+        self.plugin._hungarian_curator_app_ids = {"10", "20"}
+        self.plugin._hungarian_curator_checked_at = 0
+        result = self.plugin._merge_hungarian_sources(["10", "20", "30"], {"10": True, "20": False, "30": False})
+        self.assertEqual(result["hungarian"], {"10": True, "20": True, "30": None})
+        self.assertEqual(result["hungarian_sources"], {"10": "steam", "20": "curator", "30": None})
+
+    async def test_curator_refresh_is_single_flight_and_does_not_block_library_response(self):
+        self.plugin._hungarian_curator_checked_at = 0
+        release = asyncio.Event()
+
+        async def held_refresh():
+            await release.wait()
+
+        with patch.object(self.plugin, "_refresh_hungarian_curator", side_effect=held_refresh) as refresh:
+            first = await self.plugin.get_hungarian_library_cache(["526870"])
+            second = await self.plugin.get_hungarian_library_cache(["526870"])
+            self.assertEqual(first["curator_status"], "loading")
+            self.assertEqual(second["curator_status"], "loading")
+            refresh.assert_called_once()
+            await self.plugin._stop_hungarian_curator_refresh()
+        self.assertIsNone(self.plugin._hungarian_curator_task)
 
 
 if __name__ == "__main__":

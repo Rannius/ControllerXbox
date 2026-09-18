@@ -108,3 +108,24 @@ test('missing Steam API shows status and retries without sending language reques
   await f.step();assert.equal(f.requests.length,0);
   assert.match(f.manager.status,/Steam/);assert.equal([...f.timers.values()][0].ms,60000);
 });
+
+test('curator hits anywhere in the full uninstalled library are added without per-game requests',async()=>{
+  const f=fixture();
+  f.apps.splice(0,f.apps.length,...Array.from({length:250},(_,i)=>({appid:i+1,app_type:1,installed:false})));
+  const seen=[];
+  f.deps.cached=async ids=>{seen.push(...ids);return {success:true,hungarian:{'250':true},hungarian_sources:{'250':'curator'}};};
+  let published;
+  f.deps.onLanguages=(languages,sources)=>{published={languages,sources};};
+  await f.step();
+  assert.equal(seen.length,250);
+  assert.ok(f.store.userCollections[0].apps.has(250));
+  assert.equal(published.sources['250'],'curator');
+  assert.ok(!f.requests.flat().includes('250'));
+});
+
+test('curator confirmation survives a failed Steam appdetails lookup',async()=>{
+  const f=fixture();
+  f.deps.lookup=async()=>({success:true,unavailable:['1','2'],hungarian:{'1':true,'2':null},hungarian_sources:{'1':'curator'}});
+  await f.step();
+  assert.deepEqual([...f.store.userCollections[0].apps],[1]);
+});

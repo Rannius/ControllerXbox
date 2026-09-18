@@ -2,14 +2,15 @@
 
 Steam app IDs supplied by the frontend are checked, including the library scan
 for the optional Hungarian collection. The Steam Store, NVIDIA GeForce NOW,
-and Boosteroid catalog endpoints are public
-and require no API key.
+and Boosteroid catalog endpoints, including the Magyar Felirat curator list,
+are public and require no API key.
 """
 
 import asyncio
 import concurrent.futures
 import functools
 import html
+from html.parser import HTMLParser
 import json
 import os
 import re
@@ -38,6 +39,10 @@ except ImportError:
 CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 CACHE_SCHEMA_VERSION = 6
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
+HUNGARIAN_CURATOR_ID = "34235089"
+HUNGARIAN_CURATOR_URL = "https://store.steampowered.com/curator/34235089/ajaxgetfilteredrecommendations/?start={start}&count=100&l=english&cc=us&filter=all"
+HUNGARIAN_CURATOR_TTL_SECONDS = 24 * 60 * 60
+HUNGARIAN_CURATOR_RETRY_SECONDS = 15 * 60
 GFN_CACHE_TTL_SECONDS = 24 * 60 * 60
 GFN_URL = "https://api-prod.nvidia.com/services/gfngames/v1/gameList"
 BOOSTEROID_CACHE_TTL_SECONDS = 24 * 60 * 60
@@ -73,9 +78,51 @@ UPDATE_FILES = [
 ]
 
 
+class HungarianCuratorParser(HTMLParser):
+    """Read recommendation cards, never unrelated links elsewhere on the page."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.records: List[Dict[str, Any]] = []
+        self._depth = 0
+        self._record: Optional[Dict[str, Any]] = None
+
+    def handle_starttag(self, tag: str, attrs: Any) -> None:
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").split()
+        if tag == "div":
+            if self._record is None and "recommendation" in classes:
+                self._record = {"app_ids": set(), "recommended": False, "curator_link": False}
+                self._depth = 1
+            elif self._record is not None:
+                self._depth += 1
+        if self._record is None:
+            return
+        app_id = attributes.get("data-ds-appid") or ""
+        if app_id.isdigit() and int(app_id) > 0:
+            self._record["app_ids"].add(app_id)
+        if "color_recommended" in classes:
+            self._record["recommended"] = True
+        href = attributes.get("href") or ""
+        if tag == "a" and "curator_clanid=" + HUNGARIAN_CURATOR_ID in href:
+            self._record["curator_link"] = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "div" and self._record is not None:
+            self._depth -= 1
+            if self._depth == 0:
+                self.records.append(self._record)
+                self._record = None
+
+
 class Plugin:
     def __init__(self) -> None:
         self._cache: Dict[str, Dict[str, Any]] = {}
+        self._hungarian_curator_app_ids: Set[str] = set()
+        self._hungarian_curator_checked_at = 0.0
+        self._hungarian_curator_attempted_at = 0.0
+        self._hungarian_curator_last_error = ""
+        self._hungarian_curator_task: Optional[asyncio.Task] = None
         self._gfn_app_ids: Set[str] = set()
         self._gfn_checked_at = 0.0
         self._gfn_last_error = ""
@@ -99,6 +146,7 @@ class Plugin:
         if not settings_directory:
             raise RuntimeError("Decky settings directory is unavailable")
         self._cache_path = Path(settings_directory) / "controller-support-cache.json"
+        self._hungarian_curator_cache_path = Path(settings_directory) / "hungarian-curator-cache.json"
         self._gfn_cache_path = Path(settings_directory) / "geforce-now-catalog-cache.json"
         self._boosteroid_cache_path = Path(settings_directory) / "boosteroid-catalog-cache.json"
         self._settings_path = Path(settings_directory) / "controller-xbox-settings.json"
@@ -115,6 +163,7 @@ class Plugin:
 
     async def _main(self) -> None:
         await self._load_cache()
+        await self._load_hungarian_curator_cache()
         await self._load_gfn_cache()
         await self._load_boosteroid_cache()
         await self._load_settings()
@@ -122,6 +171,7 @@ class Plugin:
         decky.logger.info("ControllerXbox backend loaded")
 
     async def _unload(self) -> None:
+        await self._stop_hungarian_curator_refresh()
         await self._save_cache()
         await self._save_gfn_cache()
         await self._save_boosteroid_cache()
@@ -143,6 +193,115 @@ class Plugin:
         async with self._lock:
             payload = json.dumps(self._cache, separators=(",", ":"))
             await self._run_blocking(self._write_file_atomically, self._cache_path, "controller-cache-", payload)
+
+    async def _load_hungarian_curator_cache(self) -> None:
+        try:
+            contents = await self._run_blocking(lambda: self._hungarian_curator_cache_path.read_text(encoding="utf-8"))
+            data = json.loads(contents)
+            if (isinstance(data, dict) and data.get("curator_id") == HUNGARIAN_CURATOR_ID
+                    and data.get("schema_version") == 1 and isinstance(data.get("app_ids"), list)
+                    and isinstance(data.get("checked_at"), (int, float)) and data["checked_at"] > 0):
+                self._hungarian_curator_app_ids = {str(value) for value in data["app_ids"] if str(value).isdigit()}
+                self._hungarian_curator_checked_at = data["checked_at"]
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as error:
+            decky.logger.warning("Ignoring invalid Hungarian curator cache: %s", error)
+
+    def _fetch_hungarian_curator_catalog(self) -> Set[str]:
+        app_ids: Set[str] = set()
+        seen: Set[str] = set()
+        start = 0
+        expected_total: Optional[int] = None
+        deadline = time.monotonic() + 60
+        for _page in range(100):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Hungarian curator catalog timed out")
+            request = urllib.request.Request(HUNGARIAN_CURATOR_URL.format(start=start),
+                                             headers={"User-Agent": "Deck Play Badges/1.0", "Accept-Encoding": "identity"})
+            with self._open_request(request, timeout=min(10, remaining)) as response:
+                data = json.load(response)
+            if not isinstance(data, dict) or data.get("success") != 1 or not isinstance(data.get("results_html"), str):
+                raise ValueError("Invalid Hungarian curator response")
+            total = int(data.get("total_count", -1))
+            page_size = int(data.get("pagesize", 0))
+            if int(data.get("start", -1)) != start or not 0 < total <= 10000 or not 0 < page_size <= 100:
+                raise ValueError("Invalid Hungarian curator pagination")
+            if expected_total is not None and total != expected_total:
+                raise ValueError("Hungarian curator catalog changed during pagination")
+            expected_total = total
+            parser = HungarianCuratorParser()
+            parser.feed(data["results_html"])
+            parser.close()
+            if len(parser.records) != min(page_size, total - start):
+                raise ValueError("Incomplete Hungarian curator page")
+            for record in parser.records:
+                if len(record["app_ids"]) != 1 or not record["curator_link"]:
+                    raise ValueError("Invalid Hungarian curator recommendation")
+                app_id = next(iter(record["app_ids"]))
+                if app_id in seen:
+                    raise ValueError("Repeated Hungarian curator page")
+                seen.add(app_id)
+                if record["recommended"]:
+                    app_ids.add(app_id)
+            start += len(parser.records)
+            if start == total:
+                if not app_ids:
+                    raise ValueError("Empty Hungarian curator catalog")
+                return app_ids
+        raise ValueError("Hungarian curator catalog exceeds page limit")
+
+    def _start_hungarian_curator_refresh(self) -> None:
+        now = time.time()
+        if (not self._settings.get("show_hungarian_badges", True)
+                or (self._hungarian_curator_checked_at and now - self._hungarian_curator_checked_at < HUNGARIAN_CURATOR_TTL_SECONDS)
+                or (self._hungarian_curator_task is not None and not self._hungarian_curator_task.done())
+                or now - self._hungarian_curator_attempted_at < HUNGARIAN_CURATOR_RETRY_SECONDS):
+            return
+        self._hungarian_curator_attempted_at = now
+        self._hungarian_curator_task = asyncio.create_task(self._refresh_hungarian_curator())
+
+    async def _refresh_hungarian_curator(self) -> None:
+        try:
+            app_ids = await self._run_blocking(self._fetch_hungarian_curator_catalog)
+            checked_at = time.time()
+            payload = json.dumps({"schema_version": 1, "curator_id": HUNGARIAN_CURATOR_ID,
+                                  "checked_at": checked_at, "app_ids": sorted(app_ids)}, separators=(",", ":"))
+            await self._run_blocking(self._write_file_atomically, self._hungarian_curator_cache_path, "hu-curator-", payload)
+            self._hungarian_curator_app_ids = app_ids
+            self._hungarian_curator_checked_at = checked_at
+            self._hungarian_curator_last_error = ""
+        except Exception as error:
+            self._hungarian_curator_last_error = str(error)
+            decky.logger.warning("Hungarian curator refresh failed; retaining previous catalog: %s", error)
+
+    async def _stop_hungarian_curator_refresh(self) -> None:
+        task = self._hungarian_curator_task
+        self._hungarian_curator_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    def _merge_hungarian_sources(self, requested: Any, official: Dict[str, Optional[bool]]) -> Dict[str, Any]:
+        languages = dict(official)
+        sources: Dict[str, Optional[str]] = {}
+        for app_id in requested:
+            if official.get(app_id) is True:
+                languages[app_id], sources[app_id] = True, "steam"
+            elif app_id in self._hungarian_curator_app_ids:
+                languages[app_id], sources[app_id] = True, "curator"
+            elif app_id in official:
+                # Until a catalog is available, a Steam-only negative is not a
+                # confirmed combined negative: it must not empty a collection.
+                languages[app_id] = official[app_id] if self._hungarian_curator_checked_at else None
+                sources[app_id] = None
+        status = "loading" if self._hungarian_curator_task is not None and not self._hungarian_curator_task.done() else (
+            "cached" if self._hungarian_curator_checked_at else "unavailable")
+        return {"hungarian": languages, "hungarian_sources": sources, "curator_status": status}
 
     async def _load_gfn_cache(self) -> None:
         try:
@@ -1485,8 +1644,9 @@ class Plugin:
         }
 
     async def get_hungarian_library_cache(self, app_ids: Any) -> Dict[str, Any]:
-        """Read cached language results without sending any Steam requests."""
+        """Match the entire supplied library against both cached language sources."""
         requested = self._valid_library_app_ids(app_ids)
+        self._start_hungarian_curator_refresh()
         now = time.time()
         languages: Dict[str, Optional[bool]] = {}
         async with self._lock:
@@ -1495,11 +1655,12 @@ class Plugin:
                 if isinstance(entry, dict) and self._is_fresh(entry, now):
                     value = entry.get("hungarian")
                     languages[app_id] = value if isinstance(value, bool) else None
-        return {"success": True, "hungarian": languages}
+        return {"success": True, **self._merge_hungarian_sources(requested, languages)}
 
     async def get_controller_support(self, app_ids: Any) -> Dict[str, Any]:
         """Return official controller and Hungarian language support from one Steam lookup."""
         requested = self._valid_app_ids(app_ids)
+        self._start_hungarian_curator_refresh()
         now = time.time()
         results: Dict[str, bool] = {}
         levels: Dict[str, str] = {}
@@ -1546,7 +1707,7 @@ class Plugin:
             "success": True,
             "support": results,
             "levels": levels,
-            "hungarian": hungarian,
+            **self._merge_hungarian_sources(requested, hungarian),
             "unavailable": unavailable,
             "cached_for_days": 30,
         }
@@ -1570,6 +1731,17 @@ class Plugin:
             pass
 
     async def clear_cache(self) -> Dict[str, Any]:
+        await self._stop_hungarian_curator_refresh()
+        self._hungarian_curator_app_ids = set()
+        self._hungarian_curator_checked_at = 0.0
+        self._hungarian_curator_attempted_at = 0.0
+        self._hungarian_curator_last_error = ""
+        try:
+            await self._run_blocking(self._hungarian_curator_cache_path.unlink)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            decky.logger.warning("Could not remove Hungarian curator cache: %s", error)
         async with self._lock:
             removed = len(self._cache)
             self._cache = {}

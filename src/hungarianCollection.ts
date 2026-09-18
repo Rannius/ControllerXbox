@@ -2,6 +2,14 @@ export const HUNGARIAN_COLLECTION_NAME = "🇭🇺 Magyar nyelvű játékok";
 
 type App = { appid: number; app_type?: number; BIsModOrShortcut?: () => boolean };
 type Languages = Record<string, boolean | null>;
+type Sources = Record<string, "steam" | "curator" | null>;
+type LanguageResponse = {
+  success: boolean;
+  hungarian?: Languages;
+  hungarian_sources?: Sources;
+  curator_status?: "loading" | "cached" | "unavailable";
+  unavailable?: string[];
+};
 type Collection = {
   displayName: string;
   apps: { has(id: number): boolean };
@@ -15,9 +23,9 @@ type Store = {
 type Dependencies = {
   getStore(): Store | undefined;
   getApps(): App[];
-  cached(ids: string[]): Promise<{ success: boolean; hungarian?: Languages }>;
-  lookup(ids: string[]): Promise<{ success: boolean; hungarian?: Languages; unavailable?: string[] }>;
-  onLanguages(languages: Languages): void;
+  cached(ids: string[]): Promise<LanguageResponse>;
+  lookup(ids: string[]): Promise<LanguageResponse>;
+  onLanguages(languages: Languages, sources: Sources): void;
 };
 
 export class HungarianCollection {
@@ -131,6 +139,7 @@ export class HungarianCollection {
       if (!current()) return;
       if (!cached.success) throw new Error("A nyelvi gyorsítótár nem érhető el.");
       const languages = { ...cached.hungarian };
+      const sources = { ...cached.hungarian_sources };
       const pending = ids.filter(id => !Object.prototype.hasOwnProperty.call(languages, id));
       // Two games per round, at least five seconds apart; no full-library burst.
       const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now()).slice(0, 2);
@@ -139,17 +148,19 @@ export class HungarianCollection {
         if (!current()) return;
         if (!result.success) throw new Error("A Steam nyelvi adatai nem érhetők el.");
         for (const id of batch) {
-          if (result.unavailable?.includes(id) || !Object.prototype.hasOwnProperty.call(result.hungarian ?? {}, id)) {
+          if ((result.unavailable?.includes(id) && result.hungarian?.[id] !== true)
+              || !Object.prototype.hasOwnProperty.call(result.hungarian ?? {}, id)) {
             this.retryAfter.set(id, Date.now() + 15 * 60_000);
           } else {
             languages[id] = result.hungarian![id];
+            sources[id] = result.hungarian_sources?.[id] ?? null;
             this.retryAfter.delete(id);
           }
         }
         if (batch.every(id => this.retryAfter.has(id))) delay = 60_000;
       }
       if (!current() || this.deps.getStore() !== store) return;
-      this.deps.onLanguages(languages);
+      this.deps.onLanguages(languages, sources);
       // Re-read ownership after I/O, including account/library changes.
       const currentApps = this.apps();
       await this.sync(store, currentApps, languages);
@@ -158,7 +169,9 @@ export class HungarianCollection {
       const found = currentApps.filter(app => languages[String(app.appid)] === true).length;
       this.report(`Magyar gyűjtemény: ${found} magyar játék · ${checked}/${currentApps.length} ellenőrizve.`
         + (checked < currentApps.length ? " A keresés a háttérben folytatódik."
-          : found ? " Könyvtár → Gyűjtemények." : " Nincs igazolt magyar találat."));
+          : found ? " Könyvtár → Gyűjtemények." : " Nincs igazolt magyar találat.")
+        + (cached.curator_status === "loading" ? " Magyar Felirat: lista betöltése…"
+          : cached.curator_status === "unavailable" ? " A Magyar Felirat listája még nem érhető el; később újrapróbáljuk." : ""));
       if (!pending.length || !batch.length) delay = 60_000;
     } catch (error) {
       if (current()) this.report("Magyar gyűjtemény: " + (error instanceof Error ? error.message : String(error)));
