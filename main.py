@@ -1,7 +1,8 @@
 """Decky backend for ControllerXbox.
 
-Only Steam app IDs supplied by the visible-library frontend are checked. The
-Steam Store, NVIDIA GeForce NOW, and Boosteroid catalog endpoints are public
+Steam app IDs supplied by the frontend are checked, including the library scan
+for the optional Hungarian collection. The Steam Store, NVIDIA GeForce NOW,
+and Boosteroid catalog endpoints are public
 and require no API key.
 """
 
@@ -1482,6 +1483,19 @@ class Plugin:
             ),
             "app_names": event_names,
         }
+
+    async def get_hungarian_library_cache(self, app_ids: Any) -> Dict[str, Any]:
+        """Read cached language results without sending any Steam requests."""
+        requested = self._valid_library_app_ids(app_ids)
+        now = time.time()
+        languages: Dict[str, Optional[bool]] = {}
+        async with self._lock:
+            for app_id in requested:
+                entry = self._cache.get(app_id)
+                if isinstance(entry, dict) and self._is_fresh(entry, now):
+                    value = entry.get("hungarian")
+                    languages[app_id] = value if isinstance(value, bool) else None
+        return {"success": True, "hungarian": languages}
 
     async def get_controller_support(self, app_ids: Any) -> Dict[str, Any]:
         """Return official controller and Hungarian language support from one Steam lookup."""

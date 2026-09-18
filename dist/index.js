@@ -2,6 +2,171 @@
 // The 2:1 tricolour remains crisp at the small sizes used on game covers.
 const HUNGARIAN_BADGE_HTML = '<span role="img" aria-label="Hivatalos magyar nyelvi támogatás" title="Hivatalos magyar nyelvi támogatás a Steam adatai szerint" style="box-sizing:border-box;width:34px;height:24px;display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;border-radius:5px;background:rgba(6,9,18,.92);box-shadow:0 1px 5px rgba(0,0,0,.85),inset 0 0 0 1px rgba(255,255,255,.12);pointer-events:none"><svg xmlns="http://www.w3.org/2000/svg" width="28" height="14" viewBox="0 0 30 15" aria-hidden="true" style="display:block;border-radius:2px;overflow:hidden"><path fill="#ce2939" d="M0 0h30v5H0z"/><path fill="#fff" d="M0 5h30v5H0z"/><path fill="#477050" d="M0 10h30v5H0z"/><rect x=".5" y=".5" width="29" height="14" rx="1.5" fill="none" stroke="#fff" stroke-opacity=".18"/></svg></span>';
 
+const HUNGARIAN_COLLECTION_NAME = "🇭🇺 Magyar nyelvű játékok";
+class HungarianCollection {
+    constructor(deps) {
+        this.deps = deps;
+        this.status = "Magyar gyűjtemény: várakozás a beállításokra.";
+        this.listeners = new Set();
+        this.enabled = false;
+        this.revision = 0;
+        this.running = false;
+        this.retryAfter = new Map();
+    }
+    subscribe(listener) {
+        this.listeners.add(listener);
+        listener(this.status);
+        return () => { this.listeners.delete(listener); };
+    }
+    report(status) {
+        if (status === this.status)
+            return;
+        this.status = status;
+        for (const listener of this.listeners)
+            listener(status);
+    }
+    setEnabled(enabled) {
+        if (enabled === this.enabled) {
+            if (!enabled)
+                this.report("Magyar gyűjtemény: gyűjtés szüneteltetve. A meglévő gyűjtemény megmarad.");
+            return;
+        }
+        this.enabled = enabled;
+        this.revision++;
+        if (this.timer !== undefined)
+            clearTimeout(this.timer);
+        this.timer = undefined;
+        if (enabled) {
+            this.report("Magyar gyűjtemény: könyvtár ellenőrzése…");
+            this.schedule(1000);
+        }
+        else {
+            this.report("Magyar gyűjtemény: gyűjtés szüneteltetve. A meglévő gyűjtemény megmarad.");
+        }
+    }
+    stop() {
+        this.setEnabled(false);
+        this.listeners.clear();
+    }
+    schedule(delay) {
+        if (!this.enabled || this.timer !== undefined || this.running)
+            return;
+        this.timer = setTimeout(() => {
+            this.timer = undefined;
+            void this.tick();
+        }, delay);
+    }
+    apps() {
+        return Array.from(new Map(this.deps.getApps()
+            .filter(app => Number.isInteger(app.appid) && app.appid > 0 && app.appid < 2147483648
+            && !app.BIsModOrShortcut?.() && (app.app_type === undefined || app.app_type === 1))
+            .map(app => [String(app.appid), app])).values());
+    }
+    async sync(store, apps, languages) {
+        const positive = apps.filter(app => languages[String(app.appid)] === true);
+        const existing = store.userCollections.find(c => c.displayName === HUNGARIAN_COLLECTION_NAME);
+        const pending = this.unsaved?.store === store ? this.unsaved.collection : undefined;
+        let collection = existing ?? pending;
+        if (!collection && !positive.length)
+            return;
+        if (!collection) {
+            collection = store.NewUnsavedCollection(HUNGARIAN_COLLECTION_NAME, undefined, []);
+            this.unsaved = { store, collection };
+        }
+        if (typeof collection?.apps?.has !== "function" || typeof collection.Save !== "function"
+            || typeof collection.AsDragDropCollection !== "function") {
+            throw new Error("A Steam gyűjteménykezelője nem kompatibilis.");
+        }
+        const add = positive.filter(app => !collection.apps.has(app.appid));
+        // Missing/offline language data never removes an already confirmed game.
+        const remove = apps.filter(app => languages[String(app.appid)] === false && collection.apps.has(app.appid));
+        if (add.length || remove.length) {
+            const editable = collection.AsDragDropCollection();
+            if (typeof editable?.AddApps !== "function" || (remove.length && typeof editable.RemoveApps !== "function")) {
+                throw new Error("A Steam gyűjtemény nem módosítható.");
+            }
+            this.unsaved = { store, collection };
+            if (add.length)
+                editable.AddApps(add);
+            if (remove.length)
+                editable.RemoveApps(remove);
+        }
+        if (this.unsaved?.collection === collection) {
+            await collection.Save();
+            this.unsaved = undefined;
+        }
+    }
+    async tick() {
+        if (!this.enabled || this.running)
+            return;
+        this.running = true;
+        const revision = this.revision;
+        const current = () => this.enabled && revision === this.revision;
+        let delay = 5000;
+        try {
+            const store = this.deps.getStore();
+            if (!store || !Array.isArray(store.userCollections) || typeof store.NewUnsavedCollection !== "function") {
+                throw new Error("Várakozás a Steam gyűjteménykezelőjére.");
+            }
+            const apps = this.apps();
+            if (!apps.length)
+                throw new Error("Várakozás a Steam könyvtárára.");
+            const ids = apps.map(app => String(app.appid));
+            const cached = await this.deps.cached(ids);
+            if (!current())
+                return;
+            if (!cached.success)
+                throw new Error("A nyelvi gyorsítótár nem érhető el.");
+            const languages = { ...cached.hungarian };
+            const pending = ids.filter(id => !Object.prototype.hasOwnProperty.call(languages, id));
+            // Two games per round, at least five seconds apart; no full-library burst.
+            const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now()).slice(0, 2);
+            if (batch.length) {
+                const result = await this.deps.lookup(batch);
+                if (!current())
+                    return;
+                if (!result.success)
+                    throw new Error("A Steam nyelvi adatai nem érhetők el.");
+                for (const id of batch) {
+                    if (result.unavailable?.includes(id) || !Object.prototype.hasOwnProperty.call(result.hungarian ?? {}, id)) {
+                        this.retryAfter.set(id, Date.now() + 15 * 60_000);
+                    }
+                    else {
+                        languages[id] = result.hungarian[id];
+                        this.retryAfter.delete(id);
+                    }
+                }
+                if (batch.every(id => this.retryAfter.has(id)))
+                    delay = 60_000;
+            }
+            if (!current() || this.deps.getStore() !== store)
+                return;
+            this.deps.onLanguages(languages);
+            // Re-read ownership after I/O, including account/library changes.
+            const currentApps = this.apps();
+            await this.sync(store, currentApps, languages);
+            if (!current())
+                return;
+            const checked = currentApps.filter(app => Object.prototype.hasOwnProperty.call(languages, String(app.appid))).length;
+            const found = currentApps.filter(app => languages[String(app.appid)] === true).length;
+            this.report(`Magyar gyűjtemény: ${found} magyar játék · ${checked}/${currentApps.length} ellenőrizve.`
+                + (checked < currentApps.length ? " A keresés a háttérben folytatódik."
+                    : found ? " Könyvtár → Gyűjtemények." : " Nincs igazolt magyar találat."));
+            if (!pending.length || !batch.length)
+                delay = 60_000;
+        }
+        catch (error) {
+            if (current())
+                this.report("Magyar gyűjtemény: " + (error instanceof Error ? error.message : String(error)));
+            delay = 60_000;
+        }
+        finally {
+            this.running = false;
+            this.schedule(delay);
+        }
+    }
+}
+
 const manifest = {"name":"Deck Play Badges"};
 const API_VERSION = 2;
 const internalAPIConnection = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit;
@@ -155,6 +320,7 @@ async function reloadUpdatedPlugin() {
 }
 function applyBadgeVisibility(next) {
     badgeVisibility = next;
+    hungarianCollection.setEnabled(pluginActive && next.show_hungarian_badges);
     for (const listener of supportListeners)
         listener();
     renderStoreBadges();
@@ -245,6 +411,29 @@ function getSteamLibraryAppIds() {
         .map((app) => String(app?.appid ?? ""))
         .filter((appId) => /^\d+$/.test(appId) && Number(appId) > 0)));
 }
+const getHungarianLibraryCache = callable("get_hungarian_library_cache");
+const hungarianCollection = new HungarianCollection({
+    getStore: () => globalThis.collectionStore,
+    getApps: getSteamLibraryApps,
+    cached: async (ids) => {
+        const hungarian = {};
+        for (let offset = 0; offset < ids.length; offset += 10000) {
+            const result = await withBackendTimeout(getHungarianLibraryCache(ids.slice(offset, offset + 10000)));
+            if (!result.success)
+                return result;
+            Object.assign(hungarian, result.hungarian);
+        }
+        return { success: true, hungarian };
+    },
+    lookup: ids => withBackendTimeout(getControllerSupport(ids), 60_000),
+    onLanguages: languages => {
+        for (const [id, value] of Object.entries(languages))
+            hungarianStates.set(id, value);
+        for (const listener of supportListeners)
+            listener();
+        renderStoreBadges();
+    },
+});
 function overviewGameName(overview) {
     const name = [overview?.display_name, overview?.strDisplayName, overview?.name, overview?.sort_as]
         .find((value) => typeof value === "string" && value.trim());
@@ -711,8 +900,12 @@ function XboxTileBadge({ appId }) {
             position: "absolute",
             top: "6px",
             left: "6px",
+            // Compensate for the visual scale so wrapping follows the tile's real width.
+            width: "calc((100% - 12px) / 0.88)",
             zIndex: 100,
             display: "inline-flex",
+            flexWrap: "wrap",
+            justifyContent: "center",
             alignItems: "center",
             gap: "3px",
             transform: "scale(.88)",
@@ -961,7 +1154,7 @@ function buildStoreBadgeScript(states, visibility, watchedAppIds) {
       if (!style) {
         style = document.createElement('style');
         style.id = 'controller-xbox-store-style';
-        style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;transform:scale(.95);transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;z-index:9999;transform:scale(.72);transform-origin:top left}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}.cxc-watch{width:30px;height:24px;padding:0;border:0;border-radius:6px;background:rgba(24,31,40,.92);color:#fff;font:bold 18px/24px Arial,sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:auto;cursor:pointer}.cxc-watch.is-watched{background:#d9a400;color:#111}';
+        style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;transform:scale(.95);transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;width:calc((100% - 8px) / .72);flex-wrap:wrap;justify-content:center;z-index:9999;transform:scale(.72);transform-origin:top left}.cxc-store-card-badges>span{flex-shrink:0}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}.cxc-watch{width:30px;height:24px;padding:0;border:0;border-radius:6px;background:rgba(24,31,40,.92);color:#fff;font:bold 18px/24px Arial,sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:auto;cursor:pointer}.cxc-watch.is-watched{background:#d9a400;color:#111}';
         (document.head || document.documentElement).appendChild(style);
       }
 
@@ -1457,6 +1650,8 @@ function Content() {
     const [visibility, setVisibility] = SP_REACT.useState({ ...badgeVisibility });
     const [notifications, setNotifications] = SP_REACT.useState({ ...notificationPreferences });
     const [settingsWorking, setSettingsWorking] = SP_REACT.useState(false);
+    const [collectionStatus, setCollectionStatus] = SP_REACT.useState(hungarianCollection.status);
+    SP_REACT.useEffect(() => hungarianCollection.subscribe(setCollectionStatus), []);
     const [watchlist, setWatchlist] = SP_REACT.useState([]);
     const [watchWorking, setWatchWorking] = SP_REACT.useState(false);
     const [searchQuery, setSearchQuery] = SP_REACT.useState("");
@@ -1816,7 +2011,7 @@ function Content() {
         }
     };
     if (page === "settings")
-        return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Z\u00E1szl\u00F3 a Steam \u00E1ltal hivatalosan magyar nyelv\u0171k\u00E9nt jel\u00F6lt j\u00E1t\u00E9kokon. A jelz\u00E9s \u00F6nmag\u00E1ban nem jelent magyar szinkront.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
+        return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Hivatalos magyar nyelvi jelz\u00E9s \u00E9s automatikus Magyar nyelv\u0171 j\u00E1t\u00E9kok gy\u0171jtem\u00E9ny. Kikapcsolva a gy\u0171jt\u00E9s sz\u00FCnetel, a gy\u0171jtem\u00E9ny megmarad. A jelz\u00E9s \u00F6nmag\u00E1ban nem jelent magyar szinkront.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
     if (page === "watchlist")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Figyel\u0151lista", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "J\u00E1t\u00E9kn\u00E9v vagy Steam AppID", value: searchQuery, bShowClearAction: true, disabled: searchWorking || watchWorking, onChange: (event) => setSearchQuery(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: searchWorking || watchWorking || searchQuery.trim().length < 2, onClick: searchForGames, children: "Keres\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW figyel\u00E9se", checked: newWatchGfn, disabled: watchWorking, onChange: setNewWatchGfn }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid figyel\u00E9se", checked: newWatchBoosteroid, disabled: watchWorking, onChange: setNewWatchBoosteroid }) }), searchResults.map((entry) => {
                     const alreadyWatched = watchedGames.has(entry.app_id);
@@ -1824,7 +2019,7 @@ function Content() {
                 }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { marginTop: "12px", fontWeight: 700 }, children: ["Figyelt j\u00E1t\u00E9kok (", watchlist.length, ")"] }) }), watchlist.length ? watchlist.map((entry) => SP_JSX.jsxs(SP_REACT.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { paddingTop: "6px", fontWeight: 700 }, children: entry.title }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { opacity: 0.75 }, children: ["GFN: ", entry.watch_gfn ? watchlistGfnLabel(entry.gfn) : "kikapcsolva", " · Boosteroid: ", entry.watch_boosteroid ? watchlistBoosteroidLabel(entry.boosteroid) : "kikapcsolva"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: entry.watch_gfn, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, checked, entry.watch_boosteroid) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: entry.watch_boosteroid, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, entry.watch_gfn, checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: watchWorking, onClick: () => void removeWatchedGame(entry.app_id), children: "Elt\u00E1vol\u00EDt\u00E1s" }) })] }, entry.app_id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A figyel\u0151lista \u00FCres." }) })] });
     if (page === "history")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "El\u0151zm\u00E9nyek", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), history.length ? history.map((entry) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { padding: "6px 0" }, children: [SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: entry.title }), SP_JSX.jsx("div", { children: historyEventLabel(entry) }), SP_JSX.jsxs("div", { style: { opacity: 0.7, fontSize: "12px" }, children: [new Date(entry.created_at * 1000).toLocaleString("hu-HU"), " \u00B7 Steam AppID: ", entry.app_id] })] }) }, entry.id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "M\u00E9g nincs r\u00F6gz\u00EDtett esem\u00E9ny." }) }), history.length ? SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: historyWorking, onClick: clearHistory, children: "El\u0151zm\u00E9nyek t\u00F6rl\u00E9se" }) }) : null] });
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Deck Play Badges", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Deck Play Badges", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: collectionStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
                         ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
                             + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
                             + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
@@ -1848,6 +2043,7 @@ var index = DFL.definePlugin(() => {
         icon: SP_JSX.jsx("span", { children: "\u2713" }),
         onDismount: () => {
             pluginActive = false;
+            hungarianCollection.stop();
             if (notificationTimer !== undefined)
                 window.clearTimeout(notificationTimer);
             notificationTimer = undefined;

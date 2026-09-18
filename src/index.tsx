@@ -1,4 +1,5 @@
 import { HUNGARIAN_BADGE_HTML } from "./hungarianBadge";
+import { HungarianCollection } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
 import { createElement, Fragment, ReactElement, useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -300,6 +301,7 @@ async function reloadUpdatedPlugin(): Promise<"reloaded" | "restarting" | "faile
 
 function applyBadgeVisibility(next: BadgeVisibility): void {
   badgeVisibility = next;
+  hungarianCollection.setEnabled(pluginActive && next.show_hungarian_badges);
   for (const listener of supportListeners) listener();
   renderStoreBadges();
   window.dispatchEvent(new CustomEvent<Partial<PluginSettings>>(SETTINGS_CHANGED_EVENT, { detail: next }));
@@ -389,6 +391,27 @@ function getSteamLibraryAppIds(): string[] {
       .filter((appId: string) => /^\d+$/.test(appId) && Number(appId) > 0),
   ));
 }
+
+const getHungarianLibraryCache = callable<[appIds: string[]], SupportResponse>("get_hungarian_library_cache");
+const hungarianCollection = new HungarianCollection({
+  getStore: () => (globalThis as any).collectionStore,
+  getApps: getSteamLibraryApps,
+  cached: async ids => {
+    const hungarian: NonNullable<SupportResponse["hungarian"]> = {};
+    for (let offset = 0; offset < ids.length; offset += 10000) {
+      const result = await withBackendTimeout(getHungarianLibraryCache(ids.slice(offset, offset + 10000)));
+      if (!result.success) return result;
+      Object.assign(hungarian, result.hungarian);
+    }
+    return { success: true, hungarian };
+  },
+  lookup: ids => withBackendTimeout(getControllerSupport(ids), 60_000),
+  onLanguages: languages => {
+    for (const [id, value] of Object.entries(languages)) hungarianStates.set(id, value);
+    for (const listener of supportListeners) listener();
+    renderStoreBadges();
+  },
+});
 
 function overviewGameName(overview: any): string | undefined {
   const name = [overview?.display_name, overview?.strDisplayName, overview?.name, overview?.sort_as]
@@ -887,8 +910,12 @@ function XboxTileBadge({ appId }: { appId: number }) {
     position: "absolute",
     top: "6px",
     left: "6px",
+    // Compensate for the visual scale so wrapping follows the tile's real width.
+    width: "calc((100% - 12px) / 0.88)",
     zIndex: 100,
     display: "inline-flex",
+    flexWrap: "wrap",
+    justifyContent: "center",
     alignItems: "center",
     gap: "3px",
     transform: "scale(.88)",
@@ -1155,7 +1182,7 @@ function buildStoreBadgeScript(
       if (!style) {
         style = document.createElement('style');
         style.id = 'controller-xbox-store-style';
-        style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;transform:scale(.95);transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;z-index:9999;transform:scale(.72);transform-origin:top left}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}.cxc-watch{width:30px;height:24px;padding:0;border:0;border-radius:6px;background:rgba(24,31,40,.92);color:#fff;font:bold 18px/24px Arial,sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:auto;cursor:pointer}.cxc-watch.is-watched{background:#d9a400;color:#111}';
+        style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;transform:scale(.95);transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;width:calc((100% - 8px) / .72);flex-wrap:wrap;justify-content:center;z-index:9999;transform:scale(.72);transform-origin:top left}.cxc-store-card-badges>span{flex-shrink:0}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}.cxc-watch{width:30px;height:24px;padding:0;border:0;border-radius:6px;background:rgba(24,31,40,.92);color:#fff;font:bold 18px/24px Arial,sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:auto;cursor:pointer}.cxc-watch.is-watched{background:#d9a400;color:#111}';
         (document.head || document.documentElement).appendChild(style);
       }
 
@@ -1579,6 +1606,8 @@ function Content() {
   const [visibility, setVisibility] = useState<BadgeVisibility>({ ...badgeVisibility });
   const [notifications, setNotifications] = useState<NotificationPreferences>({ ...notificationPreferences });
   const [settingsWorking, setSettingsWorking] = useState(false);
+  const [collectionStatus, setCollectionStatus] = useState(hungarianCollection.status);
+  useEffect(() => hungarianCollection.subscribe(setCollectionStatus), []);
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
   const [watchWorking, setWatchWorking] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1939,7 +1968,7 @@ function Content() {
     <PanelSectionRow><div style={{ fontWeight: 700 }}>Jelvények</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Magyar zászló"
-      description="Zászló a Steam által hivatalosan magyar nyelvűként jelölt játékokon. A jelzés önmagában nem jelent magyar szinkront."
+      description="Hivatalos magyar nyelvi jelzés és automatikus Magyar nyelvű játékok gyűjtemény. Kikapcsolva a gyűjtés szünetel, a gyűjtemény megmarad. A jelzés önmagában nem jelent magyar szinkront."
       checked={visibility.show_hungarian_badges}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked })}
@@ -2075,6 +2104,7 @@ function Content() {
     </ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>Beállítások</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
+    <PanelSectionRow><div>{collectionStatus}</div></PanelSectionRow>
     <PanelSectionRow><div>{stats
       ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
         + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
@@ -2109,6 +2139,7 @@ export default definePlugin(() => {
     icon: <span>✓</span>,
     onDismount: () => {
       pluginActive = false;
+      hungarianCollection.stop();
       if (notificationTimer !== undefined) window.clearTimeout(notificationTimer);
       notificationTimer = undefined;
       removeStorePatch();

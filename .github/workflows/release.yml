@@ -36,6 +36,9 @@ jobs:
       - name: Frontend típusok ellenőrzése
         run: pnpm run check
 
+      - name: Magyar gyűjtemény működésének ellenőrzése
+        run: pnpm test
+
       - name: Backend beállítások és Python 3.8 szintaxis ellenőrzése
         run: python3 -m unittest discover -s tests -p 'test_*.py'
 

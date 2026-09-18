@@ -135,6 +135,20 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
     def test_backend_keeps_python38_syntax(self):
         ast.parse((ROOT / "main.py").read_text(encoding="utf-8"), feature_version=(3, 8))
 
+    async def test_library_snapshot_reads_only_fresh_requested_cache_without_network(self):
+        self.plugin._cache = {
+            "10": {"schema_version": self.cache_schema_version, "checked_at": time.time(), "hungarian": True},
+            "20": {"schema_version": self.cache_schema_version, "checked_at": time.time(), "hungarian": False},
+            "30": {"schema_version": self.cache_schema_version - 1, "checked_at": time.time(), "hungarian": True},
+            "40": {"schema_version": self.cache_schema_version, "checked_at": 0, "hungarian": True},
+            "50": {"schema_version": self.cache_schema_version, "checked_at": time.time(), "hungarian": None},
+            "60": {"schema_version": self.cache_schema_version, "checked_at": time.time(), "hungarian": True},
+        }
+        with patch.object(self.plugin, "_fetch_support") as fetch:
+            result = await self.plugin.get_hungarian_library_cache(["10", "20", "30", "40", "50", "bad"])
+        fetch.assert_not_called()
+        self.assertEqual(result, {"success": True, "hungarian": {"10": True, "20": False, "50": None}})
+
 
 if __name__ == "__main__":
     unittest.main()

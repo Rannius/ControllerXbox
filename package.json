@@ -1,12 +1,13 @@
 {
   "name": "controller-xbox",
-  "version": "1.0.51",
+  "version": "1.0.52",
   "description": "Deck Play Badges for controller support, official Hungarian language support, GeForce NOW, and Boosteroid availability",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "rollup -c",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "node --test tests/test_*.cjs"
   },
   "keywords": ["decky", "steam-deck", "controller", "cloud-gaming", "badges"],
   "license": "MIT",
