@@ -1,5 +1,6 @@
 import ast
 import asyncio
+import builtins
 import importlib.util
 import io
 import json
@@ -225,6 +226,46 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             refresh.assert_called_once()
             await self.plugin._stop_hungarian_curator_refresh()
         self.assertIsNone(self.plugin._hungarian_curator_task)
+
+    async def test_backend_starts_without_html_parser_in_decky_frozen_runtime(self):
+        original_import = builtins.__import__
+
+        def decky_import(name, *args, **kwargs):
+            if name in {"html.parser", "_markupbase"}:
+                raise ModuleNotFoundError("Not bundled with Decky: " + name)
+            return original_import(name, *args, **kwargs)
+
+        decky = types.ModuleType("decky")
+        decky.DECKY_PLUGIN_SETTINGS_DIR = self.directory.name
+        decky.logger = logging.getLogger("test")
+        with patch.dict(sys.modules, {"decky": decky}), patch("builtins.__import__", side_effect=decky_import):
+            spec = importlib.util.spec_from_file_location("frozen_plugin_test", ROOT / "main.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            plugin = module.Plugin()
+            await asyncio.wait_for(plugin._main(), timeout=2)
+            settings = await asyncio.wait_for(plugin.get_settings(), timeout=1)
+            self.assertTrue(settings["success"])
+            parser = module.HungarianCuratorParser()
+            parser.feed(self.curator_card("526870"))
+            parser.close()
+            self.assertEqual(parser.records[0]["app_ids"], {"526870"})
+            await plugin._unload()
+
+    def test_curator_tokenizer_handles_quotes_entities_comments_and_raw_text(self):
+        parser = self.parser_type()
+        fake = self.curator_card("999")
+        valid = self.curator_card("526870").replace('<div class="recommendation">',
+            "<DIV data-note='a > b' CLASS='recommendation'>").replace(
+                'curator_clanid=34235089', 'other=1&amp;curator_clanid=34235089')
+        parser.feed('<!--' + fake + '--><script>' + fake + '</script><style>' + fake + '</style>')
+        parser.feed(valid[:45])
+        parser.feed(valid[45:])
+        parser.close()
+        self.assertEqual(len(parser.records), 1)
+        self.assertEqual(parser.records[0]["app_ids"], {"526870"})
+        self.assertTrue(parser.records[0]["curator_link"])
+        self.assertTrue(parser.records[0]["recommended"])
 
 
 if __name__ == "__main__":

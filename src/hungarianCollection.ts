@@ -52,6 +52,10 @@ export class HungarianCollection {
     for (const listener of this.listeners) listener(status);
   }
 
+  settingsUnavailable(): void {
+    if (!this.enabled) this.report("Magyar gyűjtemény: a backend nem válaszol. A beállítások betöltését újrapróbáljuk.");
+  }
+
   setEnabled(enabled: boolean): void {
     if (enabled === this.enabled) {
       if (!enabled) this.report("Magyar gyűjtemény: gyűjtés szüneteltetve. A meglévő gyűjtemény megmarad.");

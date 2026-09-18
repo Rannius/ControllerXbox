@@ -21,3 +21,7 @@ A backendnek Python 3.8-kompatibilisnek kell maradnia. Tilos a `dict[str, ...]`,
 ## Decky frontend-backend API szabaly
 
 A `plugin.json`-ban kotelezo az `"api_version": 1` mezo. Enelkul a modern `@decky/api` `callable(...)` hivasok nem erik el a Python backendet, es csak altalanos "Python exception" hibat adnak vissza.
+
+## Decky csomagolt Python-modulok
+
+A Python standard könyvtár nem minden modulja része a Decky csomagolt futtatókörnyezetének. Új importnál a kiadott Decky-csomagban is ellenőrizni kell a modul és függőségei elérhetőségét; a helyi Python és a szintaxisellenőrzés önmagában nem elég. A Decky 3.2.9-ből például hiányzik az `html.parser` és az `_markupbase`. A backend indulását ezek nélkül is teszteljük.

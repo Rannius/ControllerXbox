@@ -10,7 +10,6 @@ import asyncio
 import concurrent.futures
 import functools
 import html
-from html.parser import HTMLParser
 import json
 import os
 import re
@@ -78,14 +77,51 @@ UPDATE_FILES = [
 ]
 
 
-class HungarianCuratorParser(HTMLParser):
-    """Read recommendation cards, never unrelated links elsewhere on the page."""
+class HungarianCuratorParser:
+    """Read Steam recommendation fragments using modules bundled with Decky.
+
+    Decky's frozen Python does not include html.parser or _markupbase. This
+    tokenizer only needs tags and attributes; div nesting isolates each card.
+    """
+
+    _tags = re.compile(r"<!--.*?-->|<(/?)([A-Za-z][\w:-]*)((?:[^>'\"]|'[^']*'|\"[^\"]*\")*)>", re.S)
+    _attributes = re.compile(r"([^\s=/>]+)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s\"'=<>`]+)))?")
 
     def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
         self.records: List[Dict[str, Any]] = []
         self._depth = 0
         self._record: Optional[Dict[str, Any]] = None
+        self._fragments: List[str] = []
+
+    def feed(self, fragment: str) -> None:
+        self._fragments.append(fragment)
+
+    def close(self) -> None:
+        raw_tag = ""
+        for match in self._tags.finditer("".join(self._fragments)):
+            closing, tag, attribute_text = match.groups()
+            if tag is None:  # Comment, including any fake cards inside it.
+                continue
+            tag = tag.lower()
+            if raw_tag:
+                if closing and tag == raw_tag:
+                    raw_tag = ""
+                continue
+            if tag in {"script", "style"} and not closing:
+                raw_tag = tag
+                continue
+            if closing:
+                self.handle_endtag(tag)
+                continue
+            attrs = []
+            for attribute in self._attributes.finditer(attribute_text):
+                name, double_quoted, single_quoted, unquoted = attribute.groups()
+                value = next((part for part in (double_quoted, single_quoted, unquoted) if part is not None), "")
+                attrs.append((name.lower(), html.unescape(value)))
+            self.handle_starttag(tag, attrs)
+            if attribute_text.rstrip().endswith("/"):
+                self.handle_endtag(tag)
+        self._fragments.clear()
 
     def handle_starttag(self, tag: str, attrs: Any) -> None:
         attributes = dict(attrs)

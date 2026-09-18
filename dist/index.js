@@ -30,6 +30,10 @@ class HungarianCollection {
         for (const listener of this.listeners)
             listener(status);
     }
+    settingsUnavailable() {
+        if (!this.enabled)
+            this.report("Magyar gyűjtemény: a backend nem válaszol. A beállítások betöltését újrapróbáljuk.");
+    }
     setEnabled(enabled) {
         if (enabled === this.enabled) {
             if (!enabled)
@@ -256,6 +260,9 @@ let storeReconnectTimer;
 let storeCurrentAppIds = new Set();
 let notificationTimer;
 let pluginActive = false;
+let settingsLoading = false;
+let settingsRetryTimer;
+let settingsLoadFailures = 0;
 let watchedGames = new Map();
 const watchlistListeners = new Set();
 const watchlistMutations = new Set();
@@ -387,8 +394,18 @@ async function toggleWatchlistGame(appId) {
     }
 }
 async function loadBadgeVisibility() {
+    if (!pluginActive || settingsLoading)
+        return;
+    settingsLoading = true;
+    if (settingsRetryTimer !== undefined)
+        window.clearTimeout(settingsRetryTimer);
+    settingsRetryTimer = undefined;
     try {
         const response = await withBackendTimeout(getSettings());
+        if (!pluginActive)
+            return;
+        if (!response.success)
+            throw new Error(response.error || "A beállítások betöltése sikertelen.");
         if (response.success) {
             applyBadgeVisibility({
                 show_gfn_badges: response.show_gfn_badges,
@@ -401,10 +418,26 @@ async function loadBadgeVisibility() {
                 notify_boosteroid_maintenance: response.notify_boosteroid_maintenance ?? true,
                 notify_plugin_updates: response.notify_plugin_updates ?? true,
             });
+            if (settingsLoadFailures > 0) {
+                resetVisibleSupport();
+                notifyCacheChanged();
+            }
+            settingsLoadFailures = 0;
         }
     }
     catch (error) {
         console.warn("ControllerXbox badge settings could not be loaded", error);
+        if (pluginActive) {
+            settingsLoadFailures++;
+            hungarianCollection.settingsUnavailable();
+            settingsRetryTimer = window.setTimeout(() => {
+                settingsRetryTimer = undefined;
+                void loadBadgeVisibility();
+            }, Math.min(30_000, settingsLoadFailures * 5000));
+        }
+    }
+    finally {
+        settingsLoading = false;
     }
 }
 function getSteamLibraryApps() {
@@ -2024,6 +2057,7 @@ function Content() {
         try {
             const diagnostics = await withBackendTimeout(getBackendDiagnostics());
             setStats(diagnostics);
+            await loadBadgeVisibility();
             resetVisibleSupport();
             setDiagnosticLog("Nincs rögzített hiba.");
         }
@@ -2108,6 +2142,9 @@ var index = DFL.definePlugin(() => {
         icon: SP_JSX.jsx("span", { children: "\u2713" }),
         onDismount: () => {
             pluginActive = false;
+            if (settingsRetryTimer !== undefined)
+                window.clearTimeout(settingsRetryTimer);
+            settingsRetryTimer = undefined;
             hungarianCollection.stop();
             if (curatorBadgeTimer !== undefined)
                 window.clearTimeout(curatorBadgeTimer);

@@ -229,6 +229,9 @@ let storeReconnectTimer: number | undefined;
 let storeCurrentAppIds = new Set<string>();
 let notificationTimer: number | undefined;
 let pluginActive = false;
+let settingsLoading = false;
+let settingsRetryTimer: number | undefined;
+let settingsLoadFailures = 0;
 let watchedGames = new Map<string, WatchlistEntry>();
 const watchlistListeners = new Set<() => void>();
 const watchlistMutations = new Set<string>();
@@ -357,8 +360,14 @@ async function toggleWatchlistGame(appId: string): Promise<void> {
 }
 
 async function loadBadgeVisibility(): Promise<void> {
+  if (!pluginActive || settingsLoading) return;
+  settingsLoading = true;
+  if (settingsRetryTimer !== undefined) window.clearTimeout(settingsRetryTimer);
+  settingsRetryTimer = undefined;
   try {
     const response = await withBackendTimeout(getSettings());
+    if (!pluginActive) return;
+    if (!response.success) throw new Error(response.error || "A beállítások betöltése sikertelen.");
     if (response.success) {
       applyBadgeVisibility({
         show_gfn_badges: response.show_gfn_badges,
@@ -371,9 +380,24 @@ async function loadBadgeVisibility(): Promise<void> {
         notify_boosteroid_maintenance: response.notify_boosteroid_maintenance ?? true,
         notify_plugin_updates: response.notify_plugin_updates ?? true,
       });
+      if (settingsLoadFailures > 0) {
+        resetVisibleSupport();
+        notifyCacheChanged();
+      }
+      settingsLoadFailures = 0;
     }
   } catch (error) {
     console.warn("ControllerXbox badge settings could not be loaded", error);
+    if (pluginActive) {
+      settingsLoadFailures++;
+      hungarianCollection.settingsUnavailable();
+      settingsRetryTimer = window.setTimeout(() => {
+        settingsRetryTimer = undefined;
+        void loadBadgeVisibility();
+      }, Math.min(30_000, settingsLoadFailures * 5000));
+    }
+  } finally {
+    settingsLoading = false;
   }
 }
 
@@ -1967,6 +1991,7 @@ function Content() {
     try {
       const diagnostics = await withBackendTimeout(getBackendDiagnostics());
       setStats(diagnostics);
+      await loadBadgeVisibility();
       resetVisibleSupport();
       setDiagnosticLog("Nincs rögzített hiba.");
     } catch (error) {
@@ -2190,6 +2215,8 @@ export default definePlugin(() => {
     icon: <span>✓</span>,
     onDismount: () => {
       pluginActive = false;
+      if (settingsRetryTimer !== undefined) window.clearTimeout(settingsRetryTimer);
+      settingsRetryTimer = undefined;
       hungarianCollection.stop();
       if (curatorBadgeTimer !== undefined) window.clearTimeout(curatorBadgeTimer);
       curatorBadgeTimer = undefined;
