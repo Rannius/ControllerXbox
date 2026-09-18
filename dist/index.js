@@ -68,11 +68,11 @@ function HungarianProgress({ manager, loadCurator }) {
         const timer = setInterval(() => setNow(Date.now()), 1000);
         return () => clearInterval(timer);
     }, []);
-    const percent = scan.total ? Math.floor(scan.checked / scan.total * 100) : 0;
+    const percent = scan.total ? Math.floor(scan.processed / scan.total * 100) : 0;
     const seconds = Math.max(0, Math.ceil((scan.nextCheckAt - now) / 1000));
     const titles = { waiting: "Várakozás a könyvtárra", cache: "Mentett adatok betöltése", checking: "Játékok ellenőrzése",
         saving: "Gyűjtemény mentése", between: "Keresés folyamatban", done: "Ellenőrzési kör kész", error: "Újrapróbálkozásra vár", paused: "Gyűjtés szünetel" };
-    return SP_JSX.jsxs("div", { style: { padding: "12px", borderRadius: "8px", background: "rgba(0,0,0,.22)", fontSize: "12px", lineHeight: 1.5, overflowWrap: "anywhere" }, children: [SP_JSX.jsx("div", { style: { fontWeight: 700, fontSize: "14px" }, children: "\uD83C\uDDED\uD83C\uDDFA Magyar j\u00E1t\u00E9kok" }), SP_JSX.jsx("div", { role: "status", children: titles[scan.phase] }), SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "8px" }, children: [SP_JSX.jsxs("span", { children: [scan.checked, " / ", scan.total, " ellen\u0151rizve"] }), SP_JSX.jsxs("strong", { children: [percent, "%"] })] }), SP_JSX.jsx("div", { role: "progressbar", "aria-label": "K\u00F6nyvt\u00E1r ellen\u0151rz\u00E9se", "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": percent, style: { height: "6px", background: "#394553", borderRadius: "4px", overflow: "hidden", margin: "5px 0 8px" }, children: SP_JSX.jsx("div", { style: { width: `${percent}%`, height: "100%", background: "#67c1f5", transition: "width .3s" } }) }), SP_JSX.jsxs("div", { children: [scan.found, " magyar tal\u00E1lat \u00B7 ", scan.collected, " a gy\u0171jtem\u00E9nyben"] }), scan.unknown > 0 && SP_JSX.jsxs("div", { children: [scan.unknown, " j\u00E1t\u00E9kn\u00E1l nincs biztos nyelvi adat"] }), scan.current && SP_JSX.jsxs("div", { style: { marginTop: "8px" }, children: ["Most: ", scan.current] }), SP_JSX.jsx("div", { style: { opacity: .8, marginTop: "8px" }, children: scan.status }), scan.phase !== "paused" && SP_JSX.jsxs("div", { style: { marginTop: "8px" }, children: ["Magyar Felirat: ", curatorError ? "állapot nem érhető el; újrapróbáljuk"
+    return SP_JSX.jsxs("div", { style: { padding: "12px", borderRadius: "8px", background: "rgba(0,0,0,.22)", fontSize: "12px", lineHeight: 1.5, overflowWrap: "anywhere" }, children: [SP_JSX.jsx("div", { style: { fontWeight: 700, fontSize: "14px" }, children: "\uD83C\uDDED\uD83C\uDDFA Magyar j\u00E1t\u00E9kok" }), SP_JSX.jsx("div", { role: "status", children: titles[scan.phase] }), SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "8px" }, children: [SP_JSX.jsxs("span", { children: [scan.processed, " / ", scan.total, " sorra v\u00E9ve"] }), SP_JSX.jsxs("strong", { children: [percent, "%"] })] }), SP_JSX.jsx("div", { role: "progressbar", "aria-label": "K\u00F6nyvt\u00E1r ellen\u0151rz\u00E9se", "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": percent, style: { height: "6px", background: "#394553", borderRadius: "4px", overflow: "hidden", margin: "5px 0 8px" }, children: SP_JSX.jsx("div", { style: { width: `${percent}%`, height: "100%", background: "#67c1f5", transition: "width .3s" } }) }), SP_JSX.jsxs("div", { children: [scan.checked, " j\u00E1t\u00E9khoz van nyelvi adat"] }), SP_JSX.jsxs("div", { children: [scan.found, " magyar tal\u00E1lat \u00B7 ", scan.collected, " a gy\u0171jtem\u00E9nyben"] }), scan.unknown > 0 && SP_JSX.jsxs("div", { children: [scan.unknown, " j\u00E1t\u00E9kn\u00E1l hi\u00E1nyz\u00F3 vagy bizonytalan nyelvi adat"] }), scan.current && SP_JSX.jsxs("div", { style: { marginTop: "8px" }, children: ["Most: ", scan.current] }), SP_JSX.jsx("div", { style: { opacity: .8, marginTop: "8px" }, children: scan.status }), scan.phase !== "paused" && SP_JSX.jsxs("div", { style: { marginTop: "8px" }, children: ["Magyar Felirat: ", curatorError ? "állapot nem érhető el; újrapróbáljuk"
                         : !curator ? "állapot betöltése…"
                             : curator.status === "loading" ? (curator.total ? `${curator.checked} / ${curator.total} ajánlás betöltve` : "lista letöltése…")
                                 : curator.status === "cached" ? `${curator.entries} játék a listán${curator.stale ? " · korábbi lista, a frissítés később újraindul" : ""}`
@@ -92,12 +92,14 @@ class HungarianCollection {
     constructor(deps) {
         this.deps = deps;
         this.status = "Magyar gyűjtemény: várakozás a beállításokra.";
-        this.progress = { phase: "waiting", total: 0, checked: 0, found: 0, collected: 0, unknown: 0, current: "", nextCheckAt: 0 };
+        this.progress = { phase: "waiting", total: 0, processed: 0, checked: 0, found: 0, collected: 0, unknown: 0, current: "", nextCheckAt: 0 };
         this.listeners = new Set();
         this.enabled = false;
         this.revision = 0;
         this.running = false;
         this.retryAfter = new Map();
+        this.attempted = new Map();
+        this.attemptSequence = 0;
     }
     subscribe(listener) {
         this.listeners.add(listener);
@@ -201,6 +203,11 @@ class HungarianCollection {
                 throw new Error("Várakozás a Steam gyűjteménykezelőjére.");
             }
             const storage = store.collectionsFromStorage;
+            if (this.scanStorage !== storage) {
+                this.scanStorage = storage;
+                this.attempted.clear();
+                this.retryAfter.clear();
+            }
             const apps = this.apps();
             if (!apps.length)
                 throw new Error("Várakozás a Steam könyvtárára.");
@@ -214,23 +221,37 @@ class HungarianCollection {
             const languages = { ...cached.hungarian };
             const sources = { ...cached.hungarian_sources };
             const counts = (list) => ({ total: list.length,
-                checked: list.filter(app => Object.prototype.hasOwnProperty.call(languages, String(app.appid))).length,
+                processed: list.filter(app => this.attempted.has(String(app.appid)) || Object.prototype.hasOwnProperty.call(languages, String(app.appid))).length,
+                checked: list.filter(app => typeof languages[String(app.appid)] === "boolean").length,
                 found: list.filter(app => languages[String(app.appid)] === true).length,
-                unknown: list.filter(app => languages[String(app.appid)] === null).length });
+                unknown: list.filter(app => languages[String(app.appid)] === null || (this.attempted.has(String(app.appid)) && !Object.prototype.hasOwnProperty.call(languages, String(app.appid)))).length });
             const pending = ids.filter(id => !Object.prototype.hasOwnProperty.call(languages, id));
             // Two games per round, at least five seconds apart; no full-library burst.
-            const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now()).slice(0, 2);
+            // Unvisited games always precede retries, even when an early retry expires.
+            // A failed RPC must advance the queue just like an unavailable app result.
+            const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now())
+                .sort((a, b) => (this.attempted.get(a) ?? 0) - (this.attempted.get(b) ?? 0)).slice(0, 2);
+            let lookupError = "";
             if (batch.length) {
                 this.report("Steam nyelvi adatok ellenőrzése…", { ...counts(apps), phase: "checking",
                     current: batch.map(id => {
                         const app = apps.find(a => String(a.appid) === id);
                         return app.display_name || app.strDisplayName || app.name || `Steam AppID ${id}`;
                     }).join(" · ") });
-                const result = await this.deps.lookup(batch);
-                if (!current())
+                let result;
+                try {
+                    result = await this.deps.lookup(batch);
+                    if (!result.success)
+                        throw new Error("A Steam nyelvi adatai nem érhetők el.");
+                }
+                catch (error) {
+                    lookupError = error instanceof Error ? error.message : String(error);
+                    result = { success: false, unavailable: batch };
+                }
+                if (!current() || this.deps.getStore() !== store || store.collectionsFromStorage !== storage)
                     return;
-                if (!result.success)
-                    throw new Error("A Steam nyelvi adatai nem érhetők el.");
+                for (const id of batch)
+                    this.attempted.set(id, ++this.attemptSequence);
                 for (const id of batch) {
                     if ((result.unavailable?.includes(id) && result.hungarian?.[id] !== true)
                         || !Object.prototype.hasOwnProperty.call(result.hungarian ?? {}, id)) {
@@ -254,15 +275,16 @@ class HungarianCollection {
             const collected = await this.sync(store, currentApps, languages);
             if (!current())
                 return;
-            const checked = currentApps.filter(app => Object.prototype.hasOwnProperty.call(languages, String(app.appid))).length;
+            const checked = currentApps.filter(app => typeof languages[String(app.appid)] === "boolean").length;
             const found = currentApps.filter(app => languages[String(app.appid)] === true).length;
             if (!pending.length || !batch.length)
                 delay = cached.curator_status === "loading" ? 5000 : 60_000;
-            this.report(`${found} magyar játék · ${checked}/${currentApps.length} ellenőrizve.`
+            this.report(`${found} magyar játék · ${checked}/${currentApps.length} játékhoz van nyelvi adat.`
                 + (checked < currentApps.length ? " A keresés a háttérben folytatódik."
                     : found ? " Könyvtár → Gyűjtemények." : " Nincs igazolt magyar találat.")
                 + (cached.curator_status === "loading" ? " Magyar Felirat: lista betöltése…"
-                    : cached.curator_status === "unavailable" ? " A Magyar Felirat listája még nem érhető el; később újrapróbáljuk." : ""), { ...counts(currentApps), collected, current: "", phase: checked === currentApps.length && cached.curator_status !== "loading" && cached.curator_status !== "unavailable" ? "done" : "between", nextCheckAt: Date.now() + delay });
+                    : cached.curator_status === "unavailable" ? " A Magyar Felirat listája még nem érhető el; később újrapróbáljuk." : "")
+                + (lookupError ? ` Az aktuális lekérés sikertelen: ${lookupError}. A többi játék következik.` : ""), { ...counts(currentApps), collected, current: "", phase: checked === currentApps.length && cached.curator_status !== "loading" && cached.curator_status !== "unavailable" ? "done" : "between", nextCheckAt: Date.now() + delay });
         }
         catch (error) {
             if (current())
@@ -351,6 +373,7 @@ let originalTileType = null;
 let tileIconRowClass = "";
 let storeWebSocket = null;
 let storeMounted = false;
+let nativeTilesInStore = false;
 let storeWebSocketReady = false;
 let storeMessageId = 1;
 let storeScanTimer;
@@ -1063,6 +1086,7 @@ function BoosteroidBadge({ state }) {
 }
 function XboxTileBadge({ appId }) {
     const appIdText = String(appId);
+    const [inStore, setInStore] = SP_REACT.useState(nativeTilesInStore);
     const [visibility, setVisibility] = SP_REACT.useState(badgeVisibility);
     const [hungarian, setHungarian] = SP_REACT.useState(() => hungarianStates.get(appIdText) === true);
     const [hungarianSource, setHungarianSource] = SP_REACT.useState(() => hungarianSources.get(appIdText) ?? null);
@@ -1073,6 +1097,7 @@ function XboxTileBadge({ appId }) {
         visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
         const listener = () => {
             setVisibility(badgeVisibility);
+            setInStore(nativeTilesInStore);
             setHungarian(hungarianStates.get(appIdText) === true);
             setHungarianSource(hungarianSources.get(appIdText) ?? null);
             setState(supportStates.get(appIdText) ?? "loading");
@@ -1092,19 +1117,20 @@ function XboxTileBadge({ appId }) {
             publishSupportState();
         };
     }, [appIdText]);
+    const scale = 0.88 * (inStore ? (visibility.store_badge_percent ?? 100) : (visibility.library_badge_percent ?? 100)) / 100;
     return SP_JSX.jsxs("span", { style: {
             position: "absolute",
             top: "6px",
             left: "6px",
             // Compensate for the visual scale so wrapping follows the tile's real width.
-            width: `calc((100% - 12px) / ${0.88 * (visibility.library_badge_percent ?? 100) / 100})`,
+            width: `calc((100% - 12px) / ${scale})`,
             zIndex: 100,
             display: "inline-flex",
             flexWrap: "wrap",
             justifyContent: "center",
             alignItems: "center",
             gap: "3px",
-            transform: `scale(${0.88 * (visibility.library_badge_percent ?? 100) / 100})`,
+            transform: `scale(${scale})`,
             transformOrigin: "top left",
             pointerEvents: "none",
         }, children: [SP_JSX.jsx(ControllerBadge, { state: state, appId: appId }), visibility.show_gfn_badges ? SP_JSX.jsx(GfnBadge, { state: gfnState }) : null, visibility.show_boosteroid_badges ? SP_JSX.jsx(BoosteroidBadge, { state: boosteroidState }) : null, visibility.show_hungarian_badges && hungarian ? SP_JSX.jsx("span", { style: { display: "inline-flex" }, dangerouslySetInnerHTML: { __html: getHungarianBadgeHtml(hungarianSource) } }) : null] });
@@ -1617,6 +1643,12 @@ function patchSteamStore() {
         const historyModule = DFL.findModuleExport((value) => value?.m_history !== undefined);
         const history = historyModule?.m_history;
         const handleLocation = (pathname) => {
+            const nextNativeStore = /^\/(store|steamweb)(\/|$)/.test(pathname);
+            if (nextNativeStore !== nativeTilesInStore) {
+                nativeTilesInStore = nextNativeStore;
+                for (const listener of supportListeners)
+                    listener();
+            }
             const inStore = pathname === "/steamweb" || pathname.startsWith("/steamweb/");
             if (inStore && !storeMounted) {
                 storeMounted = true;

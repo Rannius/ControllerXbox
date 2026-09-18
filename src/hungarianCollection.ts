@@ -33,7 +33,7 @@ export function readyCollectionStore(store: Store | undefined): store is Store {
 
 export type CollectionProgress = {
   phase: "waiting" | "cache" | "checking" | "saving" | "between" | "done" | "error" | "paused";
-  total: number; checked: number; found: number; collected: number; unknown: number;
+  total: number; processed: number; checked: number; found: number; collected: number; unknown: number;
   current: string; nextCheckAt: number;
 };
 type Dependencies = {
@@ -46,13 +46,16 @@ type Dependencies = {
 
 export class HungarianCollection {
   status = "Magyar gyűjtemény: várakozás a beállításokra.";
-  progress: CollectionProgress = { phase: "waiting", total: 0, checked: 0, found: 0, collected: 0, unknown: 0, current: "", nextCheckAt: 0 };
+  progress: CollectionProgress = { phase: "waiting", total: 0, processed: 0, checked: 0, found: 0, collected: 0, unknown: 0, current: "", nextCheckAt: 0 };
   private listeners = new Set<(status: string) => void>();
   private enabled = false;
   private revision = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private running = false;
   private retryAfter = new Map<string, number>();
+  private attempted = new Map<string, number>();
+  private attemptSequence = 0;
+  private scanStorage?: Store["collectionsFromStorage"];
   private unsaved?: { store: Store; storage: Store["collectionsFromStorage"]; collection: Collection };
 
   constructor(private deps: Dependencies) {}
@@ -156,6 +159,11 @@ export class HungarianCollection {
         throw new Error("Várakozás a Steam gyűjteménykezelőjére.");
       }
       const storage = store.collectionsFromStorage;
+      if (this.scanStorage !== storage) {
+        this.scanStorage = storage;
+        this.attempted.clear();
+        this.retryAfter.clear();
+      }
       const apps = this.apps();
       if (!apps.length) throw new Error("Várakozás a Steam könyvtárára.");
       const ids = apps.map(app => String(app.appid));
@@ -166,19 +174,31 @@ export class HungarianCollection {
       const languages = { ...cached.hungarian };
       const sources = { ...cached.hungarian_sources };
       const counts = (list: App[]) => ({ total: list.length,
-        checked: list.filter(app => Object.prototype.hasOwnProperty.call(languages, String(app.appid))).length,
+        processed: list.filter(app => this.attempted.has(String(app.appid)) || Object.prototype.hasOwnProperty.call(languages, String(app.appid))).length,
+        checked: list.filter(app => typeof languages[String(app.appid)] === "boolean").length,
         found: list.filter(app => languages[String(app.appid)] === true).length,
-        unknown: list.filter(app => languages[String(app.appid)] === null).length });
+        unknown: list.filter(app => languages[String(app.appid)] === null || (this.attempted.has(String(app.appid)) && !Object.prototype.hasOwnProperty.call(languages, String(app.appid)))).length });
       const pending = ids.filter(id => !Object.prototype.hasOwnProperty.call(languages, id));
       // Two games per round, at least five seconds apart; no full-library burst.
-      const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now()).slice(0, 2);
+      // Unvisited games always precede retries, even when an early retry expires.
+      // A failed RPC must advance the queue just like an unavailable app result.
+      const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now())
+        .sort((a, b) => (this.attempted.get(a) ?? 0) - (this.attempted.get(b) ?? 0)).slice(0, 2);
+      let lookupError = "";
       if (batch.length) {
         this.report("Steam nyelvi adatok ellenőrzése…", { ...counts(apps), phase: "checking",
           current: batch.map(id => { const app = apps.find(a => String(a.appid) === id)!;
             return app.display_name || app.strDisplayName || app.name || `Steam AppID ${id}`; }).join(" · ") });
-        const result = await this.deps.lookup(batch);
-        if (!current()) return;
-        if (!result.success) throw new Error("A Steam nyelvi adatai nem érhetők el.");
+        let result: LanguageResponse;
+        try {
+          result = await this.deps.lookup(batch);
+          if (!result.success) throw new Error("A Steam nyelvi adatai nem érhetők el.");
+        } catch (error) {
+          lookupError = error instanceof Error ? error.message : String(error);
+          result = { success: false, unavailable: batch };
+        }
+        if (!current() || this.deps.getStore() !== store || store.collectionsFromStorage !== storage) return;
+        for (const id of batch) this.attempted.set(id, ++this.attemptSequence);
         for (const id of batch) {
           if ((result.unavailable?.includes(id) && result.hungarian?.[id] !== true)
               || !Object.prototype.hasOwnProperty.call(result.hungarian ?? {}, id)) {
@@ -198,14 +218,15 @@ export class HungarianCollection {
       this.report("Magyar gyűjtemény egyeztetése és mentése…", { ...counts(currentApps), phase: "saving", current: "" });
       const collected = await this.sync(store, currentApps, languages);
       if (!current()) return;
-      const checked = currentApps.filter(app => Object.prototype.hasOwnProperty.call(languages, String(app.appid))).length;
+      const checked = currentApps.filter(app => typeof languages[String(app.appid)] === "boolean").length;
       const found = currentApps.filter(app => languages[String(app.appid)] === true).length;
       if (!pending.length || !batch.length) delay = cached.curator_status === "loading" ? 5000 : 60_000;
-      this.report(`${found} magyar játék · ${checked}/${currentApps.length} ellenőrizve.`
+      this.report(`${found} magyar játék · ${checked}/${currentApps.length} játékhoz van nyelvi adat.`
         + (checked < currentApps.length ? " A keresés a háttérben folytatódik."
           : found ? " Könyvtár → Gyűjtemények." : " Nincs igazolt magyar találat.")
         + (cached.curator_status === "loading" ? " Magyar Felirat: lista betöltése…"
-          : cached.curator_status === "unavailable" ? " A Magyar Felirat listája még nem érhető el; később újrapróbáljuk." : ""),
+          : cached.curator_status === "unavailable" ? " A Magyar Felirat listája még nem érhető el; később újrapróbáljuk." : "")
+        + (lookupError ? ` Az aktuális lekérés sikertelen: ${lookupError}. A többi játék következik.` : ""),
         { ...counts(currentApps), collected, current: "", phase: checked === currentApps.length && cached.curator_status !== "loading" && cached.curator_status !== "unavailable" ? "done" : "between", nextCheckAt: Date.now() + delay });
     } catch (error) {
       if (current()) this.report(error instanceof Error ? error.message : String(error), { phase: "error", current: "", nextCheckAt: Date.now() + 60_000 });

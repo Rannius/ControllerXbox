@@ -30,7 +30,7 @@ export function HungarianProgress({ manager, loadCurator }: {
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
-  const percent = scan.total ? Math.floor(scan.checked / scan.total * 100) : 0;
+  const percent = scan.total ? Math.floor(scan.processed / scan.total * 100) : 0;
   const seconds = Math.max(0, Math.ceil((scan.nextCheckAt - now) / 1000));
   const titles = { waiting: "Várakozás a könyvtárra", cache: "Mentett adatok betöltése", checking: "Játékok ellenőrzése",
     saving: "Gyűjtemény mentése", between: "Keresés folyamatban", done: "Ellenőrzési kör kész", error: "Újrapróbálkozásra vár", paused: "Gyűjtés szünetel" };
@@ -38,14 +38,15 @@ export function HungarianProgress({ manager, loadCurator }: {
     <div style={{ fontWeight: 700, fontSize: "14px" }}>🇭🇺 Magyar játékok</div>
     <div role="status">{titles[scan.phase]}</div>
     <div style={{ display: "flex", justifyContent: "space-between", marginTop: "8px" }}>
-      <span>{scan.checked} / {scan.total} ellenőrizve</span><strong>{percent}%</strong>
+      <span>{scan.processed} / {scan.total} sorra véve</span><strong>{percent}%</strong>
     </div>
     <div role="progressbar" aria-label="Könyvtár ellenőrzése" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}
       style={{ height: "6px", background: "#394553", borderRadius: "4px", overflow: "hidden", margin: "5px 0 8px" }}>
       <div style={{ width: `${percent}%`, height: "100%", background: "#67c1f5", transition: "width .3s" }} />
     </div>
+    <div>{scan.checked} játékhoz van nyelvi adat</div>
     <div>{scan.found} magyar találat · {scan.collected} a gyűjteményben</div>
-    {scan.unknown > 0 && <div>{scan.unknown} játéknál nincs biztos nyelvi adat</div>}
+    {scan.unknown > 0 && <div>{scan.unknown} játéknál hiányzó vagy bizonytalan nyelvi adat</div>}
     {scan.current && <div style={{ marginTop: "8px" }}>Most: {scan.current}</div>}
     <div style={{ opacity: .8, marginTop: "8px" }}>{scan.status}</div>
     {scan.phase !== "paused" && <div style={{ marginTop: "8px" }}>

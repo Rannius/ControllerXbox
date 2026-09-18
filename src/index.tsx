@@ -229,6 +229,7 @@ let originalTileType: TileRender | null = null;
 let tileIconRowClass = "";
 let storeWebSocket: WebSocket | null = null;
 let storeMounted = false;
+let nativeTilesInStore = false;
 let storeWebSocketReady = false;
 let storeMessageId = 1;
 let storeScanTimer: number | undefined;
@@ -958,6 +959,7 @@ function BoosteroidBadge({ state }: { state: BoosteroidState }) {
 
 function XboxTileBadge({ appId }: { appId: number }) {
   const appIdText = String(appId);
+  const [inStore, setInStore] = useState(nativeTilesInStore);
   const [visibility, setVisibility] = useState(badgeVisibility);
   const [hungarian, setHungarian] = useState(() => hungarianStates.get(appIdText) === true);
   const [hungarianSource, setHungarianSource] = useState(() => hungarianSources.get(appIdText) ?? null);
@@ -969,6 +971,7 @@ function XboxTileBadge({ appId }: { appId: number }) {
     visibleAppIds.set(appIdText, (visibleAppIds.get(appIdText) ?? 0) + 1);
     const listener = () => {
       setVisibility(badgeVisibility);
+      setInStore(nativeTilesInStore);
       setHungarian(hungarianStates.get(appIdText) === true);
       setHungarianSource(hungarianSources.get(appIdText) ?? null);
       setState(supportStates.get(appIdText) ?? "loading");
@@ -987,19 +990,20 @@ function XboxTileBadge({ appId }: { appId: number }) {
     };
   }, [appIdText]);
 
+  const scale = 0.88 * (inStore ? (visibility.store_badge_percent ?? 100) : (visibility.library_badge_percent ?? 100)) / 100;
   return <span style={{
     position: "absolute",
     top: "6px",
     left: "6px",
     // Compensate for the visual scale so wrapping follows the tile's real width.
-    width: `calc((100% - 12px) / ${0.88 * (visibility.library_badge_percent ?? 100) / 100})`,
+    width: `calc((100% - 12px) / ${scale})`,
     zIndex: 100,
     display: "inline-flex",
     flexWrap: "wrap",
     justifyContent: "center",
     alignItems: "center",
     gap: "3px",
-    transform: `scale(${0.88 * (visibility.library_badge_percent ?? 100) / 100})`,
+    transform: `scale(${scale})`,
     transformOrigin: "top left",
     pointerEvents: "none",
   }}>
@@ -1514,6 +1518,11 @@ function patchSteamStore(): () => void {
     const historyModule = findModuleExport((value: any) => value?.m_history !== undefined);
     const history = historyModule?.m_history;
     const handleLocation = (pathname: string) => {
+      const nextNativeStore = /^\/(store|steamweb)(\/|$)/.test(pathname);
+      if (nextNativeStore !== nativeTilesInStore) {
+        nativeTilesInStore = nextNativeStore;
+        for (const listener of supportListeners) listener();
+      }
       const inStore = pathname === "/steamweb" || pathname.startsWith("/steamweb/");
       if (inStore && !storeMounted) {
         storeMounted = true;

@@ -181,6 +181,34 @@ test('curator still loading never appears complete and keeps a short refresh int
   const f=fixture();
   f.deps.cached=async()=>({success:true,hungarian:Object.fromEntries(f.apps.map(a=>[a.appid,null])),curator_status:'loading'});
   await f.step();
-  assert.equal(f.manager.progress.checked,5);assert.equal(f.manager.progress.unknown,5);
+  assert.equal(f.manager.progress.checked,0);assert.equal(f.manager.progress.processed,5);assert.equal(f.manager.progress.unknown,5);
   assert.equal(f.manager.progress.phase,'between');assert.equal([...f.timers.values()][0].ms,5000);
 });
+
+for (const failure of ['timeout', 'unsuccessful', 'unavailable']) {
+  test(`906-game library reaches every unseen game despite ${failure} and expired early retries`,async()=>{
+    const f=fixture();
+    f.apps.splice(0,f.apps.length,...Array.from({length:906},(_,i)=>({appid:i+1,app_type:1,installed:false})));
+    for(let id=1;id<=496;id++)f.cache[id]=false;
+    f.deps.lookup=async ids=>{
+      f.requests.push([...ids]);
+      if(ids.includes('906')) { f.cache['905']=false;f.cache['906']=true;return {success:true,hungarian:{'905':false,'906':true}}; }
+      if(failure==='timeout')throw Error('backend timeout');
+      if(failure==='unsuccessful')return {success:false};
+      return {success:true,unavailable:ids,hungarian:Object.fromEntries(ids.map(id=>[id,null]))};
+    };
+    for(let i=0;i<205;i++) {
+      // Even if the earliest failed entries become eligible on every round,
+      // they must not overtake a game that has never been requested.
+      f.manager.retryAfter.clear();
+      await f.step();
+    }
+    assert.equal(new Set(f.requests.flat()).size,410);
+    assert.deepEqual(f.requests.at(-1),['905','906']);
+    assert.equal(f.manager.progress.processed,906);
+    assert.equal(f.manager.progress.checked,498);
+    assert.equal(f.manager.progress.unknown,408);
+    assert.ok(f.store.userCollections[0].apps.has(906));
+    assert.notEqual(f.manager.progress.phase,'done');
+  });
+}
