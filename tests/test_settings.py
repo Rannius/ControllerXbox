@@ -11,12 +11,29 @@ import tempfile
 import time
 import types
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_steam_rate_limit_honors_retry_after_and_stops_new_http_requests(self):
+        error = urllib.error.HTTPError("https://store.steampowered.com/api/appdetails", 429, "rate limit", {"Retry-After": "120"}, None)
+        with patch.object(self.plugin, "_open_request", side_effect=error) as request:
+            result = await self.plugin.get_controller_support(["10"])
+            blocked = await self.plugin.get_controller_support(["20"])
+        self.assertEqual(request.call_count, 1)
+        self.assertGreaterEqual(result["retry_after"], 119)
+        self.assertGreaterEqual(blocked["retry_after"], 119)
+        self.assertIn("10", result["unavailable"])
+        self.plugin._steam_backoff_until = 0
+        payload = {"20": {"success": True, "data": {"supported_languages": "Hungarian", "categories": []}}}
+        with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(payload))):
+            recovered = await self.plugin.get_controller_support(["20"])
+        self.assertTrue(recovered["hungarian"]["20"])
+        self.assertEqual(recovered["retry_after"], 0)
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         decky = types.ModuleType("decky")

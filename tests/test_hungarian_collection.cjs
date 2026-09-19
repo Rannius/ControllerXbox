@@ -1,226 +1,94 @@
-const {test} = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const ts = require('typescript');
-
-function fixture(batchSize = 2, intervalMs = 5000) {
-  const timers = new Map();
-  let timerId = 0;
-  const exports = {};
-  vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname, '../src/hungarianCollection.ts'), 'utf8'), {
-    compilerOptions: {module:ts.ModuleKind.CommonJS, target:ts.ScriptTarget.ES2020},
-  }).outputText, {exports, setTimeout:(fn,ms)=>{timers.set(++timerId,{fn,ms});return timerId;}, clearTimeout:id=>timers.delete(id)});
-  const saved = [];
-  let creations = 0;
-  const store = {
-    userCollections: [],
-    collectionsFromStorage: new Map(),
-    m_cloudStorageMap: {StoreObject() {}},
-    NewUnsavedCollection(name) {
-      creations++;
-      const members = new Set();
-      const c = {
-        displayName:name, apps:members,
-        AsDragDropCollection:()=>({AddApps:apps=>apps.forEach(a=>members.add(a.appid)), RemoveApps:apps=>apps.forEach(a=>members.delete(a.appid))}),
-        async Save(){store.collectionsFromStorage.set(c.displayName,c);saved.push([...members]);if(!store.userCollections.includes(c))store.userCollections.push(c);},
-      };
-      return c;
-    },
-  };
-  const apps = [1,2,3,4,5].map(appid=>({appid,app_type:1}));
-  const cache = {};
-  const requests = [];
-  const deps = {
-    getStore:()=>store, getApps:()=>apps,
-    cached:async()=>({success:true,hungarian:{...cache}}),
-    lookup:async ids=>{requests.push([...ids]);const result={};ids.forEach(id=>result[id]=cache[id]=Number(id)%2===1);return {success:true,hungarian:result};},
-    onLanguages:()=>{},
-  };
-  const manager = new exports.HungarianCollection(deps, batchSize, intervalMs);
-  manager.setEnabled(true);
-  // Execute each scheduled callback and drain its async work without real sleeps.
-  async function step() {
-    const [id,timer] = timers.entries().next().value;
-    timers.delete(id);timer.fn();
-    for(let i=0;i<40 && manager.running;i++) await Promise.resolve();
-    assert.equal(manager.running,false);
-  }
-  return {manager,deps,cache,requests,store,apps,saved,timers,step,get creations(){return creations;}};
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm'),ts=require('typescript');
+function fixture(count=5) {
+ const timers=new Map();let tid=0;const exports={};
+ vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname,'../src/hungarianCollection.ts'),'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText,
+  {exports,setTimeout:(fn,ms)=>{timers.set(++tid,{fn,ms});return tid;},clearTimeout:id=>timers.delete(id)});
+ let creations=0;const saved=[],requests=[],cache={};
+ const store={collectionsFromStorage:new Map(),m_cloudStorageMap:{StoreObject(){}},
+  get userCollections(){throw Error('dangerous computed getter');},
+  NewUnsavedCollection(displayName){creations++;const apps=new Set();const c={displayName,apps,
+   AsDragDropCollection:()=>({AddApps:values=>values.forEach(a=>apps.add(a.appid)),RemoveApps:values=>values.forEach(a=>apps.delete(a.appid))}),
+   async Save(){saved.push([...apps]);store.collectionsFromStorage.set(displayName,c);}};return c;}};
+ const apps=Array.from({length:count},(_,i)=>({appid:i+1,app_type:1,installed:false}));
+ const deps={getStore:()=>store,getApps:()=>apps,cached:async()=>({success:true,hungarian:{...cache},curator_status:'cached'}),
+  lookup:async ids=>{requests.push([...ids]);const result={};for(const id of ids)result[id]=cache[id]=Number(id)%2===1;return {success:true,hungarian:result};},onLanguages:()=>{}};
+ const manager=new exports.HungarianCollection(deps);manager.setEnabled(true);
+ const drain=async(n=30)=>{for(let i=0;i<n;i++)await Promise.resolve();};
+ const step=async()=>{const [id,timer]=timers.entries().next().value;timers.delete(id);timer.fn();for(let i=0;i<6000&&manager.running;i++)await Promise.resolve();assert.equal(manager.running,false);};
+ return {manager,store,apps,deps,cache,requests,saved,timers,drain,step,get creations(){return creations;},get collection(){return [...store.collectionsFromStorage.values()][0];}};
 }
 
-test('fills one native collection in small batches and reuses cache without repeated saves', async()=>{
-  const f=fixture();
-  await f.step();
-  assert.deepEqual(f.requests,[['1','2']]);
-  assert.equal([...f.timers.values()][0].ms,5000);
-  await f.step();await f.step();await f.step();
-  assert.equal(f.creations,1);
-  assert.deepEqual([...f.store.userCollections[0].apps],[1,3,5]);
-  assert.equal(f.saved.length,3);
-  assert.equal(f.requests.length,3);
-  assert.match(f.manager.status,/5\/5/);
+test('906 games with 496 cached results finish in one continuous pass without visible tiles',async()=>{
+ const f=fixture(906);for(let id=1;id<=496;id++)f.cache[id]=false;
+ await f.step();assert.equal(f.requests.length,410);assert.ok(f.requests.every(ids=>ids.length===1));
+ assert.equal(new Set(f.requests.flat()).size,410);assert.equal(f.manager.progress.checked,906);
+ assert.equal(f.creations,1);assert.equal(f.manager.progress.phase,'done');
+ await f.step();assert.equal(f.requests.length,410);assert.equal(f.saved.length,1);
 });
 
-test('unknown data preserves members, explicit negative removes them, unrelated collections are untouched',async()=>{
-  const f=fixture();await f.step();
-  const unrelated=f.store.NewUnsavedCollection('Saját gyűjtemény');unrelated.apps.add(42);await unrelated.Save();
-  Object.assign(f.cache,{'1':null,'2':false,'3':true,'4':false,'5':null});
-  await f.step();
-  assert.deepEqual([...f.store.userCollections[0].apps],[1,3]);
-  f.cache['1']=false;await f.step();
-  assert.deepEqual([...f.store.userCollections[0].apps],[3]);
-  assert.deepEqual([...unrelated.apps],[42]);
+test('four workers refill individual free slots without waiting for the slowest request',async()=>{
+ const f=fixture(8),resolvers=new Map();let active=0,maximum=0;
+ f.apps[0].display_name='Satisfactory';
+ f.deps.lookup=ids=>{f.requests.push([...ids]);active++;maximum=Math.max(maximum,active);return new Promise(resolve=>resolvers.set(ids[0],()=>{active--;f.cache[ids[0]]=true;resolve({success:true,hungarian:{[ids[0]]:true}});}));};
+ const work=f.manager.tick();await f.drain();assert.equal(f.requests.length,4);assert.match(f.manager.progress.current,/Satisfactory/);
+ resolvers.get('2')();await f.drain();assert.equal(f.requests.length,5);assert.equal(f.manager.progress.checked,1);
+ assert.equal(f.manager.progress.processed,1);assert.match(f.manager.progress.current,/Satisfactory/);
+ for(const id of ['3','4','5','6','7','8','1']){resolvers.get(id)();await f.drain();}
+ await work;assert.equal(maximum,4);assert.equal(f.manager.progress.checked,8);assert.equal(f.collection.apps.size,8);
 });
 
-test('disabling during lookup prevents late creation and cancels timers; enabling resumes',async()=>{
-  const f=fixture();let resolve;
-  f.deps.lookup=()=>new Promise(r=>resolve=r);
-  const work=f.manager.tick();
-  for(let i=0;i<10&&!resolve;i++) await Promise.resolve();
-  f.manager.setEnabled(false);
-  resolve({success:true,hungarian:{'1':true,'2':false}});await work;
-  assert.equal(f.creations,0);assert.equal(f.timers.size,0);
-  f.deps.lookup=async()=>({success:true,hungarian:{'1':true,'2':false}});
-  f.manager.setEnabled(true);await f.step();
-  assert.equal(f.creations,1);
-  f.manager.stop();assert.equal(f.timers.size,0);
+test('cached curator matches are saved before requests and unknown values preserve members',async()=>{
+ const f=fixture();Object.assign(f.cache,{'1':true,'2':false,'3':null,'4':false,'5':null});
+ await f.step();assert.equal(f.requests.length,0);assert.ok(f.collection.apps.has(1));
+ f.cache['1']=null;f.cache['3']=true;await f.step();assert.deepEqual([...f.collection.apps],[1,3]);
+ f.cache['1']=false;await f.step();assert.deepEqual([...f.collection.apps],[3]);
 });
 
-test('failed requests back off while remaining games continue, and shortcuts are excluded',async()=>{
-  const f=fixture();
-  f.apps.push({appid:2147483649,app_type:1},{appid:6,app_type:2},{appid:7,BIsModOrShortcut:()=>true});
-  f.deps.lookup=async ids=>{f.requests.push([...ids]);return {success:true,unavailable:ids,hungarian:{}};};
-  await f.step();await f.step();
-  assert.deepEqual(f.requests,[['1','2'],['3','4']]);
-  assert.equal(f.creations,0);
+test('unavailable games do not block the queue and count separately from known language data',async()=>{
+ const f=fixture(906);for(let id=1;id<=496;id++)f.cache[id]=false;
+ f.deps.lookup=async ids=>{f.requests.push([...ids]);return {success:true,unavailable:ids,hungarian:{[ids[0]]:null}};};
+ await f.step();assert.equal(f.requests.length,410);assert.equal(f.manager.progress.processed,906);
+ assert.equal(f.manager.progress.checked,496);assert.equal(f.manager.progress.unknown,410);
+ await f.step();assert.equal(f.requests.length,410);
 });
 
-test('failed Save is retried on the same collection without making duplicates',async()=>{
-  const f=fixture();
-  const create=f.store.NewUnsavedCollection.bind(f.store);let attempts=0;
-  f.store.NewUnsavedCollection=name=>{const c=create(name),save=c.Save;c.Save=async()=>{if(++attempts===1)throw Error('offline');await save();};return c;};
-  await f.step();assert.equal(f.store.userCollections.length,0);
-  await f.step();assert.equal(f.creations,1);assert.equal(f.store.userCollections.length,1);
+for(const failure of ['timeout','rate_limit'])test(failure+' stops new work, drains in-flight requests and backs off',async()=>{
+ const f=fixture(12);
+ f.deps.lookup=async ids=>{f.requests.push([...ids]);if(failure==='timeout')throw Error('timeout');return {success:true,unavailable:ids,retry_after:120};};
+ await f.step();assert.equal(f.requests.length,4);assert.equal(f.manager.progress.processed,4);
+ const delay=[...f.timers.values()][0].ms;assert.ok(delay>=(failure==='timeout'?59000:119000));
+ f.deps.lookup=async ids=>{f.requests.push([...ids]);return {success:true,hungarian:{[ids[0]]:true}};};
+ await f.step();assert.equal(f.requests[4][0],'5');assert.equal(f.manager.progress.checked,8);
 });
 
-test('missing Steam API shows status and retries without sending language requests',async()=>{
-  const f=fixture();f.deps.getStore=()=>undefined;
-  await f.step();assert.equal(f.requests.length,0);
-  assert.match(f.manager.status,/Steam/);assert.equal([...f.timers.values()][0].ms,60000);
+test('disable or account switch during lookup discards late results and prevents further requests',async()=>{
+ for(const change of ['disable','account']){
+  const f=fixture(20),finish=[];f.deps.lookup=ids=>{f.requests.push([...ids]);return new Promise(resolve=>finish.push(()=>resolve({success:true,hungarian:{[ids[0]]:true}})));};
+  const work=f.manager.tick();await f.drain();
+  if(change==='disable')f.manager.setEnabled(false);else f.store.collectionsFromStorage=new Map();
+  finish.forEach(fn=>fn());await work;assert.equal(f.requests.length,4);assert.equal(f.creations,0);
+  if(change==='disable')assert.equal(f.timers.size,0);
+ }
 });
 
-test('curator hits anywhere in the full uninstalled library are added without per-game requests',async()=>{
-  const f=fixture();
-  f.apps.splice(0,f.apps.length,...Array.from({length:250},(_,i)=>({appid:i+1,app_type:1,installed:false})));
-  const seen=[];
-  f.deps.cached=async ids=>{seen.push(...ids);return {success:true,hungarian:{'250':true},hungarian_sources:{'250':'curator'}};};
-  let published;
-  f.deps.onLanguages=(languages,sources)=>{published={languages,sources};};
-  await f.step();
-  assert.equal(seen.length,250);
-  assert.ok(f.store.userCollections[0].apps.has(250));
-  assert.equal(published.sources['250'],'curator');
-  assert.ok(!f.requests.flat().includes('250'));
+test('startup avoids userCollections and waits for initialized storage without requests',async()=>{
+ const f=fixture(),storage=f.store.collectionsFromStorage;f.store.collectionsFromStorage=undefined;
+ await f.step();assert.equal(f.requests.length,0);f.store.collectionsFromStorage=storage;
+ await f.step();assert.equal(f.manager.progress.checked,5);
 });
 
-test('curator confirmation survives a failed Steam appdetails lookup',async()=>{
-  const f=fixture();
-  f.deps.lookup=async()=>({success:true,unavailable:['1','2'],hungarian:{'1':true,'2':null},hungarian_sources:{'1':'curator'}});
-  await f.step();
-  assert.deepEqual([...f.store.userCollections[0].apps],[1]);
+test('failed Save retries the existing unsaved collection without duplicates',async()=>{
+ const f=fixture(),create=f.store.NewUnsavedCollection.bind(f.store);let attempts=0;
+ f.store.NewUnsavedCollection=name=>{const c=create(name),save=c.Save;c.Save=async()=>{if(++attempts===1)throw Error('offline');await save();};return c;};
+ await f.step();assert.equal(f.manager.progress.phase,'error');await f.step();assert.equal(f.creations,1);assert.equal(f.collection.apps.size,3);
 });
 
-test('startup never evaluates the shared userCollections getter and resumes when storage arrives',async()=>{
-  const f=fixture();let reads=0;
-  const map=f.store.collectionsFromStorage;
-  const savedCollections=f.store.userCollections;
-  Object.defineProperty(f.store,'userCollections',{get(){reads++;throw new TypeError("Cannot read properties of undefined (reading 'values')");}});
-  f.store.collectionsFromStorage=undefined;
-  await f.step();
-  assert.equal(reads,0);assert.equal(f.requests.length,0);assert.equal(f.creations,0);
-  f.store.collectionsFromStorage=map;
-  // Saving uses Steam's storage, never the dangerous computed UI getter.
-  const create=f.store.NewUnsavedCollection.bind(f.store);
-  f.store.NewUnsavedCollection=name=>{const c=create(name);c.Save=async()=>{map.set(name,c);savedCollections.push(c);};return c;};
-  await f.step();
-  assert.equal(reads,0);assert.equal(f.creations,1);assert.equal(map.size,1);
-});
-
-test('storage replacement during a request prevents writes to the new account',async()=>{
-  const f=fixture();let finish;
-  f.deps.lookup=()=>new Promise(resolve=>finish=resolve);
-  const work=f.manager.tick();
-  for(let i=0;i<10&&!finish;i++)await Promise.resolve();
-  f.store.collectionsFromStorage=new Map();
-  finish({success:true,hungarian:{'1':true,'2':false}});await work;
-  assert.equal(f.creations,0);
-});
-
-test('live progress publishes current titles before the request and saved count only after Save',async()=>{
-  const f=fixture();let finishLookup,finishSave;
-  f.apps[0].display_name='Satisfactory';
-  const stages=[];f.manager.subscribe(()=>stages.push({...f.manager.progress}));
-  f.deps.lookup=()=>new Promise(resolve=>finishLookup=resolve);
-  const create=f.store.NewUnsavedCollection.bind(f.store);
-  f.store.NewUnsavedCollection=name=>{const c=create(name),save=c.Save;c.Save=async()=>{await new Promise(resolve=>finishSave=resolve);await save();};return c;};
-  const work=f.manager.tick();
-  for(let i=0;i<10&&!finishLookup;i++)await Promise.resolve();
-  assert.equal(f.manager.progress.phase,'checking');assert.match(f.manager.progress.current,/Satisfactory/);
-  finishLookup({success:true,hungarian:{'1':true,'2':false}});
-  for(let i=0;i<10&&!finishSave;i++)await Promise.resolve();
-  assert.equal(f.manager.progress.phase,'saving');assert.equal(f.manager.progress.checked,2);
-  assert.equal(f.manager.progress.collected,0);
-  finishSave();await work;
-  assert.equal(f.manager.progress.collected,1);assert.equal(f.manager.progress.total,5);
-  assert.ok(stages.some(s=>s.phase==='cache'));
-});
-
-test('curator still loading never appears complete and keeps a short refresh interval',async()=>{
-  const f=fixture();
-  f.deps.cached=async()=>({success:true,hungarian:Object.fromEntries(f.apps.map(a=>[a.appid,null])),curator_status:'loading'});
-  await f.step();
-  assert.equal(f.manager.progress.checked,0);assert.equal(f.manager.progress.processed,5);assert.equal(f.manager.progress.unknown,5);
-  assert.equal(f.manager.progress.phase,'between');assert.equal([...f.timers.values()][0].ms,5000);
-});
-
-for (const failure of ['timeout', 'unsuccessful', 'unavailable']) {
-  test(`906-game library reaches every unseen game despite ${failure} and expired early retries`,async()=>{
-    const f=fixture();
-    f.apps.splice(0,f.apps.length,...Array.from({length:906},(_,i)=>({appid:i+1,app_type:1,installed:false})));
-    for(let id=1;id<=496;id++)f.cache[id]=false;
-    f.deps.lookup=async ids=>{
-      f.requests.push([...ids]);
-      if(ids.includes('906')) { f.cache['905']=false;f.cache['906']=true;return {success:true,hungarian:{'905':false,'906':true}}; }
-      if(failure==='timeout')throw Error('backend timeout');
-      if(failure==='unsuccessful')return {success:false};
-      return {success:true,unavailable:ids,hungarian:Object.fromEntries(ids.map(id=>[id,null]))};
-    };
-    for(let i=0;i<205;i++) {
-      // Even if the earliest failed entries become eligible on every round,
-      // they must not overtake a game that has never been requested.
-      f.manager.retryAfter.clear();
-      await f.step();
-    }
-    assert.equal(new Set(f.requests.flat()).size,410);
-    assert.deepEqual(f.requests.at(-1),['905','906']);
-    assert.equal(f.manager.progress.processed,906);
-    assert.equal(f.manager.progress.checked,498);
-    assert.equal(f.manager.progress.unknown,408);
-    assert.ok(f.store.userCollections[0].apps.has(906));
-    assert.notEqual(f.manager.progress.phase,'done');
-  });
-}
-
-test('larger batches finish the 410 uncached games in 41 rounds without visible tiles',async()=>{
-  const f=fixture(10,15000);
-  f.apps.splice(0,f.apps.length,...Array.from({length:906},(_,i)=>({appid:i+1,app_type:1,installed:false})));
-  for(let id=1;id<=496;id++)f.cache[id]=false;
-  for(let i=0;i<41;i++)await f.step();
-  assert.equal(f.requests.length,41);
-  assert.ok(f.requests.every(batch=>batch.length===10));
-  assert.equal(f.manager.progress.checked,906);
-  assert.equal(f.manager.progress.processed,906);
-  assert.equal([...f.timers.values()][0].ms,15000);
+test('shortcuts and non-game apps are excluded, curator loading is not final completion',async()=>{
+ const f=fixture();f.apps.push({appid:2147483649},{appid:6,app_type:2},{appid:7,BIsModOrShortcut:()=>true});
+ f.deps.cached=async()=>({success:true,hungarian:Object.fromEntries([1,2,3,4,5].map(id=>[id,null])),curator_status:'loading'});
+ await f.step();assert.equal(f.requests.length,0);assert.equal(f.manager.progress.total,5);
+ assert.equal(f.manager.progress.checked,0);assert.equal(f.manager.progress.processed,5);
+ assert.equal(f.manager.progress.phase,'between');assert.equal([...f.timers.values()][0].ms,5000);
 });

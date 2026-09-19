@@ -9,6 +9,7 @@ type LanguageResponse = {
   hungarian_sources?: Sources;
   curator_status?: "loading" | "cached" | "unavailable";
   unavailable?: string[];
+  retry_after?: number;
 };
 type Collection = {
   displayName: string;
@@ -58,7 +59,7 @@ export class HungarianCollection {
   private scanStorage?: Store["collectionsFromStorage"];
   private unsaved?: { store: Store; storage: Store["collectionsFromStorage"]; collection: Collection };
 
-  constructor(private deps: Dependencies, private batchSize = 10, private intervalMs = 15_000) {}
+  constructor(private deps: Dependencies) {}
 
   subscribe(listener: (status: string) => void): () => void {
     this.listeners.add(listener);
@@ -152,7 +153,7 @@ export class HungarianCollection {
     this.running = true;
     const revision = this.revision;
     const current = () => this.enabled && revision === this.revision;
-    let delay = this.intervalMs;
+    let delay = 60_000;
     try {
       const store = this.deps.getStore();
       if (!readyCollectionStore(store)) {
@@ -179,38 +180,63 @@ export class HungarianCollection {
         found: list.filter(app => languages[String(app.appid)] === true).length,
         unknown: list.filter(app => languages[String(app.appid)] === null || (this.attempted.has(String(app.appid)) && !Object.prototype.hasOwnProperty.call(languages, String(app.appid)))).length });
       const pending = ids.filter(id => !Object.prototype.hasOwnProperty.call(languages, id));
-      // Bounded batches advance the entire library without a request per visible tile.
-      // Unvisited games always precede retries, even when an early retry expires.
-      // A failed RPC must advance the queue just like an unavailable app result.
-      const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now())
-        .sort((a, b) => (this.attempted.get(a) ?? 0) - (this.attempted.get(b) ?? 0)).slice(0, this.batchSize);
+      const queue = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now())
+        .sort((a, b) => (this.attempted.get(a) ?? 0) - (this.attempted.get(b) ?? 0));
+      const valid = () => current() && this.deps.getStore() === store && store.collectionsFromStorage === storage;
+      if (!valid()) return;
+      this.deps.onLanguages(languages, sources);
+      // Cached and curator matches are collected before any network lookups.
+      const collectedBefore = await this.sync(store, this.apps(), languages);
+      if (!valid()) return;
+      this.report("Folyamatos ellenőrzés, legfeljebb 4 párhuzamos lekéréssel…", { ...counts(apps), collected: collectedBefore, phase: "checking" });
+      const active = new Set<string>();
+      const names = new Map(apps.map(app => [String(app.appid), app.display_name || app.strDisplayName || app.name || `Steam AppID ${app.appid}`]));
+      let cursor = 0;
+      let pauseUntil = 0;
       let lookupError = "";
-      if (batch.length) {
-        this.report("Steam nyelvi adatok ellenőrzése…", { ...counts(apps), phase: "checking",
-          current: batch.map(id => { const app = apps.find(a => String(a.appid) === id)!;
-            return app.display_name || app.strDisplayName || app.name || `Steam AppID ${id}`; }).join(" · ") });
-        let result: LanguageResponse;
-        try {
-          result = await this.deps.lookup(batch);
-          if (!result.success) throw new Error("A Steam nyelvi adatai nem érhetők el.");
-        } catch (error) {
-          lookupError = error instanceof Error ? error.message : String(error);
-          result = { success: false, unavailable: batch };
-        }
-        if (!current() || this.deps.getStore() !== store || store.collectionsFromStorage !== storage) return;
-        for (const id of batch) this.attempted.set(id, ++this.attemptSequence);
-        for (const id of batch) {
+      const showProgress = () => this.report("Folyamatos ellenőrzés, legfeljebb 4 párhuzamos lekéréssel…", {
+        ...counts(this.apps()), phase: "checking", current: Array.from(active, id => names.get(id) || id).join(" · "), nextCheckAt: 0,
+      });
+      const worker = async () => {
+        while (valid() && !pauseUntil && cursor < queue.length) {
+          const id = queue[cursor++];
+          // Ownership may change while a long scan is running.
+          if (!this.apps().some(app => String(app.appid) === id)) continue;
+          active.add(id);
+          showProgress();
+          let result: LanguageResponse;
+          try {
+            result = await this.deps.lookup([id]);
+            if (!result.success) throw new Error("A Steam nyelvi adatai nem érhetők el.");
+          } catch (error) {
+            lookupError = error instanceof Error ? error.message : String(error);
+            result = { success: false, unavailable: [id], retry_after: 60 };
+          }
+          active.delete(id);
+          if (!valid()) return;
+          this.attempted.set(id, ++this.attemptSequence);
+          if ((result.retry_after ?? 0) > 0) {
+            pauseUntil = Math.max(pauseUntil, Date.now() + Math.min(3600, result.retry_after!) * 1000);
+            lookupError = "A Steam átmenetileg nem fogad új lekérést";
+          }
           if ((result.unavailable?.includes(id) && result.hungarian?.[id] !== true)
               || !Object.prototype.hasOwnProperty.call(result.hungarian ?? {}, id)) {
-            this.retryAfter.set(id, Date.now() + 15 * 60_000);
+            this.retryAfter.set(id, Date.now() + ((result.retry_after ?? 0) > 0 ? Math.min(3600, result.retry_after!) * 1000 : 15 * 60_000));
           } else {
             languages[id] = result.hungarian![id];
             sources[id] = result.hungarian_sources?.[id] ?? null;
             this.retryAfter.delete(id);
+            this.deps.onLanguages({ [id]: languages[id] }, { [id]: sources[id] });
           }
+          showProgress();
         }
-
-      }
+      };
+      // No batch barrier: a free worker immediately takes the next game.
+      const workers = await Promise.allSettled(Array.from({ length: Math.min(4, queue.length) }, () => worker()));
+      const failed = workers.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed) throw failed.reason;
+      if (pauseUntil) delay = Math.max(1000, pauseUntil - Date.now());
+      else if (cached.curator_status === "loading") delay = 5000;
       if (!current() || this.deps.getStore() !== store || store.collectionsFromStorage !== storage) return;
       this.deps.onLanguages(languages, sources);
       // Re-read ownership after I/O, including account/library changes.
@@ -220,7 +246,6 @@ export class HungarianCollection {
       if (!current()) return;
       const checked = currentApps.filter(app => typeof languages[String(app.appid)] === "boolean").length;
       const found = currentApps.filter(app => languages[String(app.appid)] === true).length;
-      if (!pending.length || !batch.length) delay = cached.curator_status === "loading" ? 5000 : 60_000;
       this.report(`${found} magyar játék · ${checked}/${currentApps.length} játékhoz van nyelvi adat.`
         + (checked < currentApps.length ? " A keresés a háttérben folytatódik."
           : found ? " Könyvtár → Gyűjtemények." : " Nincs igazolt magyar találat.")

@@ -154,6 +154,7 @@ class HungarianCuratorParser:
 class Plugin:
     def __init__(self) -> None:
         self._cache: Dict[str, Dict[str, Any]] = {}
+        self._steam_backoff_until = 0.0
         self._hungarian_curator_app_ids: Set[str] = set()
         self._hungarian_curator_checked_at = 0.0
         self._hungarian_curator_attempted_at = 0.0
@@ -745,6 +746,8 @@ class Plugin:
         return "hungarian" in names if any(names) else None
 
     def _fetch_support(self, app_id: str) -> Optional[Dict[str, Any]]:
+        if time.time() < self._steam_backoff_until:
+            return None
         request = urllib.request.Request(
             STORE_URL.format(app_id=app_id),
             headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"},
@@ -772,6 +775,14 @@ class Plugin:
                 "hungarian": self._hungarian_support(app_data.get("supported_languages")),
             }
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
+            if not isinstance(error, urllib.error.HTTPError) or error.code == 429 or error.code >= 500:
+                retry_seconds = 60
+                if isinstance(error, urllib.error.HTTPError):
+                    try:
+                        retry_seconds = max(60, min(3600, int(error.headers.get("Retry-After", "60"))))
+                    except (TypeError, ValueError, AttributeError):
+                        pass
+                self._steam_backoff_until = max(self._steam_backoff_until, time.time() + retry_seconds)
             decky.logger.debug("Steam lookup failed for %s: %s", app_id, error)
             return None
 
@@ -1800,6 +1811,7 @@ class Plugin:
             **self._merge_hungarian_sources(requested, hungarian),
             "unavailable": unavailable,
             "cached_for_days": 30,
+            "retry_after": max(0, int(self._steam_backoff_until - time.time() + 0.999)),
         }
 
     def _delete_cache_file(self) -> None:
