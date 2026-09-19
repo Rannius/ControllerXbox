@@ -21,7 +21,7 @@ export function HungarianProgress({ manager, loadCurator }: {
         const result = await loadCurator();
         if (active) { setCurator(result); setCuratorError(!result.success); }
       } catch { if (active) setCuratorError(true); }
-      if (active) timer = setTimeout(() => void poll(), 2000);
+      if (active) timer = setTimeout(() => void poll(), manager.progress.phase === "done" ? 60_000 : 2000);
     };
     void poll();
     return () => { active = false; clearTimeout(timer); };
@@ -33,7 +33,7 @@ export function HungarianProgress({ manager, loadCurator }: {
   const percent = scan.total ? Math.floor(scan.processed / scan.total * 100) : 0;
   const seconds = Math.max(0, Math.ceil((scan.nextCheckAt - now) / 1000));
   const titles = { waiting: "Várakozás a könyvtárra", cache: "Mentett adatok betöltése", checking: "Játékok ellenőrzése",
-    saving: "Gyűjtemény mentése", between: "Keresés folyamatban", done: "Ellenőrzési kör kész", error: "Újrapróbálkozásra vár", paused: "Gyűjtés szünetel" };
+    saving: "Gyűjtemény mentése", between: "Következő ellenőrzésre vár", done: "Ellenőrzés kész", error: "Újrapróbálkozásra vár", paused: "Gyűjtés szünetel" };
   return <div style={{ padding: "12px", borderRadius: "8px", background: "rgba(0,0,0,.22)", fontSize: "12px", lineHeight: 1.5, overflowWrap: "anywhere" }}>
     <div style={{ fontWeight: 700, fontSize: "14px" }}>🇭🇺 Magyar játékok</div>
     <div role="status">{titles[scan.phase]}</div>
@@ -57,7 +57,7 @@ export function HungarianProgress({ manager, loadCurator }: {
         : "nem érhető el; később újrapróbáljuk"}
     </div>}
     {scan.nextCheckAt > 0 && scan.phase !== "paused" && <div style={{ opacity: .65, marginTop: "6px" }}>
-      {seconds ? `Következő ellenőrzés: ${seconds} mp` : "Folytatásra vár…"} · a háttérben is halad
+      {seconds ? `Következő ${scan.phase === "done" ? "változásellenőrzés" : "ellenőrzés"}: ${Math.floor(seconds / 60)} p ${seconds % 60} mp` : "Következő ellenőrzésre vár…"}
     </div>}
   </div>;
 }

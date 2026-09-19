@@ -155,6 +155,15 @@ class Plugin:
     def __init__(self) -> None:
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._steam_backoff_until = 0.0
+        self._steam_failures = 0
+        self._steam_error_lock = threading.Lock()
+        self._steam_gate = asyncio.Semaphore(4)
+        self._steam_tasks: Dict[str, asyncio.Task] = {}
+        self._steam_retry: Dict[str, Dict[str, float]] = {}
+        self._steam_scan_epoch = time.time()
+        self._steam_state_lock = asyncio.Lock()
+        self._steam_stopping = False
+        self._catalog_pending: Dict[str, Dict[str, float]] = {"gfn": {}, "boosteroid": {}}
         self._hungarian_curator_app_ids: Set[str] = set()
         self._hungarian_curator_checked_at = 0.0
         self._hungarian_curator_attempted_at = 0.0
@@ -187,6 +196,7 @@ class Plugin:
         settings_directory = getattr(decky, "decky_SETTINGS_DIR", None) or getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", None)
         if not settings_directory:
             raise RuntimeError("Decky settings directory is unavailable")
+        self._steam_state_path = Path(settings_directory) / "steam-scan-state.json"
         self._cache_path = Path(settings_directory) / "controller-support-cache.json"
         self._hungarian_curator_cache_path = Path(settings_directory) / "hungarian-curator-cache.json"
         self._gfn_cache_path = Path(settings_directory) / "geforce-now-catalog-cache.json"
@@ -205,6 +215,7 @@ class Plugin:
 
     async def _main(self) -> None:
         await self._load_cache()
+        await self._load_steam_scan_state()
         await self._load_hungarian_curator_cache()
         await self._load_gfn_cache()
         await self._load_boosteroid_cache()
@@ -213,12 +224,142 @@ class Plugin:
         decky.logger.info("ControllerXbox backend loaded")
 
     async def _unload(self) -> None:
+        self._steam_stopping = True
+        await asyncio.gather(*list(self._steam_tasks.values()), return_exceptions=True)
+        await self._save_steam_scan_state()
         await self._stop_hungarian_curator_refresh()
         await self._save_cache()
         await self._save_gfn_cache()
         await self._save_boosteroid_cache()
         await self._save_settings()
         await self._save_watchlist()
+
+    @staticmethod
+    def _valid_pending(value: Any) -> Dict[str, float]:
+        if not isinstance(value, dict):
+            return {}
+        now = time.time()
+        return {str(key): float(stamp) for key, stamp in value.items()
+                if str(key).isdigit() and type(stamp) in (int, float) and 0 < stamp <= now}
+
+    async def _accept_catalog(self, provider: str, fetched: Set[str], maintenance: Optional[Set[str]] = None) -> None:
+        old = getattr(self, "_" + provider + "_app_ids")
+        missing = old - fetched
+        if not fetched or len(missing) > max(10, len(old) * 0.2):
+            raise ValueError("Suspicious catalog loss; retaining previous snapshot")
+        now = time.time()
+        previous = self._catalog_pending[provider]
+        # Two successful snapshots, at least 15 minutes apart. A cache hit or
+        # repeated manual click is never a second independent confirmation.
+        pending = {app_id: previous.get(app_id, now) for app_id in missing
+                   if app_id not in previous or now - previous[app_id] < 900}
+        accepted = fetched | set(pending)
+        payload = {"checked_at": now, "steam_app_ids": sorted(accepted), "pending_removals": pending}
+        accepted_maintenance: Set[str] = set()
+        if provider == "boosteroid":
+            accepted_maintenance = (maintenance or set()) | (self._boosteroid_maintenance_app_ids & set(pending))
+            payload.update({"schema_version": BOOSTEROID_CACHE_SCHEMA_VERSION,
+                            "maintenance_app_ids": sorted(accepted_maintenance)})
+        await self._run_blocking(self._write_file_atomically, getattr(self, "_" + provider + "_cache_path"),
+                                 provider + "-cache-", json.dumps(payload, separators=(",", ":")))
+        setattr(self, "_" + provider + "_app_ids", accepted)
+        setattr(self, "_" + provider + "_checked_at", now)
+        setattr(self, "_" + provider + "_last_error", "")
+        self._catalog_pending[provider] = pending
+        if provider == "boosteroid":
+            self._boosteroid_maintenance_app_ids = accepted_maintenance
+
+    async def get_catalog_status(self) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"success": True}
+        for provider, ttl in (("gfn", GFN_CACHE_TTL_SECONDS), ("boosteroid", BOOSTEROID_CACHE_TTL_SECONDS)):
+            checked = getattr(self, "_" + provider + "_checked_at")
+            error = getattr(self, "_" + provider + "_last_error")
+            result[provider] = {"checked_at": checked, "error": error,
+                                "stale": bool(error or not checked or time.time() - checked >= ttl),
+                                "entries": len(getattr(self, "_" + provider + "_app_ids")),
+                                "pending_removals": len(self._catalog_pending[provider])}
+        return result
+
+    async def _load_steam_scan_state(self) -> None:
+        try:
+            parsed = json.loads(await self._run_blocking(lambda: self._steam_state_path.read_text(encoding="utf-8")))
+            if not isinstance(parsed, dict) or parsed.get("schema_version") != 1:
+                return
+            now = time.time()
+            entries = parsed.get("retry", {})
+            if isinstance(entries, dict):
+                for key, value in entries.items():
+                    if (str(key).isdigit() and isinstance(value, dict)
+                            and type(value.get("attempted_at")) in (int, float)
+                            and type(value.get("retry_at")) in (int, float)
+                            and 0 < value["attempted_at"] <= now
+                            and value["attempted_at"] <= value["retry_at"] <= now + 3600):
+                        self._steam_retry[str(key)] = value
+            backoff = parsed.get("backoff_until", 0)
+            if type(backoff) in (int, float) and now < backoff <= now + 3600:
+                self._steam_backoff_until = backoff
+            failures = parsed.get("failures", 0)
+            if type(failures) is int and 0 <= failures <= 100:
+                self._steam_failures = failures
+            epoch = parsed.get("epoch")
+            if type(epoch) in (int, float) and 0 < epoch <= now:
+                self._steam_scan_epoch = epoch
+        except (OSError, ValueError, TypeError) as error:
+            decky.logger.debug("Steam scan state could not be loaded: %s", error)
+
+    async def _save_steam_scan_state(self) -> None:
+        async with self._steam_state_lock:
+            payload = json.dumps({"schema_version": 1, "epoch": self._steam_scan_epoch,
+                                  "backoff_until": self._steam_backoff_until, "failures": self._steam_failures,
+                                  "retry": self._steam_retry}, separators=(",", ":"))
+            await self._run_blocking(self._write_file_atomically, self._steam_state_path, "steam-scan-", payload)
+
+    async def _get_support_shared(self, app_id: str) -> Optional[Dict[str, Any]]:
+        if self._steam_stopping:
+            return None
+        task = self._steam_tasks.get(app_id)
+        if task is None:
+            task = asyncio.create_task(self._lookup_and_save_support(app_id, self._steam_scan_epoch))
+            self._steam_tasks[app_id] = task
+            def completed(done: asyncio.Task) -> None:
+                if self._steam_tasks.get(app_id) is done:
+                    self._steam_tasks.pop(app_id, None)
+                if not done.cancelled():
+                    done.exception()
+            task.add_done_callback(completed)
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._steam_tasks.get(app_id) is task:
+                self._steam_tasks.pop(app_id, None)
+
+    async def _lookup_and_save_support(self, app_id: str, epoch: float) -> Optional[Dict[str, Any]]:
+        async with self._steam_gate:
+            if self._steam_stopping or epoch != self._steam_scan_epoch:
+                return None
+            entry = self._cache.get(app_id)
+            now = time.time()
+            if isinstance(entry, dict) and self._is_fresh(entry, now) and entry.get("controller_support_level") in {"full", "partial", "none"}:
+                return entry
+            if self._steam_retry.get(app_id, {}).get("retry_at", 0) > now or self._steam_backoff_until > now:
+                return None
+            details = await self._run_blocking(self._fetch_support, app_id)
+            if epoch != self._steam_scan_epoch or self._steam_stopping:
+                return None
+            now = time.time()
+            async with self._lock:
+                if details is not None:
+                    self._cache[app_id] = {"schema_version": CACHE_SCHEMA_VERSION, **details, "checked_at": now}
+                    self._steam_retry.pop(app_id, None)
+                    if now >= self._steam_backoff_until:
+                        self._steam_failures = 0
+                else:
+                    self._steam_retry[app_id] = {"attempted_at": now,
+                        "retry_at": self._steam_backoff_until if self._steam_backoff_until > now else now + 900}
+            if details is not None:
+                await self._save_cache()
+            await self._save_steam_scan_state()
+            return details
 
     async def _load_cache(self) -> None:
         try:
@@ -362,6 +503,7 @@ class Plugin:
             checked_at = parsed.get("checked_at") if isinstance(parsed, dict) else None
             app_ids = parsed.get("steam_app_ids") if isinstance(parsed, dict) else None
             if isinstance(checked_at, (int, float)) and isinstance(app_ids, list):
+                self._catalog_pending["gfn"] = self._valid_pending(parsed.get("pending_removals"))
                 self._gfn_checked_at = float(checked_at)
                 self._gfn_app_ids = {str(app_id) for app_id in app_ids if str(app_id).isdigit()}
         except FileNotFoundError:
@@ -374,7 +516,7 @@ class Plugin:
             if not self._gfn_checked_at or not self._gfn_app_ids:
                 return
             payload = json.dumps(
-                {"checked_at": self._gfn_checked_at, "steam_app_ids": sorted(self._gfn_app_ids)},
+                {"checked_at": self._gfn_checked_at, "steam_app_ids": sorted(self._gfn_app_ids), "pending_removals": self._catalog_pending["gfn"]},
                 separators=(",", ":"),
             )
             await self._run_blocking(self._write_file_atomically, self._gfn_cache_path, "gfn-cache-", payload)
@@ -392,6 +534,7 @@ class Plugin:
                 and isinstance(checked_at, (int, float))
                 and isinstance(app_ids, list)
             ):
+                self._catalog_pending["boosteroid"] = self._valid_pending(parsed.get("pending_removals"))
                 self._boosteroid_checked_at = float(checked_at)
                 self._boosteroid_app_ids = {str(app_id) for app_id in app_ids if str(app_id).isdigit()}
                 if isinstance(maintenance_ids, list):
@@ -415,6 +558,7 @@ class Plugin:
                     "checked_at": self._boosteroid_checked_at,
                     "steam_app_ids": sorted(self._boosteroid_app_ids),
                     "maintenance_app_ids": sorted(self._boosteroid_maintenance_app_ids),
+                    "pending_removals": self._catalog_pending["boosteroid"],
                 },
                 separators=(",", ":"),
             )
@@ -776,13 +920,16 @@ class Plugin:
             }
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
             if not isinstance(error, urllib.error.HTTPError) or error.code == 429 or error.code >= 500:
-                retry_seconds = 60
+                with self._steam_error_lock:
+                    self._steam_failures += 1
+                    retry_seconds = min(900, 60 * (2 ** min(self._steam_failures - 1, 4)))
                 if isinstance(error, urllib.error.HTTPError):
                     try:
-                        retry_seconds = max(60, min(3600, int(error.headers.get("Retry-After", "60"))))
+                        retry_seconds = max(retry_seconds, min(3600, int(error.headers.get("Retry-After", "60"))))
                     except (TypeError, ValueError, AttributeError):
                         pass
-                self._steam_backoff_until = max(self._steam_backoff_until, time.time() + retry_seconds)
+                with self._steam_error_lock:
+                    self._steam_backoff_until = max(self._steam_backoff_until, time.time() + retry_seconds)
             decky.logger.debug("Steam lookup failed for %s: %s", app_id, error)
             return None
 
@@ -1097,6 +1244,7 @@ class Plugin:
 
     def _fetch_gfn_catalog(self) -> Set[str]:
         steam_app_ids: Set[str] = set()
+        seen_cursors: Set[str] = set()
         cursor: Optional[str] = None
         has_next_page = True
         for _ in range(20):
@@ -1120,12 +1268,21 @@ class Plugin:
             )
             with self._open_request(request, timeout=20) as response:
                 result = json.load(response)
-            apps = result.get("data", {}).get("apps")
+            if not isinstance(result, dict) or result.get("errors") or not isinstance(result.get("data"), dict):
+                raise ValueError("Invalid GeForce NOW catalog response")
+            apps = result["data"].get("apps")
             if not isinstance(apps, dict):
                 raise ValueError("Invalid GeForce NOW catalog response")
-            for game in apps.get("items", []):
+            items = apps.get("items")
+            page_info = apps.get("pageInfo")
+            if (not isinstance(items, list) or not items or apps.get("numberReturned") != len(items)
+                    or not isinstance(page_info, dict) or type(page_info.get("hasNextPage")) is not bool):
+                raise ValueError("Incomplete GeForce NOW catalog page")
+            for game in items:
                 if not isinstance(game, dict):
-                    continue
+                    raise ValueError("Invalid GeForce NOW game")
+                if not isinstance(game.get("variants"), list):
+                    raise ValueError("Invalid GeForce NOW variants")
                 for variant in game.get("variants", []):
                     if not isinstance(variant, dict) or variant.get("appStore") != "STEAM":
                         continue
@@ -1141,8 +1298,9 @@ class Plugin:
             cursor = str(page_info.get("endCursor", "")) if isinstance(page_info, dict) else ""
             if not has_next_page:
                 break
-            if not cursor:
+            if not cursor or cursor in seen_cursors:
                 raise ValueError("GeForce NOW catalog cursor is missing")
+            seen_cursors.add(cursor)
         if has_next_page:
             raise ValueError("GeForce NOW catalog exceeded the page limit")
         if not steam_app_ids:
@@ -1160,18 +1318,11 @@ class Plugin:
             self._gfn_attempted_at = now
             try:
                 fetched = await self._run_blocking(self._fetch_gfn_catalog)
+                await self._accept_catalog("gfn", fetched)
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
                 self._gfn_last_error = str(error)
                 decky.logger.warning("GeForce NOW catalog refresh failed: %s", error)
                 return bool(self._gfn_app_ids)
-            self._gfn_app_ids = fetched
-            self._gfn_checked_at = time.time()
-            self._gfn_last_error = ""
-            payload = json.dumps(
-                {"checked_at": self._gfn_checked_at, "steam_app_ids": sorted(self._gfn_app_ids)},
-                separators=(",", ":"),
-            )
-            await self._run_blocking(self._write_file_atomically, self._gfn_cache_path, "gfn-cache-", payload)
             return True
 
     async def get_gfn_availability(self, app_ids: Any) -> Dict[str, Any]:
@@ -1234,6 +1385,8 @@ class Plugin:
         maintenance_app_ids: Set[str] = set()
         unresolved_titles: Dict[str, List[bool]] = {}
         last_page: Optional[int] = None
+        expected_total: Optional[int] = None
+        seen_games: Set[int] = set()
         for page in range(1, 51):
             request = urllib.request.Request(
                 BOOSTEROID_URL.format(page=page),
@@ -1262,9 +1415,18 @@ class Plugin:
                 raise ValueError("Boosteroid catalog page count changed during refresh")
             if page < reported_last_page and not items:
                 raise ValueError("Boosteroid catalog page is empty")
+            total, per_page = meta.get("total"), meta.get("per_page")
+            if (type(total) is not int or total < 1 or type(per_page) is not int or per_page < 1
+                    or (total + per_page - 1) // per_page != reported_last_page
+                    or len(items) != min(per_page, total - (page - 1) * per_page)):
+                raise ValueError("Incomplete Boosteroid catalog page")
+            if expected_total is not None and total != expected_total:
+                raise ValueError("Boosteroid catalog size changed during refresh")
+            expected_total = total
             for game in items:
-                if not isinstance(game, dict):
-                    continue
+                if not isinstance(game, dict) or type(game.get("id")) is not int or game["id"] in seen_games:
+                    raise ValueError("Invalid or repeated Boosteroid game")
+                seen_games.add(game["id"])
                 stores = game.get("stores")
                 steam_url = stores.get("steam") if isinstance(stores, dict) else None
                 match = re.search(r"/app/(\d+)", str(steam_url or ""))
@@ -1340,29 +1502,11 @@ class Plugin:
                 fetched_app_ids, fetched_maintenance_ids = await self._run_blocking(
                     self._fetch_boosteroid_catalog
                 )
+                await self._accept_catalog("boosteroid", fetched_app_ids, fetched_maintenance_ids)
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
                 self._boosteroid_last_error = str(error)
                 decky.logger.warning("Boosteroid catalog refresh failed: %s", error)
                 return bool(self._boosteroid_app_ids)
-            self._boosteroid_app_ids = fetched_app_ids
-            self._boosteroid_maintenance_app_ids = fetched_maintenance_ids
-            self._boosteroid_checked_at = time.time()
-            self._boosteroid_last_error = ""
-            payload = json.dumps(
-                {
-                    "schema_version": BOOSTEROID_CACHE_SCHEMA_VERSION,
-                    "checked_at": self._boosteroid_checked_at,
-                    "steam_app_ids": sorted(self._boosteroid_app_ids),
-                    "maintenance_app_ids": sorted(self._boosteroid_maintenance_app_ids),
-                },
-                separators=(",", ":"),
-            )
-            await self._run_blocking(
-                self._write_file_atomically,
-                self._boosteroid_cache_path,
-                "boosteroid-cache-",
-                payload,
-            )
             return True
 
     async def refresh_cloud_catalogs(self) -> Dict[str, Any]:
@@ -1756,7 +1900,10 @@ class Plugin:
                 if isinstance(entry, dict) and self._is_fresh(entry, now):
                     value = entry.get("hungarian")
                     languages[app_id] = value if isinstance(value, bool) else None
-        return {"success": True, **self._merge_hungarian_sources(requested, languages)}
+        return {"success": True, **self._merge_hungarian_sources(requested, languages),
+                "scan_epoch": self._steam_scan_epoch,
+                "scan_attempts": {key: value["attempted_at"] for key, value in self._steam_retry.items() if key in requested},
+                "scan_retry_after": {key: value["retry_at"] for key, value in self._steam_retry.items() if key in requested}}
 
     async def get_controller_support(self, app_ids: Any) -> Dict[str, Any]:
         """Return official controller and Hungarian language support from one Steam lookup."""
@@ -1784,26 +1931,16 @@ class Plugin:
                 else:
                     missing.append(app_id)
 
-        fetched = await asyncio.gather(*(self._run_blocking(self._fetch_support, app_id) for app_id in missing))
-        changed = False
-        async with self._lock:
-            for app_id, details in zip(missing, fetched):
-                if details is not None:
-                    level = details["controller_support_level"]
-                    self._cache[app_id] = {
-                        "schema_version": CACHE_SCHEMA_VERSION,
-                        **details,
-                        "checked_at": now,
-                    }
-                    levels[app_id] = level
-                    results[app_id] = level != "none"
-                    hungarian[app_id] = details["hungarian"]
-                    changed = True
-                else:
-                    unavailable.append(app_id)
-                    hungarian[app_id] = None
-        if changed:
-            await self._save_cache()
+        fetched = await asyncio.gather(*(self._get_support_shared(app_id) for app_id in missing))
+        for app_id, details in zip(missing, fetched):
+            if details is not None:
+                level = details["controller_support_level"]
+                levels[app_id] = level
+                results[app_id] = level != "none"
+                hungarian[app_id] = details["hungarian"]
+            else:
+                unavailable.append(app_id)
+                hungarian[app_id] = None
         return {
             "success": True,
             "support": results,
@@ -1833,6 +1970,11 @@ class Plugin:
             pass
 
     async def clear_cache(self) -> Dict[str, Any]:
+        self._steam_scan_epoch = time.time()
+        self._steam_retry.clear()
+        self._steam_backoff_until = 0.0
+        self._steam_failures = 0
+        await self._save_steam_scan_state()
         await self._stop_hungarian_curator_refresh()
         self._hungarian_curator_app_ids = set()
         self._hungarian_curator_checked_at = 0.0
@@ -1853,6 +1995,7 @@ class Plugin:
                 decky.logger.warning("Could not remove controller cache: %s", error)
         async with self._gfn_lock:
             gfn_removed = len(self._gfn_app_ids)
+            self._catalog_pending["gfn"] = {}
             self._gfn_app_ids = set()
             self._gfn_checked_at = 0.0
             self._gfn_last_error = ""
@@ -1862,6 +2005,7 @@ class Plugin:
                 decky.logger.warning("Could not remove GeForce NOW cache: %s", error)
         async with self._boosteroid_lock:
             boosteroid_removed = len(self._boosteroid_app_ids)
+            self._catalog_pending["boosteroid"] = {}
             self._boosteroid_app_ids = set()
             self._boosteroid_maintenance_app_ids = set()
             self._boosteroid_checked_at = 0.0

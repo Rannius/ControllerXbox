@@ -2,6 +2,7 @@ import { getHungarianBadgeHtml, HungarianSource } from "./hungarianBadge";
 import { CloudResumeRefresh } from "./cloudResumeRefresh";
 import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
 import { HungarianProgress, CuratorProgress } from "./HungarianProgress";
+import { CatalogStatus } from "./CatalogStatus";
 import { HungarianCollection, readyCollectionStore } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
@@ -22,6 +23,9 @@ const NOTIFICATION_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
 type SupportResponse = {
   success: boolean;
+  scan_epoch?: number;
+  scan_attempts?: Record<string, number>;
+  scan_retry_after?: Record<string, number>;
   support?: Record<string, boolean>;
   levels?: Record<string, "full" | "partial" | "none">;
   hungarian?: Record<string, boolean | null>;
@@ -474,15 +478,21 @@ const hungarianCollection = new HungarianCollection({
     const hungarian: NonNullable<SupportResponse["hungarian"]> = {};
     const hungarian_sources: NonNullable<SupportResponse["hungarian_sources"]> = {};
     let curator_status: SupportResponse["curator_status"];
+    let scan_epoch: number | undefined;
+    const scan_attempts: Record<string, number> = {};
+    const scan_retry_after: Record<string, number> = {};
     for (let offset = 0; offset < ids.length; offset += 10000) {
       const result = await withBackendTimeout(getHungarianLibraryCache(ids.slice(offset, offset + 10000)));
       if (!result.success) return result;
       Object.assign(hungarian, result.hungarian);
       Object.assign(hungarian_sources, result.hungarian_sources);
       curator_status = result.curator_status;
+      scan_epoch = result.scan_epoch;
+      Object.assign(scan_attempts, result.scan_attempts);
+      Object.assign(scan_retry_after, result.scan_retry_after);
       scheduleCuratorBadgeRefresh(curator_status);
     }
-    return { success: true, hungarian, hungarian_sources, curator_status };
+    return { success: true, hungarian, hungarian_sources, curator_status, scan_epoch, scan_attempts, scan_retry_after };
   },
   lookup: ids => withBackendTimeout(getControllerSupport(ids), 60_000),
   onLanguages: (languages, sources) => {
@@ -2194,6 +2204,7 @@ function Content() {
   };
 
   if (page === "watchlist") return <PanelSection title="Figyelőlista">
+    <PanelSectionRow><CatalogStatus /></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={cloudRefreshing}
       onClick={() => void refreshWatchedClouds()}>{cloudRefreshing ? "Katalógusok frissítése…" : "GFN és Boosteroid ellenőrzése most"}</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{cloudRefreshStatus || "Ébredéskor mindkét katalógus frissül. Ellenőrzés 15 percenként is, amíg a plugin fut."}</div></PanelSectionRow>
@@ -2289,6 +2300,7 @@ function Content() {
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>Beállítások</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><HungarianProgress manager={hungarianCollection} loadCurator={loadCuratorProgress} /></PanelSectionRow>
+    <PanelSectionRow><CatalogStatus /></PanelSectionRow>
     <PanelSectionRow><div>{stats
       ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
         + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)

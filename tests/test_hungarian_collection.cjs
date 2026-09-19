@@ -25,7 +25,19 @@ test('906 games with 496 cached results finish in one continuous pass without vi
  await f.step();assert.equal(f.requests.length,410);assert.ok(f.requests.every(ids=>ids.length===1));
  assert.equal(new Set(f.requests.flat()).size,410);assert.equal(f.manager.progress.checked,906);
  assert.equal(f.creations,1);assert.equal(f.manager.progress.phase,'done');
+ assert.equal([...f.timers.values()][0].ms,900000);
+ assert.doesNotMatch(f.manager.status,/keresés a háttérben folytatódik/);
  await f.step();assert.equal(f.requests.length,410);assert.equal(f.saved.length,1);
+});
+
+test('restart restores deferred games while new games are checked immediately',async()=>{
+ const f=fixture(5),now=Date.now()/1000;
+ f.deps.cached=async()=>({success:true,hungarian:{'1':true},curator_status:'cached',scan_epoch:1,
+  scan_attempts:{'2':now-10,'3':now-10},scan_retry_after:{'2':now+800,'3':now+800}});
+ await f.step();assert.deepEqual(f.requests.flat(),['4','5']);
+ assert.equal(f.manager.progress.processed,5);assert.equal(f.manager.progress.checked,3);
+ assert.ok([...f.timers.values()][0].ms>790000);
+ assert.match(f.manager.status,/hiányzó adatokat később/);
 });
 
 test('four workers refill individual free slots without waiting for the slowest request',async()=>{

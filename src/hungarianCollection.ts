@@ -10,6 +10,9 @@ type LanguageResponse = {
   curator_status?: "loading" | "cached" | "unavailable";
   unavailable?: string[];
   retry_after?: number;
+  scan_epoch?: number;
+  scan_attempts?: Record<string, number>;
+  scan_retry_after?: Record<string, number>;
 };
 type Collection = {
   displayName: string;
@@ -55,7 +58,7 @@ export class HungarianCollection {
   private running = false;
   private retryAfter = new Map<string, number>();
   private attempted = new Map<string, number>();
-  private attemptSequence = 0;
+  private scanEpoch?: number;
   private scanStorage?: Store["collectionsFromStorage"];
   private unsaved?: { store: Store; storage: Store["collectionsFromStorage"]; collection: Collection };
 
@@ -153,7 +156,7 @@ export class HungarianCollection {
     this.running = true;
     const revision = this.revision;
     const current = () => this.enabled && revision === this.revision;
-    let delay = 60_000;
+    let delay = 15 * 60_000;
     try {
       const store = this.deps.getStore();
       if (!readyCollectionStore(store)) {
@@ -172,6 +175,13 @@ export class HungarianCollection {
       const cached = await this.deps.cached(ids);
       if (!current()) return;
       if (!cached.success) throw new Error("A nyelvi gyorsítótár nem érhető el.");
+      if (cached.scan_epoch !== undefined && cached.scan_epoch !== this.scanEpoch) {
+        this.scanEpoch = cached.scan_epoch;
+        this.attempted.clear();
+        this.retryAfter.clear();
+      }
+      for (const [id, stamp] of Object.entries(cached.scan_attempts ?? {})) this.attempted.set(id, stamp * 1000);
+      for (const [id, stamp] of Object.entries(cached.scan_retry_after ?? {})) this.retryAfter.set(id, stamp * 1000);
       const languages = { ...cached.hungarian };
       const sources = { ...cached.hungarian_sources };
       const counts = (list: App[]) => ({ total: list.length,
@@ -214,7 +224,7 @@ export class HungarianCollection {
           }
           active.delete(id);
           if (!valid()) return;
-          this.attempted.set(id, ++this.attemptSequence);
+          this.attempted.set(id, Date.now());
           if ((result.retry_after ?? 0) > 0) {
             pauseUntil = Math.max(pauseUntil, Date.now() + Math.min(3600, result.retry_after!) * 1000);
             lookupError = "A Steam átmenetileg nem fogad új lekérést";
@@ -237,6 +247,10 @@ export class HungarianCollection {
       if (failed) throw failed.reason;
       if (pauseUntil) delay = Math.max(1000, pauseUntil - Date.now());
       else if (cached.curator_status === "loading") delay = 5000;
+      else {
+        const retries = pending.map(id => this.retryAfter.get(id) ?? 0).filter(stamp => stamp > Date.now());
+        if (retries.length) delay = Math.min(delay, Math.max(1000, Math.min(...retries) - Date.now()));
+      }
       if (!current() || this.deps.getStore() !== store || store.collectionsFromStorage !== storage) return;
       this.deps.onLanguages(languages, sources);
       // Re-read ownership after I/O, including account/library changes.
@@ -247,11 +261,11 @@ export class HungarianCollection {
       const checked = currentApps.filter(app => typeof languages[String(app.appid)] === "boolean").length;
       const found = currentApps.filter(app => languages[String(app.appid)] === true).length;
       this.report(`${found} magyar játék · ${checked}/${currentApps.length} játékhoz van nyelvi adat.`
-        + (checked < currentApps.length ? " A keresés a háttérben folytatódik."
-          : found ? " Könyvtár → Gyűjtemények." : " Nincs igazolt magyar találat.")
+        + (checked < currentApps.length ? " Az ellenőrzési kör kész; a hiányzó adatokat később újrapróbáljuk."
+          : " Kész. Új játékok és lejárt adatok ellenőrzése 15 percenként.")
         + (cached.curator_status === "loading" ? " Magyar Felirat: lista betöltése…"
           : cached.curator_status === "unavailable" ? " A Magyar Felirat listája még nem érhető el; később újrapróbáljuk." : "")
-        + (lookupError ? ` Az aktuális lekérés sikertelen: ${lookupError}. A többi játék következik.` : ""),
+        + (lookupError ? ` Átmeneti szünet: ${lookupError}.` : ""),
         { ...counts(currentApps), collected, current: "", phase: checked === currentApps.length && cached.curator_status !== "loading" && cached.curator_status !== "unavailable" ? "done" : "between", nextCheckAt: Date.now() + delay });
     } catch (error) {
       if (current()) this.report(error instanceof Error ? error.message : String(error), { phase: "error", current: "", nextCheckAt: Date.now() + 60_000 });

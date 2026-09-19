@@ -18,6 +18,116 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_catalog_loss_requires_two_spaced_successes_and_survives_restart(self):
+        for provider in ("gfn", "boosteroid"):
+            setattr(self.plugin, "_" + provider + "_app_ids", {"1", "2"})
+            await self.plugin._accept_catalog(provider, {"2"})
+            self.assertIn("1", getattr(self.plugin, "_" + provider + "_app_ids"))
+            await self.plugin._accept_catalog(provider, {"2"})
+            self.assertIn("1", getattr(self.plugin, "_" + provider + "_app_ids"))
+            restarted = self.plugin_type()
+            await getattr(restarted, "_load_" + provider + "_cache")()
+            self.assertIn("1", restarted._catalog_pending[provider])
+            restarted._catalog_pending[provider]["1"] -= 901
+            await restarted._accept_catalog(provider, {"2"})
+            self.assertNotIn("1", getattr(restarted, "_" + provider + "_app_ids"))
+
+    async def test_bulk_loss_and_disk_failure_leave_last_good_catalog_untouched(self):
+        await self.plugin._accept_catalog("gfn", {str(i) for i in range(100)})
+        checked = self.plugin._gfn_checked_at
+        with patch.object(self.plugin, "_fetch_gfn_catalog", return_value={"1"}):
+            await self.plugin._ensure_gfn_catalog(force=True)
+        self.assertEqual(len(self.plugin._gfn_app_ids), 100)
+        self.assertEqual(self.plugin._gfn_checked_at, checked)
+        self.assertTrue((await self.plugin.get_catalog_status())["gfn"]["stale"])
+        with patch.object(self.plugin, "_write_file_atomically", side_effect=OSError("disk full")):
+            with self.assertRaises(OSError):
+                await self.plugin._accept_catalog("gfn", self.plugin._gfn_app_ids | {"100"})
+        self.assertNotIn("100", self.plugin._gfn_app_ids)
+        self.assertEqual(self.plugin._gfn_checked_at, checked)
+
+    async def test_reappearance_clears_pending_and_maintenance_is_not_removal(self):
+        await self.plugin._accept_catalog("boosteroid", {"1", "2"}, {"1"})
+        await self.plugin._accept_catalog("boosteroid", {"2"})
+        self.assertIn("1", self.plugin._boosteroid_maintenance_app_ids)
+        await self.plugin._accept_catalog("boosteroid", {"1", "2"})
+        self.assertFalse(self.plugin._catalog_pending["boosteroid"])
+        self.assertFalse(self.plugin._boosteroid_maintenance_app_ids)
+
+    async def test_shared_steam_queue_deduplicates_callers_and_limits_four_requests(self):
+        release = asyncio.Event()
+        active = 0
+        maximum = 0
+        seen = []
+        original = self.plugin._run_blocking
+        async def blocking(function, *args):
+            nonlocal active, maximum
+            if function == self.plugin._fetch_support:
+                seen.append(args[0])
+                active += 1
+                maximum = max(maximum, active)
+                await release.wait()
+                active -= 1
+                return {"controller_support_level": "full", "hungarian": True}
+            return await original(function, *args)
+        with patch.object(self.plugin, "_run_blocking", side_effect=blocking):
+            callers = [asyncio.create_task(self.plugin._get_support_shared(str(i))) for i in range(12)]
+            callers += [asyncio.create_task(self.plugin._get_support_shared("0")) for _ in range(3)]
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.assertEqual(len(seen), 4)
+            callers[-1].cancel()
+            release.set()
+            await asyncio.gather(*callers, return_exceptions=True)
+        self.assertEqual(maximum, 4)
+        self.assertEqual(len(seen), 12)
+        self.assertEqual(len(set(seen)), 12)
+        self.assertFalse(self.plugin._steam_tasks)
+        restarted = self.plugin_type()
+        await restarted._load_cache()
+        self.assertEqual(len(restarted._cache), 12)
+
+    async def test_failed_scan_and_backoff_survive_restart_without_new_http(self):
+        error = urllib.error.HTTPError("https://store.steampowered.com", 429, "slow", {}, None)
+        with patch.object(self.plugin, "_open_request", side_effect=error):
+            await self.plugin.get_controller_support(["10"])
+        restarted = self.plugin_type()
+        restarted._hungarian_curator_checked_at = time.time()
+        await restarted._load_steam_scan_state()
+        self.assertEqual(restarted._steam_scan_epoch, self.plugin._steam_scan_epoch)
+        with patch.object(restarted, "_open_request") as request:
+            cached = await restarted.get_hungarian_library_cache(["10"])
+            await restarted.get_controller_support(["10", "20"])
+        request.assert_not_called()
+        self.assertIn("10", cached["scan_attempts"])
+        self.assertGreater(cached["scan_retry_after"]["10"], time.time())
+        restarted._steam_backoff_until = 0
+        with patch.object(restarted, "_open_request", side_effect=error):
+            result = await restarted.get_controller_support(["20"])
+        self.assertGreaterEqual(result["retry_after"], 119)
+
+    def test_gfn_partial_or_repeated_pages_are_rejected(self):
+        game = {"variants": [{"appStore": "STEAM", "storeId": "10"}]}
+        page = {"data": {"apps": {"items": [game], "numberReturned": 2,
+                "pageInfo": {"hasNextPage": False, "endCursor": "x"}}}}
+        with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(page))):
+            with self.assertRaises(ValueError):
+                self.plugin._fetch_gfn_catalog()
+        page["data"]["apps"].update(numberReturned=1, pageInfo={"hasNextPage": True, "endCursor": "x"})
+        with patch.object(self.plugin, "_open_request", side_effect=lambda *a, **k: io.StringIO(json.dumps(page))):
+            with self.assertRaises(ValueError):
+                self.plugin._fetch_gfn_catalog()
+
+    def test_boosteroid_truncated_and_duplicate_pages_are_rejected(self):
+        page = {"meta": {"current_page": 1, "last_page": 1, "total": 2, "per_page": 100},
+                "data": [{"id": 1, "stores": {"steam": "https://store.steampowered.com/app/10"}}]}
+        for duplicate in (False, True):
+            if duplicate:
+                page["data"] *= 2
+            with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(page))):
+                with self.assertRaises(ValueError):
+                    self.plugin._fetch_boosteroid_catalog()
+
     async def test_steam_rate_limit_honors_retry_after_and_stops_new_http_requests(self):
         error = urllib.error.HTTPError("https://store.steampowered.com/api/appdetails", 429, "rate limit", {"Retry-After": "120"}, None)
         with patch.object(self.plugin, "_open_request", side_effect=error) as request:
@@ -157,7 +267,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("4126040", self.plugin._read_notification_state()["boosteroid_available"])
 
     def test_aniimo_official_boosteroid_record_maps_to_steam_without_title_guess(self):
-        payload = {"meta": {"current_page": 1, "last_page": 1}, "data": [
+        payload = {"meta": {"current_page": 1, "last_page": 1, "total": 1, "per_page": 100}, "data": [
             {"id": 3144, "name": "Aniimo", "platform": [6], "applicationLink": None,
              "maintenance": False, "stores": {"steam": "https://store.steampowered.com/app/4126040"}}]}
         with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(payload))), \

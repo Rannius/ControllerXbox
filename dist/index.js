@@ -128,7 +128,7 @@ function HungarianProgress({ manager, loadCurator }) {
                     setCuratorError(true);
             }
             if (active)
-                timer = setTimeout(() => void poll(), 2000);
+                timer = setTimeout(() => void poll(), manager.progress.phase === "done" ? 60_000 : 2000);
         };
         void poll();
         return () => { active = false; clearTimeout(timer); };
@@ -140,12 +140,71 @@ function HungarianProgress({ manager, loadCurator }) {
     const percent = scan.total ? Math.floor(scan.processed / scan.total * 100) : 0;
     const seconds = Math.max(0, Math.ceil((scan.nextCheckAt - now) / 1000));
     const titles = { waiting: "Várakozás a könyvtárra", cache: "Mentett adatok betöltése", checking: "Játékok ellenőrzése",
-        saving: "Gyűjtemény mentése", between: "Keresés folyamatban", done: "Ellenőrzési kör kész", error: "Újrapróbálkozásra vár", paused: "Gyűjtés szünetel" };
+        saving: "Gyűjtemény mentése", between: "Következő ellenőrzésre vár", done: "Ellenőrzés kész", error: "Újrapróbálkozásra vár", paused: "Gyűjtés szünetel" };
     return SP_JSX.jsxs("div", { style: { padding: "12px", borderRadius: "8px", background: "rgba(0,0,0,.22)", fontSize: "12px", lineHeight: 1.5, overflowWrap: "anywhere" }, children: [SP_JSX.jsx("div", { style: { fontWeight: 700, fontSize: "14px" }, children: "\uD83C\uDDED\uD83C\uDDFA Magyar j\u00E1t\u00E9kok" }), SP_JSX.jsx("div", { role: "status", children: titles[scan.phase] }), SP_JSX.jsxs("div", { style: { display: "flex", justifyContent: "space-between", marginTop: "8px" }, children: [SP_JSX.jsxs("span", { children: [scan.processed, " / ", scan.total, " sorra v\u00E9ve"] }), SP_JSX.jsxs("strong", { children: [percent, "%"] })] }), SP_JSX.jsx("div", { role: "progressbar", "aria-label": "K\u00F6nyvt\u00E1r ellen\u0151rz\u00E9se", "aria-valuemin": 0, "aria-valuemax": 100, "aria-valuenow": percent, style: { height: "6px", background: "#394553", borderRadius: "4px", overflow: "hidden", margin: "5px 0 8px" }, children: SP_JSX.jsx("div", { style: { width: `${percent}%`, height: "100%", background: "#67c1f5", transition: "width .3s" } }) }), SP_JSX.jsxs("div", { children: [scan.checked, " j\u00E1t\u00E9khoz van nyelvi adat"] }), SP_JSX.jsxs("div", { children: [scan.found, " magyar tal\u00E1lat \u00B7 ", scan.collected, " a gy\u0171jtem\u00E9nyben"] }), scan.unknown > 0 && SP_JSX.jsxs("div", { children: [scan.unknown, " j\u00E1t\u00E9kn\u00E1l hi\u00E1nyz\u00F3 vagy bizonytalan nyelvi adat"] }), scan.current && SP_JSX.jsxs("div", { style: { marginTop: "8px" }, children: ["Most: ", scan.current] }), SP_JSX.jsx("div", { style: { opacity: .8, marginTop: "8px" }, children: scan.status }), scan.phase !== "paused" && SP_JSX.jsxs("div", { style: { marginTop: "8px" }, children: ["Magyar Felirat: ", curatorError ? "állapot nem érhető el; újrapróbáljuk"
                         : !curator ? "állapot betöltése…"
                             : curator.status === "loading" ? (curator.total ? `${curator.checked} / ${curator.total} ajánlás betöltve` : "lista letöltése…")
                                 : curator.status === "cached" ? `${curator.entries} játék a listán${curator.stale ? " · korábbi lista, a frissítés később újraindul" : ""}`
-                                    : "nem érhető el; később újrapróbáljuk"] }), scan.nextCheckAt > 0 && scan.phase !== "paused" && SP_JSX.jsxs("div", { style: { opacity: .65, marginTop: "6px" }, children: [seconds ? `Következő ellenőrzés: ${seconds} mp` : "Folytatásra vár…", " \u00B7 a h\u00E1tt\u00E9rben is halad"] })] });
+                                    : "nem érhető el; később újrapróbáljuk"] }), scan.nextCheckAt > 0 && scan.phase !== "paused" && SP_JSX.jsx("div", { style: { opacity: .65, marginTop: "6px" }, children: seconds ? `Következő ${scan.phase === "done" ? "változásellenőrzés" : "ellenőrzés"}: ${Math.floor(seconds / 60)} p ${seconds % 60} mp` : "Következő ellenőrzésre vár…" })] });
+}
+
+const manifest = {"name":"Deck Play Badges"};
+const API_VERSION = 2;
+const internalAPIConnection = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit;
+if (!internalAPIConnection) {
+    throw new Error('[@decky/api]: Failed to connect to the loader as as the loader API was not initialized. This is likely a bug in Decky Loader.');
+}
+let api;
+try {
+    api = internalAPIConnection.connect(API_VERSION, manifest.name);
+}
+catch {
+    api = internalAPIConnection.connect(1, manifest.name);
+    console.warn(`[@decky/api] Requested API version ${API_VERSION} but the running loader only supports version 1. Some features may not work.`);
+}
+if (api._version != API_VERSION) {
+    console.warn(`[@decky/api] Requested API version ${API_VERSION} but the running loader only supports version ${api._version}. Some features may not work.`);
+}
+const callable = api.callable;
+const routerHook = api.routerHook;
+const toaster = api.toaster;
+const fetchNoCors = api.fetchNoCors;
+
+const load = callable("get_catalog_status");
+function CatalogStatus() {
+    const [status, setStatus] = SP_REACT.useState();
+    const [failed, setFailed] = SP_REACT.useState(false);
+    SP_REACT.useEffect(() => {
+        let active = true;
+        let timer;
+        let timeout;
+        const poll = async () => {
+            try {
+                const result = await Promise.race([load(), new Promise((_, reject) => {
+                        timeout = setTimeout(() => reject(new Error("timeout")), 15000);
+                    })]);
+                if (active) {
+                    setStatus(result);
+                    setFailed(!result.success);
+                }
+            }
+            catch {
+                if (active)
+                    setFailed(true);
+            }
+            finally {
+                clearTimeout(timeout);
+            }
+            if (active)
+                timer = setTimeout(() => void poll(), 10000);
+        };
+        void poll();
+        return () => { active = false; clearTimeout(timer); clearTimeout(timeout); };
+    }, []);
+    return SP_JSX.jsxs("div", { style: { fontSize: "12px", lineHeight: 1.5, overflowWrap: "anywhere" }, children: [failed && SP_JSX.jsx("div", { children: "A katal\u00F3gusok \u00E1llapota most nem k\u00E9rdezhet\u0151 le." }), !status && !failed && SP_JSX.jsx("div", { children: "Katal\u00F3gusok \u00E1llapot\u00E1nak bet\u00F6lt\u00E9se\u2026" }), status && [['gfn', 'GFN'], ['boosteroid', 'Boosteroid']].map(([key, name]) => {
+                const provider = status[key];
+                return SP_JSX.jsxs("div", { style: { marginBottom: "6px" }, children: [SP_JSX.jsxs("strong", { children: [name, ": ", provider.stale ? "korábbi / még nem ellenőrzött adatok" : "naprakész"] }), SP_JSX.jsxs("div", { children: ["Utols\u00F3 sikeres friss\u00EDt\u00E9s: ", provider.checked_at ? new Date(provider.checked_at * 1000).toLocaleString("hu-HU") : "még nem történt"] }), SP_JSX.jsxs("div", { children: [provider.entries, " j\u00E1t\u00E9k", provider.pending_removals > 0 ? ` · ${provider.pending_removals} eltűnés megerősítésre vár` : ""] }), provider.error && SP_JSX.jsx("div", { children: "Friss\u00EDt\u00E9si hiba; az utols\u00F3 j\u00F3 katal\u00F3gus marad \u00E9rv\u00E9nyben." })] }, key);
+            })] });
 }
 
 const HUNGARIAN_COLLECTION_NAME = "🇭🇺 Magyar nyelvű játékok";
@@ -168,7 +227,6 @@ class HungarianCollection {
         this.running = false;
         this.retryAfter = new Map();
         this.attempted = new Map();
-        this.attemptSequence = 0;
     }
     subscribe(listener) {
         this.listeners.add(listener);
@@ -265,7 +323,7 @@ class HungarianCollection {
         this.running = true;
         const revision = this.revision;
         const current = () => this.enabled && revision === this.revision;
-        let delay = 60_000;
+        let delay = 15 * 60_000;
         try {
             const store = this.deps.getStore();
             if (!readyCollectionStore(store)) {
@@ -287,6 +345,15 @@ class HungarianCollection {
                 return;
             if (!cached.success)
                 throw new Error("A nyelvi gyorsítótár nem érhető el.");
+            if (cached.scan_epoch !== undefined && cached.scan_epoch !== this.scanEpoch) {
+                this.scanEpoch = cached.scan_epoch;
+                this.attempted.clear();
+                this.retryAfter.clear();
+            }
+            for (const [id, stamp] of Object.entries(cached.scan_attempts ?? {}))
+                this.attempted.set(id, stamp * 1000);
+            for (const [id, stamp] of Object.entries(cached.scan_retry_after ?? {}))
+                this.retryAfter.set(id, stamp * 1000);
             const languages = { ...cached.hungarian };
             const sources = { ...cached.hungarian_sources };
             const counts = (list) => ({ total: list.length,
@@ -335,7 +402,7 @@ class HungarianCollection {
                     active.delete(id);
                     if (!valid())
                         return;
-                    this.attempted.set(id, ++this.attemptSequence);
+                    this.attempted.set(id, Date.now());
                     if ((result.retry_after ?? 0) > 0) {
                         pauseUntil = Math.max(pauseUntil, Date.now() + Math.min(3600, result.retry_after) * 1000);
                         lookupError = "A Steam átmenetileg nem fogad új lekérést";
@@ -362,6 +429,11 @@ class HungarianCollection {
                 delay = Math.max(1000, pauseUntil - Date.now());
             else if (cached.curator_status === "loading")
                 delay = 5000;
+            else {
+                const retries = pending.map(id => this.retryAfter.get(id) ?? 0).filter(stamp => stamp > Date.now());
+                if (retries.length)
+                    delay = Math.min(delay, Math.max(1000, Math.min(...retries) - Date.now()));
+            }
             if (!current() || this.deps.getStore() !== store || store.collectionsFromStorage !== storage)
                 return;
             this.deps.onLanguages(languages, sources);
@@ -374,11 +446,11 @@ class HungarianCollection {
             const checked = currentApps.filter(app => typeof languages[String(app.appid)] === "boolean").length;
             const found = currentApps.filter(app => languages[String(app.appid)] === true).length;
             this.report(`${found} magyar játék · ${checked}/${currentApps.length} játékhoz van nyelvi adat.`
-                + (checked < currentApps.length ? " A keresés a háttérben folytatódik."
-                    : found ? " Könyvtár → Gyűjtemények." : " Nincs igazolt magyar találat.")
+                + (checked < currentApps.length ? " Az ellenőrzési kör kész; a hiányzó adatokat később újrapróbáljuk."
+                    : " Kész. Új játékok és lejárt adatok ellenőrzése 15 percenként.")
                 + (cached.curator_status === "loading" ? " Magyar Felirat: lista betöltése…"
                     : cached.curator_status === "unavailable" ? " A Magyar Felirat listája még nem érhető el; később újrapróbáljuk." : "")
-                + (lookupError ? ` Az aktuális lekérés sikertelen: ${lookupError}. A többi játék következik.` : ""), { ...counts(currentApps), collected, current: "", phase: checked === currentApps.length && cached.curator_status !== "loading" && cached.curator_status !== "unavailable" ? "done" : "between", nextCheckAt: Date.now() + delay });
+                + (lookupError ? ` Átmeneti szünet: ${lookupError}.` : ""), { ...counts(currentApps), collected, current: "", phase: checked === currentApps.length && cached.curator_status !== "loading" && cached.curator_status !== "unavailable" ? "done" : "between", nextCheckAt: Date.now() + delay });
         }
         catch (error) {
             if (current())
@@ -391,28 +463,6 @@ class HungarianCollection {
         }
     }
 }
-
-const manifest = {"name":"Deck Play Badges"};
-const API_VERSION = 2;
-const internalAPIConnection = window.__DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit;
-if (!internalAPIConnection) {
-    throw new Error('[@decky/api]: Failed to connect to the loader as as the loader API was not initialized. This is likely a bug in Decky Loader.');
-}
-let api;
-try {
-    api = internalAPIConnection.connect(API_VERSION, manifest.name);
-}
-catch {
-    api = internalAPIConnection.connect(1, manifest.name);
-    console.warn(`[@decky/api] Requested API version ${API_VERSION} but the running loader only supports version 1. Some features may not work.`);
-}
-if (api._version != API_VERSION) {
-    console.warn(`[@decky/api] Requested API version ${API_VERSION} but the running loader only supports version ${api._version}. Some features may not work.`);
-}
-const callable = api.callable;
-const routerHook = api.routerHook;
-const toaster = api.toaster;
-const fetchNoCors = api.fetchNoCors;
 
 const BACKEND_TIMEOUT_MS = 15_000;
 const CATALOG_BACKEND_TIMEOUT_MS = 60_000;
@@ -722,6 +772,9 @@ const hungarianCollection = new HungarianCollection({
         const hungarian = {};
         const hungarian_sources = {};
         let curator_status;
+        let scan_epoch;
+        const scan_attempts = {};
+        const scan_retry_after = {};
         for (let offset = 0; offset < ids.length; offset += 10000) {
             const result = await withBackendTimeout(getHungarianLibraryCache(ids.slice(offset, offset + 10000)));
             if (!result.success)
@@ -729,9 +782,12 @@ const hungarianCollection = new HungarianCollection({
             Object.assign(hungarian, result.hungarian);
             Object.assign(hungarian_sources, result.hungarian_sources);
             curator_status = result.curator_status;
+            scan_epoch = result.scan_epoch;
+            Object.assign(scan_attempts, result.scan_attempts);
+            Object.assign(scan_retry_after, result.scan_retry_after);
             scheduleCuratorBadgeRefresh(curator_status);
         }
-        return { success: true, hungarian, hungarian_sources, curator_status };
+        return { success: true, hungarian, hungarian_sources, curator_status, scan_epoch, scan_attempts, scan_retry_after };
     },
     lookup: ids => withBackendTimeout(getControllerSupport(ids), 60_000),
     onLanguages: (languages, sources) => {
@@ -2434,13 +2490,13 @@ function Content() {
         }
     };
     if (page === "watchlist")
-        return SP_JSX.jsxs(DFL.PanelSection, { title: "Figyel\u0151lista", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: cloudRefreshing, onClick: () => void refreshWatchedClouds(), children: cloudRefreshing ? "Katalógusok frissítése…" : "GFN és Boosteroid ellenőrzése most" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: cloudRefreshStatus || "Ébredéskor mindkét katalógus frissül. Ellenőrzés 15 percenként is, amíg a plugin fut." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "J\u00E1t\u00E9kn\u00E9v vagy Steam AppID", value: searchQuery, bShowClearAction: true, disabled: searchWorking || watchWorking, onChange: (event) => setSearchQuery(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: searchWorking || watchWorking || searchQuery.trim().length < 2, onClick: searchForGames, children: "Keres\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW figyel\u00E9se", checked: newWatchGfn, disabled: watchWorking, onChange: setNewWatchGfn }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid figyel\u00E9se", checked: newWatchBoosteroid, disabled: watchWorking, onChange: setNewWatchBoosteroid }) }), searchResults.map((entry) => {
+        return SP_JSX.jsxs(DFL.PanelSection, { title: "Figyel\u0151lista", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(CatalogStatus, {}) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: cloudRefreshing, onClick: () => void refreshWatchedClouds(), children: cloudRefreshing ? "Katalógusok frissítése…" : "GFN és Boosteroid ellenőrzése most" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: cloudRefreshStatus || "Ébredéskor mindkét katalógus frissül. Ellenőrzés 15 percenként is, amíg a plugin fut." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "J\u00E1t\u00E9kn\u00E9v vagy Steam AppID", value: searchQuery, bShowClearAction: true, disabled: searchWorking || watchWorking, onChange: (event) => setSearchQuery(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: searchWorking || watchWorking || searchQuery.trim().length < 2, onClick: searchForGames, children: "Keres\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW figyel\u00E9se", checked: newWatchGfn, disabled: watchWorking, onChange: setNewWatchGfn }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid figyel\u00E9se", checked: newWatchBoosteroid, disabled: watchWorking, onChange: setNewWatchBoosteroid }) }), searchResults.map((entry) => {
                     const alreadyWatched = watchedGames.has(entry.app_id);
                     return SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", label: entry.title, description: "Steam AppID: " + entry.app_id, disabled: watchWorking || alreadyWatched, onClick: () => void addWatchedGame(entry.app_id), children: alreadyWatched ? "Már figyelve" : "Hozzáadás" }) }, "search-" + entry.app_id);
                 }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { marginTop: "12px", fontWeight: 700 }, children: ["Figyelt j\u00E1t\u00E9kok (", watchlist.length, ")"] }) }), watchlist.length ? watchlist.map((entry) => SP_JSX.jsxs(SP_REACT.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { paddingTop: "6px", fontWeight: 700 }, children: entry.title }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { opacity: 0.75 }, children: ["GFN: ", entry.watch_gfn ? watchlistGfnLabel(entry.gfn) : "kikapcsolva", " · Boosteroid: ", entry.watch_boosteroid ? watchlistBoosteroidLabel(entry.boosteroid) : "kikapcsolva"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: entry.watch_gfn, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, checked, entry.watch_boosteroid) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: entry.watch_boosteroid, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, entry.watch_gfn, checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: watchWorking, onClick: () => void removeWatchedGame(entry.app_id), children: "Elt\u00E1vol\u00EDt\u00E1s" }) })] }, entry.app_id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A figyel\u0151lista \u00FCres." }) })] });
     if (page === "history")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "El\u0151zm\u00E9nyek", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), history.length ? history.map((entry) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { padding: "6px 0" }, children: [SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: entry.title }), SP_JSX.jsx("div", { children: historyEventLabel(entry) }), SP_JSX.jsxs("div", { style: { opacity: 0.7, fontSize: "12px" }, children: [new Date(entry.created_at * 1000).toLocaleString("hu-HU"), " \u00B7 Steam AppID: ", entry.app_id] })] }) }, entry.id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "M\u00E9g nincs r\u00F6gz\u00EDtett esem\u00E9ny." }) }), history.length ? SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: historyWorking, onClick: clearHistory, children: "El\u0151zm\u00E9nyek t\u00F6rl\u00E9se" }) }) : null] });
-    return SP_JSX.jsxs(DFL.PanelSection, { title: "Deck Play Badges", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(HungarianProgress, { manager: hungarianCollection, loadCurator: loadCuratorProgress }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
+    return SP_JSX.jsxs(DFL.PanelSection, { title: "Deck Play Badges", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(HungarianProgress, { manager: hungarianCollection, loadCurator: loadCuratorProgress }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(CatalogStatus, {}) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats
                         ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
                             + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
                             + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
