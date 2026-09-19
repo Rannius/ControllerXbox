@@ -1,4 +1,5 @@
 import { getHungarianBadgeHtml, HungarianSource } from "./hungarianBadge";
+import { CloudResumeRefresh } from "./cloudResumeRefresh";
 import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
 import { HungarianProgress, CuratorProgress } from "./HungarianProgress";
 import { HungarianCollection, readyCollectionStore } from "./hungarianCollection";
@@ -17,7 +18,7 @@ const DETAIL_BADGE_KEY = "controller-xbox-detail-badge";
 const DETAIL_PATCH_FLAG = "__controllerXboxDetailPatched";
 const STORE_DEBUGGER_URL = "http://localhost:8080/json";
 const STORE_SCAN_INTERVAL_MS = 1_500;
-const NOTIFICATION_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const NOTIFICATION_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
 type SupportResponse = {
   success: boolean;
@@ -30,14 +31,14 @@ type SupportResponse = {
 };
 type GfnResponse = {
   success: boolean;
-  availability?: Record<string, boolean>;
+  availability?: Record<string, boolean | null>;
   unavailable?: string[];
   catalog_entries?: number;
   error?: string;
 };
 type BoosteroidResponse = {
   success: boolean;
-  availability?: Record<string, boolean>;
+  availability?: Record<string, boolean | null>;
   maintenance?: Record<string, boolean>;
   unavailable?: string[];
   catalog_entries?: number;
@@ -170,6 +171,7 @@ type StoreRuntimeResponse = {
 
 const getControllerSupport = callable<[appIds: string[]], SupportResponse>("get_controller_support");
 const getGfnAvailability = callable<[appIds: string[]], GfnResponse>("get_gfn_availability");
+const refreshCloudCatalogs = callable<[], { success: boolean; checked_at: number; error?: string }>("refresh_cloud_catalogs");
 const getBoosteroidAvailability = callable<[appIds: string[]], BoosteroidResponse>("get_boosteroid_availability");
 const clearCache = callable<[], { success: boolean; removed: number; gfn_removed?: number; boosteroid_removed?: number }>("clear_cache");
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
@@ -236,6 +238,8 @@ let storeScanTimer: number | undefined;
 let storeReconnectTimer: number | undefined;
 let storeCurrentAppIds = new Set<string>();
 let notificationTimer: number | undefined;
+let notificationCheck: Promise<void> | undefined;
+let cloudViewRevision = 0;
 let pluginActive = false;
 let settingsLoading = false;
 let settingsRetryTimer: number | undefined;
@@ -590,7 +594,56 @@ function WatchStarButton({ appId }: { appId: number }) {
   >{watched ? "★" : "☆"}</button>;
 }
 
-async function checkBackgroundNotifications(attempt = 0): Promise<void> {
+async function refreshCloudViews(): Promise<void> {
+  const revision = ++cloudViewRevision;
+  const ids = Array.from(new Set([...gfnStates.keys(), ...boosteroidStates.keys(), ...visibleAppIds.keys(), ...storeCurrentAppIds, ...watchedGames.keys()]));
+  for (let offset = 0; offset < ids.length; offset += 100) {
+    const batch = ids.slice(offset, offset + 100);
+    const [gfn, boosteroid] = await Promise.allSettled([
+      withBackendTimeout(getGfnAvailability(batch), CATALOG_BACKEND_TIMEOUT_MS),
+      withBackendTimeout(getBoosteroidAvailability(batch), CATALOG_BACKEND_TIMEOUT_MS),
+    ]);
+    const response = boosteroid.status === "fulfilled" ? boosteroid.value : { success: false } as BoosteroidResponse;
+    const gfnResponse = gfn.status === "fulfilled" ? gfn.value : { success: false } as GfnResponse;
+    if (!pluginActive || revision !== cloudViewRevision) return;
+    for (const id of batch) {
+      const gfnValue = gfnResponse.success ? gfnResponse.availability?.[id] : undefined;
+      gfnStates.set(id, gfnValue === true ? "available" : gfnValue === false ? "not_available" : "unavailable");
+      const value = response.success ? response.availability?.[id] : undefined;
+      boosteroidStates.set(id, value === true ? (response.maintenance?.[id] ? "maintenance" : "available")
+        : value === false ? "not_available" : "unavailable");
+    }
+  }
+  if (!pluginActive || revision !== cloudViewRevision) return;
+  publishSupportState();
+  notifyCacheChanged();
+  await loadWatchlistState();
+}
+
+let cloudRefresh: Promise<void> | undefined;
+function refreshCloudData(): Promise<void> {
+  if (cloudRefresh) return cloudRefresh;
+  cloudRefresh = (async () => {
+    if (notificationCheck) await notificationCheck;
+    if (!pluginActive) return;
+    const result = await withBackendTimeout(refreshCloudCatalogs(), 180_000);
+    if (!pluginActive) return;
+    await checkBackgroundNotifications();
+    await refreshCloudViews();
+    if (!result.success) throw new Error(result.error || "A felhőkatalógus frissítése sikertelen.");
+  })().finally(() => { cloudRefresh = undefined; });
+  return cloudRefresh;
+}
+
+function checkBackgroundNotifications(attempt = 0): Promise<void> {
+  if (notificationCheck) return notificationCheck;
+  if (notificationTimer !== undefined) window.clearTimeout(notificationTimer);
+  notificationTimer = undefined;
+  notificationCheck = runBackgroundNotifications(attempt).finally(() => { notificationCheck = undefined; });
+  return notificationCheck;
+}
+
+async function runBackgroundNotifications(attempt = 0): Promise<void> {
   const appIds = getSteamLibraryAppIds();
   if (!pluginActive) return;
   if (!appIds.length && attempt < 3) {
@@ -651,6 +704,7 @@ async function checkBackgroundNotifications(attempt = 0): Promise<void> {
       });
     }
     window.dispatchEvent(new Event(HISTORY_CHANGED_EVENT));
+    await refreshCloudViews();
   } catch (error) {
     console.warn("ControllerXbox background notification check failed", error);
   } finally {
@@ -698,6 +752,7 @@ function publishSupportState(): void {
 }
 
 async function flushSupportBatch(): Promise<void> {
+  const cloudRevision = cloudViewRevision;
   batchTimer = undefined;
   const appIds = Array.from(pendingAppIds);
   pendingAppIds.clear();
@@ -734,6 +789,8 @@ async function flushSupportBatch(): Promise<void> {
     console.warn("ControllerXbox controller lookup failed", supportResult.reason);
   }
 
+  // A request started before a catalog refresh must not restore old cloud badges.
+  if (cloudRevision === cloudViewRevision) {
   if (gfnResult.status === "fulfilled" && gfnResult.value.success) {
     const response = gfnResult.value;
     for (const appId of appIds) {
@@ -762,6 +819,7 @@ async function flushSupportBatch(): Promise<void> {
     for (const appId of appIds) boosteroidStates.set(appId, "unavailable");
     const error = boosteroidResult.status === "rejected" ? boosteroidResult.reason : boosteroidResult.value.error;
     console.warn("ControllerXbox Boosteroid lookup failed", error);
+  }
   }
   publishSupportState();
   notifyCacheChanged();
@@ -1707,6 +1765,8 @@ function Content() {
   const [settingsWorking, setSettingsWorking] = useState(false);
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
   const [watchWorking, setWatchWorking] = useState(false);
+  const [cloudRefreshing, setCloudRefreshing] = useState(false);
+  const [cloudRefreshStatus, setCloudRefreshStatus] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SteamSearchEntry[]>([]);
   const [searchWorking, setSearchWorking] = useState(false);
@@ -2123,7 +2183,20 @@ function Content() {
     /></PanelSectionRow>
   </PanelSection>;
 
+  const refreshWatchedClouds = async () => {
+    setCloudRefreshing(true);
+    setCloudRefreshStatus("A GFN és Boosteroid katalógusának letöltése…");
+    try {
+      await refreshCloudData();
+      setCloudRefreshStatus("GFN és Boosteroid frissítve: " + new Date().toLocaleTimeString());
+    } catch (error) { setCloudRefreshStatus("Frissítési hiba: " + errorMessage(error)); }
+    finally { setCloudRefreshing(false); }
+  };
+
   if (page === "watchlist") return <PanelSection title="Figyelőlista">
+    <PanelSectionRow><ButtonItem layout="below" disabled={cloudRefreshing}
+      onClick={() => void refreshWatchedClouds()}>{cloudRefreshing ? "Katalógusok frissítése…" : "GFN és Boosteroid ellenőrzése most"}</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{cloudRefreshStatus || "Ébredéskor mindkét katalógus frissül. Ellenőrzés 15 percenként is, amíg a plugin fut."}</div></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
     <PanelSectionRow><TextField
       label="Játéknév vagy Steam AppID"
@@ -2243,6 +2316,16 @@ export default definePlugin(() => {
   const removeTilePatch = patchLibraryTiles();
   const removeLibraryDetailPatch = patchLibraryDetails();
   const removeStorePatch = patchSteamStore();
+  const resumeRefresh = new CloudResumeRefresh({
+    register: callback => {
+      const sleepManager = findModuleExport((value: any) => typeof value?.RegisterForNotifyResumeFromSuspend === "function");
+      const subscription = sleepManager?.RegisterForNotifyResumeFromSuspend(callback);
+      return subscription ? () => subscription.unregister?.() : undefined;
+    },
+    refresh: refreshCloudData,
+    onError: error => console.warn("Deck Play Badges wake catalog refresh failed", error),
+  });
+  resumeRefresh.start();
   return {
     name: "Deck Play Badges",
     titleView: <div className={staticClasses.Title}>Deck Play Badges</div>,
@@ -2250,6 +2333,7 @@ export default definePlugin(() => {
     icon: <span>✓</span>,
     onDismount: () => {
       pluginActive = false;
+      resumeRefresh.stop();
       if (settingsRetryTimer !== undefined) window.clearTimeout(settingsRetryTimer);
       settingsRetryTimer = undefined;
       hungarianCollection.stop();

@@ -7,6 +7,75 @@ function getHungarianBadgeHtml(source = "steam") {
 // The 2:1 tricolour remains crisp at the small sizes used on game covers.
 const HUNGARIAN_BADGE_HTML = '<span role="img" aria-label="Hivatalos magyar nyelvi támogatás" title="Hivatalos magyar nyelvi támogatás a Steam adatai szerint" style="box-sizing:border-box;width:34px;height:24px;display:inline-flex;flex-shrink:0;align-items:center;justify-content:center;border-radius:5px;background:rgba(6,9,18,.92);box-shadow:0 1px 5px rgba(0,0,0,.85),inset 0 0 0 1px rgba(255,255,255,.12);pointer-events:none"><svg xmlns="http://www.w3.org/2000/svg" width="28" height="14" viewBox="0 0 30 15" aria-hidden="true" style="display:block;border-radius:2px;overflow:hidden"><path fill="#ce2939" d="M0 0h30v5H0z"/><path fill="#fff" d="M0 5h30v5H0z"/><path fill="#477050" d="M0 10h30v5H0z"/><rect x=".5" y=".5" width="29" height="14" rx="1.5" fill="none" stroke="#fff" stroke-opacity=".18"/></svg></span>';
 
+// Refresh catalog data only. This never reloads Steam or changes game focus.
+class CloudResumeRefresh {
+    constructor(deps) {
+        this.deps = deps;
+        this.active = false;
+        this.running = false;
+        this.lastTick = 0;
+        this.lastWake = 0;
+    }
+    start() {
+        if (this.active)
+            return;
+        this.active = true;
+        this.lastTick = Date.now();
+        try {
+            this.unregister = this.deps.register(() => this.wake());
+        }
+        catch (error) {
+            this.deps.onError(error);
+        }
+        // Timer gaps also detect suspend when the Steam notification API is absent.
+        this.interval = setInterval(() => {
+            const now = Date.now();
+            if (now - this.lastTick > 45_000)
+                this.wake();
+            this.lastTick = now;
+        }, 15_000);
+    }
+    wake() {
+        if (!this.active || this.running || this.timer !== undefined || Date.now() - this.lastWake < 60_000)
+            return;
+        this.lastWake = Date.now();
+        this.schedule(8000, 0);
+    }
+    schedule(delay, attempt) {
+        this.timer = setTimeout(() => { this.timer = undefined; void this.run(attempt); }, delay);
+    }
+    async run(attempt) {
+        if (!this.active)
+            return;
+        this.running = true;
+        try {
+            await this.deps.refresh();
+        }
+        catch (error) {
+            this.deps.onError(error);
+            // Wi-Fi may still be reconnecting after wake. Retry without overlapping.
+            if (this.active && attempt < 2)
+                this.schedule(attempt === 0 ? 30_000 : 120_000, attempt + 1);
+        }
+        finally {
+            this.running = false;
+        }
+    }
+    stop() {
+        this.active = false;
+        if (this.timer !== undefined)
+            clearTimeout(this.timer);
+        if (this.interval !== undefined)
+            clearInterval(this.interval);
+        try {
+            this.unregister?.();
+        }
+        catch { /* Steam may already be stopping. */ }
+        this.timer = undefined;
+        this.interval = undefined;
+    }
+}
+
 function BadgeSizeSettings({ initial, save }) {
     const [draft, setDraft] = SP_REACT.useState(initial);
     const [saved, setSaved] = SP_REACT.useState(initial);
@@ -89,8 +158,10 @@ function readyCollectionStore(store) {
         && typeof store.NewUnsavedCollection === "function";
 }
 class HungarianCollection {
-    constructor(deps) {
+    constructor(deps, batchSize = 10, intervalMs = 15_000) {
         this.deps = deps;
+        this.batchSize = batchSize;
+        this.intervalMs = intervalMs;
         this.status = "Magyar gyűjtemény: várakozás a beállításokra.";
         this.progress = { phase: "waiting", total: 0, processed: 0, checked: 0, found: 0, collected: 0, unknown: 0, current: "", nextCheckAt: 0 };
         this.listeners = new Set();
@@ -196,7 +267,7 @@ class HungarianCollection {
         this.running = true;
         const revision = this.revision;
         const current = () => this.enabled && revision === this.revision;
-        let delay = 5000;
+        let delay = this.intervalMs;
         try {
             const store = this.deps.getStore();
             if (!readyCollectionStore(store)) {
@@ -226,11 +297,11 @@ class HungarianCollection {
                 found: list.filter(app => languages[String(app.appid)] === true).length,
                 unknown: list.filter(app => languages[String(app.appid)] === null || (this.attempted.has(String(app.appid)) && !Object.prototype.hasOwnProperty.call(languages, String(app.appid)))).length });
             const pending = ids.filter(id => !Object.prototype.hasOwnProperty.call(languages, id));
-            // Two games per round, at least five seconds apart; no full-library burst.
+            // Bounded batches advance the entire library without a request per visible tile.
             // Unvisited games always precede retries, even when an early retry expires.
             // A failed RPC must advance the queue just like an unavailable app result.
             const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now())
-                .sort((a, b) => (this.attempted.get(a) ?? 0) - (this.attempted.get(b) ?? 0)).slice(0, 2);
+                .sort((a, b) => (this.attempted.get(a) ?? 0) - (this.attempted.get(b) ?? 0)).slice(0, this.batchSize);
             let lookupError = "";
             if (batch.length) {
                 this.report("Steam nyelvi adatok ellenőrzése…", { ...counts(apps), phase: "checking",
@@ -263,8 +334,6 @@ class HungarianCollection {
                         this.retryAfter.delete(id);
                     }
                 }
-                if (batch.every(id => this.retryAfter.has(id)))
-                    delay = 60_000;
             }
             if (!current() || this.deps.getStore() !== store || store.collectionsFromStorage !== storage)
                 return;
@@ -331,9 +400,10 @@ const DETAIL_BADGE_KEY = "controller-xbox-detail-badge";
 const DETAIL_PATCH_FLAG = "__controllerXboxDetailPatched";
 const STORE_DEBUGGER_URL = "http://localhost:8080/json";
 const STORE_SCAN_INTERVAL_MS = 1_500;
-const NOTIFICATION_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const NOTIFICATION_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const getControllerSupport = callable("get_controller_support");
 const getGfnAvailability = callable("get_gfn_availability");
+const refreshCloudCatalogs = callable("refresh_cloud_catalogs");
 const getBoosteroidAvailability = callable("get_boosteroid_availability");
 const clearCache = callable("clear_cache");
 const getCacheStats = callable("get_cache_stats");
@@ -380,6 +450,8 @@ let storeScanTimer;
 let storeReconnectTimer;
 let storeCurrentAppIds = new Set();
 let notificationTimer;
+let notificationCheck;
+let cloudViewRevision = 0;
 let pluginActive = false;
 let settingsLoading = false;
 let settingsRetryTimer;
@@ -736,7 +808,62 @@ function WatchStarButton({ appId }) {
             opacity: working ? 0.6 : 1,
         }, children: watched ? "★" : "☆" });
 }
-async function checkBackgroundNotifications(attempt = 0) {
+async function refreshCloudViews() {
+    const revision = ++cloudViewRevision;
+    const ids = Array.from(new Set([...gfnStates.keys(), ...boosteroidStates.keys(), ...visibleAppIds.keys(), ...storeCurrentAppIds, ...watchedGames.keys()]));
+    for (let offset = 0; offset < ids.length; offset += 100) {
+        const batch = ids.slice(offset, offset + 100);
+        const [gfn, boosteroid] = await Promise.allSettled([
+            withBackendTimeout(getGfnAvailability(batch), CATALOG_BACKEND_TIMEOUT_MS),
+            withBackendTimeout(getBoosteroidAvailability(batch), CATALOG_BACKEND_TIMEOUT_MS),
+        ]);
+        const response = boosteroid.status === "fulfilled" ? boosteroid.value : { success: false };
+        const gfnResponse = gfn.status === "fulfilled" ? gfn.value : { success: false };
+        if (!pluginActive || revision !== cloudViewRevision)
+            return;
+        for (const id of batch) {
+            const gfnValue = gfnResponse.success ? gfnResponse.availability?.[id] : undefined;
+            gfnStates.set(id, gfnValue === true ? "available" : gfnValue === false ? "not_available" : "unavailable");
+            const value = response.success ? response.availability?.[id] : undefined;
+            boosteroidStates.set(id, value === true ? (response.maintenance?.[id] ? "maintenance" : "available")
+                : value === false ? "not_available" : "unavailable");
+        }
+    }
+    if (!pluginActive || revision !== cloudViewRevision)
+        return;
+    publishSupportState();
+    notifyCacheChanged();
+    await loadWatchlistState();
+}
+let cloudRefresh;
+function refreshCloudData() {
+    if (cloudRefresh)
+        return cloudRefresh;
+    cloudRefresh = (async () => {
+        if (notificationCheck)
+            await notificationCheck;
+        if (!pluginActive)
+            return;
+        const result = await withBackendTimeout(refreshCloudCatalogs(), 180_000);
+        if (!pluginActive)
+            return;
+        await checkBackgroundNotifications();
+        await refreshCloudViews();
+        if (!result.success)
+            throw new Error(result.error || "A felhőkatalógus frissítése sikertelen.");
+    })().finally(() => { cloudRefresh = undefined; });
+    return cloudRefresh;
+}
+function checkBackgroundNotifications(attempt = 0) {
+    if (notificationCheck)
+        return notificationCheck;
+    if (notificationTimer !== undefined)
+        window.clearTimeout(notificationTimer);
+    notificationTimer = undefined;
+    notificationCheck = runBackgroundNotifications(attempt).finally(() => { notificationCheck = undefined; });
+    return notificationCheck;
+}
+async function runBackgroundNotifications(attempt = 0) {
     const appIds = getSteamLibraryAppIds();
     if (!pluginActive)
         return;
@@ -792,6 +919,7 @@ async function checkBackgroundNotifications(attempt = 0) {
             });
         }
         window.dispatchEvent(new Event(HISTORY_CHANGED_EVENT));
+        await refreshCloudViews();
     }
     catch (error) {
         console.warn("ControllerXbox background notification check failed", error);
@@ -833,6 +961,7 @@ function publishSupportState() {
         (boosteroidUnavailable ? " Boosteroid-adathiba: " + String(boosteroidUnavailable) + "." : ""));
 }
 async function flushSupportBatch() {
+    const cloudRevision = cloudViewRevision;
     batchTimer = undefined;
     const appIds = Array.from(pendingAppIds);
     pendingAppIds.clear();
@@ -874,44 +1003,47 @@ async function flushSupportBatch() {
         }
         console.warn("ControllerXbox controller lookup failed", supportResult.reason);
     }
-    if (gfnResult.status === "fulfilled" && gfnResult.value.success) {
-        const response = gfnResult.value;
-        for (const appId of appIds) {
-            const value = response.availability?.[appId];
-            if (value === true)
-                gfnStates.set(appId, "available");
-            else if (value === false)
-                gfnStates.set(appId, "not_available");
-            else
+    // A request started before a catalog refresh must not restore old cloud badges.
+    if (cloudRevision === cloudViewRevision) {
+        if (gfnResult.status === "fulfilled" && gfnResult.value.success) {
+            const response = gfnResult.value;
+            for (const appId of appIds) {
+                const value = response.availability?.[appId];
+                if (value === true)
+                    gfnStates.set(appId, "available");
+                else if (value === false)
+                    gfnStates.set(appId, "not_available");
+                else
+                    gfnStates.set(appId, "unavailable");
+            }
+        }
+        else {
+            for (const appId of appIds)
                 gfnStates.set(appId, "unavailable");
+            const error = gfnResult.status === "rejected" ? gfnResult.reason : gfnResult.value.error;
+            console.warn("ControllerXbox GeForce NOW lookup failed", error);
         }
-    }
-    else {
-        for (const appId of appIds)
-            gfnStates.set(appId, "unavailable");
-        const error = gfnResult.status === "rejected" ? gfnResult.reason : gfnResult.value.error;
-        console.warn("ControllerXbox GeForce NOW lookup failed", error);
-    }
-    if (boosteroidResult.status === "fulfilled" && boosteroidResult.value.success) {
-        const response = boosteroidResult.value;
-        for (const appId of appIds) {
-            const value = response.availability?.[appId];
-            const maintenance = response.maintenance?.[appId];
-            if (value === true && maintenance === true)
-                boosteroidStates.set(appId, "maintenance");
-            else if (value === true)
-                boosteroidStates.set(appId, "available");
-            else if (value === false)
-                boosteroidStates.set(appId, "not_available");
-            else
+        if (boosteroidResult.status === "fulfilled" && boosteroidResult.value.success) {
+            const response = boosteroidResult.value;
+            for (const appId of appIds) {
+                const value = response.availability?.[appId];
+                const maintenance = response.maintenance?.[appId];
+                if (value === true && maintenance === true)
+                    boosteroidStates.set(appId, "maintenance");
+                else if (value === true)
+                    boosteroidStates.set(appId, "available");
+                else if (value === false)
+                    boosteroidStates.set(appId, "not_available");
+                else
+                    boosteroidStates.set(appId, "unavailable");
+            }
+        }
+        else {
+            for (const appId of appIds)
                 boosteroidStates.set(appId, "unavailable");
+            const error = boosteroidResult.status === "rejected" ? boosteroidResult.reason : boosteroidResult.value.error;
+            console.warn("ControllerXbox Boosteroid lookup failed", error);
         }
-    }
-    else {
-        for (const appId of appIds)
-            boosteroidStates.set(appId, "unavailable");
-        const error = boosteroidResult.status === "rejected" ? boosteroidResult.reason : boosteroidResult.value.error;
-        console.warn("ControllerXbox Boosteroid lookup failed", error);
     }
     publishSupportState();
     notifyCacheChanged();
@@ -1889,6 +2021,8 @@ function Content() {
     const [settingsWorking, setSettingsWorking] = SP_REACT.useState(false);
     const [watchlist, setWatchlist] = SP_REACT.useState([]);
     const [watchWorking, setWatchWorking] = SP_REACT.useState(false);
+    const [cloudRefreshing, setCloudRefreshing] = SP_REACT.useState(false);
+    const [cloudRefreshStatus, setCloudRefreshStatus] = SP_REACT.useState("");
     const [searchQuery, setSearchQuery] = SP_REACT.useState("");
     const [searchResults, setSearchResults] = SP_REACT.useState([]);
     const [searchWorking, setSearchWorking] = SP_REACT.useState(false);
@@ -2260,8 +2394,22 @@ function Content() {
     if (page === "settings")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Magyar nyelv a Steam nyelvi list\u00E1ja vagy a Magyar Felirat kur\u00E1tor alapj\u00E1n. A teljes k\u00F6nyvt\u00E1rb\u00F3l magyar gy\u0171jtem\u00E9nyt k\u00E9sz\u00EDt. Kikapcsolva a gy\u0171jt\u00E9s sz\u00FCnetel, a gy\u0171jtem\u00E9ny megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(BadgeSizeSettings, { initial: { library_badge_percent: visibility.library_badge_percent ?? 100,
                         store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
+    const refreshWatchedClouds = async () => {
+        setCloudRefreshing(true);
+        setCloudRefreshStatus("A GFN és Boosteroid katalógusának letöltése…");
+        try {
+            await refreshCloudData();
+            setCloudRefreshStatus("GFN és Boosteroid frissítve: " + new Date().toLocaleTimeString());
+        }
+        catch (error) {
+            setCloudRefreshStatus("Frissítési hiba: " + errorMessage(error));
+        }
+        finally {
+            setCloudRefreshing(false);
+        }
+    };
     if (page === "watchlist")
-        return SP_JSX.jsxs(DFL.PanelSection, { title: "Figyel\u0151lista", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "J\u00E1t\u00E9kn\u00E9v vagy Steam AppID", value: searchQuery, bShowClearAction: true, disabled: searchWorking || watchWorking, onChange: (event) => setSearchQuery(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: searchWorking || watchWorking || searchQuery.trim().length < 2, onClick: searchForGames, children: "Keres\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW figyel\u00E9se", checked: newWatchGfn, disabled: watchWorking, onChange: setNewWatchGfn }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid figyel\u00E9se", checked: newWatchBoosteroid, disabled: watchWorking, onChange: setNewWatchBoosteroid }) }), searchResults.map((entry) => {
+        return SP_JSX.jsxs(DFL.PanelSection, { title: "Figyel\u0151lista", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: cloudRefreshing, onClick: () => void refreshWatchedClouds(), children: cloudRefreshing ? "Katalógusok frissítése…" : "GFN és Boosteroid ellenőrzése most" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: cloudRefreshStatus || "Ébredéskor mindkét katalógus frissül. Ellenőrzés 15 percenként is, amíg a plugin fut." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "J\u00E1t\u00E9kn\u00E9v vagy Steam AppID", value: searchQuery, bShowClearAction: true, disabled: searchWorking || watchWorking, onChange: (event) => setSearchQuery(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: searchWorking || watchWorking || searchQuery.trim().length < 2, onClick: searchForGames, children: "Keres\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW figyel\u00E9se", checked: newWatchGfn, disabled: watchWorking, onChange: setNewWatchGfn }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid figyel\u00E9se", checked: newWatchBoosteroid, disabled: watchWorking, onChange: setNewWatchBoosteroid }) }), searchResults.map((entry) => {
                     const alreadyWatched = watchedGames.has(entry.app_id);
                     return SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", label: entry.title, description: "Steam AppID: " + entry.app_id, disabled: watchWorking || alreadyWatched, onClick: () => void addWatchedGame(entry.app_id), children: alreadyWatched ? "Már figyelve" : "Hozzáadás" }) }, "search-" + entry.app_id);
                 }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { marginTop: "12px", fontWeight: 700 }, children: ["Figyelt j\u00E1t\u00E9kok (", watchlist.length, ")"] }) }), watchlist.length ? watchlist.map((entry) => SP_JSX.jsxs(SP_REACT.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { paddingTop: "6px", fontWeight: 700 }, children: entry.title }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { opacity: 0.75 }, children: ["GFN: ", entry.watch_gfn ? watchlistGfnLabel(entry.gfn) : "kikapcsolva", " · Boosteroid: ", entry.watch_boosteroid ? watchlistBoosteroidLabel(entry.boosteroid) : "kikapcsolva"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: entry.watch_gfn, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, checked, entry.watch_boosteroid) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: entry.watch_boosteroid, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, entry.watch_gfn, checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: watchWorking, onClick: () => void removeWatchedGame(entry.app_id), children: "Elt\u00E1vol\u00EDt\u00E1s" }) })] }, entry.app_id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A figyel\u0151lista \u00FCres." }) })] });
@@ -2284,6 +2432,16 @@ var index = DFL.definePlugin(() => {
     const removeTilePatch = patchLibraryTiles();
     const removeLibraryDetailPatch = patchLibraryDetails();
     const removeStorePatch = patchSteamStore();
+    const resumeRefresh = new CloudResumeRefresh({
+        register: callback => {
+            const sleepManager = DFL.findModuleExport((value) => typeof value?.RegisterForNotifyResumeFromSuspend === "function");
+            const subscription = sleepManager?.RegisterForNotifyResumeFromSuspend(callback);
+            return subscription ? () => subscription.unregister?.() : undefined;
+        },
+        refresh: refreshCloudData,
+        onError: error => console.warn("Deck Play Badges wake catalog refresh failed", error),
+    });
+    resumeRefresh.start();
     return {
         name: "Deck Play Badges",
         titleView: SP_JSX.jsx("div", { className: DFL.staticClasses.Title, children: "Deck Play Badges" }),
@@ -2291,6 +2449,7 @@ var index = DFL.definePlugin(() => {
         icon: SP_JSX.jsx("span", { children: "\u2713" }),
         onDismount: () => {
             pluginActive = false;
+            resumeRefresh.stop();
             if (settingsRetryTimer !== undefined)
                 window.clearTimeout(settingsRetryTimer);
             settingsRetryTimer = undefined;

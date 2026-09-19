@@ -58,7 +58,7 @@ export class HungarianCollection {
   private scanStorage?: Store["collectionsFromStorage"];
   private unsaved?: { store: Store; storage: Store["collectionsFromStorage"]; collection: Collection };
 
-  constructor(private deps: Dependencies) {}
+  constructor(private deps: Dependencies, private batchSize = 10, private intervalMs = 15_000) {}
 
   subscribe(listener: (status: string) => void): () => void {
     this.listeners.add(listener);
@@ -152,7 +152,7 @@ export class HungarianCollection {
     this.running = true;
     const revision = this.revision;
     const current = () => this.enabled && revision === this.revision;
-    let delay = 5000;
+    let delay = this.intervalMs;
     try {
       const store = this.deps.getStore();
       if (!readyCollectionStore(store)) {
@@ -179,11 +179,11 @@ export class HungarianCollection {
         found: list.filter(app => languages[String(app.appid)] === true).length,
         unknown: list.filter(app => languages[String(app.appid)] === null || (this.attempted.has(String(app.appid)) && !Object.prototype.hasOwnProperty.call(languages, String(app.appid)))).length });
       const pending = ids.filter(id => !Object.prototype.hasOwnProperty.call(languages, id));
-      // Two games per round, at least five seconds apart; no full-library burst.
+      // Bounded batches advance the entire library without a request per visible tile.
       // Unvisited games always precede retries, even when an early retry expires.
       // A failed RPC must advance the queue just like an unavailable app result.
       const batch = pending.filter(id => (this.retryAfter.get(id) ?? 0) <= Date.now())
-        .sort((a, b) => (this.attempted.get(a) ?? 0) - (this.attempted.get(b) ?? 0)).slice(0, 2);
+        .sort((a, b) => (this.attempted.get(a) ?? 0) - (this.attempted.get(b) ?? 0)).slice(0, this.batchSize);
       let lookupError = "";
       if (batch.length) {
         this.report("Steam nyelvi adatok ellenőrzése…", { ...counts(apps), phase: "checking",
@@ -209,7 +209,7 @@ export class HungarianCollection {
             this.retryAfter.delete(id);
           }
         }
-        if (batch.every(id => this.retryAfter.has(id))) delay = 60_000;
+
       }
       if (!current() || this.deps.getStore() !== store || store.collectionsFromStorage !== storage) return;
       this.deps.onLanguages(languages, sources);

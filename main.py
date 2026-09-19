@@ -44,7 +44,7 @@ HUNGARIAN_CURATOR_TTL_SECONDS = 24 * 60 * 60
 HUNGARIAN_CURATOR_RETRY_SECONDS = 15 * 60
 GFN_CACHE_TTL_SECONDS = 24 * 60 * 60
 GFN_URL = "https://api-prod.nvidia.com/services/gfngames/v1/gameList"
-BOOSTEROID_CACHE_TTL_SECONDS = 24 * 60 * 60
+BOOSTEROID_CACHE_TTL_SECONDS = 15 * 60
 BOOSTEROID_CACHE_SCHEMA_VERSION = 3
 SETTINGS_SCHEMA_VERSION = 1
 NOTIFICATION_SCHEMA_VERSION = 1
@@ -163,10 +163,12 @@ class Plugin:
         self._gfn_app_ids: Set[str] = set()
         self._gfn_checked_at = 0.0
         self._gfn_last_error = ""
+        self._gfn_attempted_at = 0.0
         self._boosteroid_app_ids: Set[str] = set()
         self._boosteroid_maintenance_app_ids: Set[str] = set()
         self._boosteroid_checked_at = 0.0
         self._boosteroid_last_error = ""
+        self._boosteroid_attempted_at = 0.0
         self._settings: Dict[str, Any] = {
             "library_badge_percent": 100,
             "store_badge_percent": 100,
@@ -583,14 +585,14 @@ class Plugin:
                 {
                     **entry,
                     "gfn": (
-                        "available" if entry["app_id"] in gfn_app_ids else "not_available"
+                        "available" if entry["app_id"] in gfn_app_ids else "unavailable" if self._gfn_last_error else "not_available"
                     ) if gfn_available else "unavailable",
                     "boosteroid": (
                         "maintenance"
                         if entry["app_id"] in maintenance_app_ids
                         else "available"
                         if entry["app_id"] in boosteroid_app_ids
-                        else "not_available"
+                        else "unavailable" if self._boosteroid_last_error else "not_available"
                     ) if boosteroid_available else "unavailable",
                 }
                 for entry in sorted(entries, key=lambda item: item["title"].casefold())
@@ -1136,11 +1138,15 @@ class Plugin:
             raise ValueError("GeForce NOW catalog contained no Steam games")
         return steam_app_ids
 
-    async def _ensure_gfn_catalog(self) -> bool:
+    async def _ensure_gfn_catalog(self, force: bool = False) -> bool:
+        requested_at = time.time()
         async with self._gfn_lock:
             now = time.time()
-            if self._gfn_app_ids and now - self._gfn_checked_at < GFN_CACHE_TTL_SECONDS:
+            if self._gfn_app_ids and ((not force and not self._gfn_last_error and now - self._gfn_checked_at < GFN_CACHE_TTL_SECONDS) or self._gfn_checked_at >= requested_at):
                 return True
+            if not force and self._gfn_last_error and now - self._gfn_attempted_at < 60:
+                return bool(self._gfn_app_ids)
+            self._gfn_attempted_at = now
             try:
                 fetched = await self._run_blocking(self._fetch_gfn_catalog)
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
@@ -1148,7 +1154,7 @@ class Plugin:
                 decky.logger.warning("GeForce NOW catalog refresh failed: %s", error)
                 return bool(self._gfn_app_ids)
             self._gfn_app_ids = fetched
-            self._gfn_checked_at = now
+            self._gfn_checked_at = time.time()
             self._gfn_last_error = ""
             payload = json.dumps(
                 {"checked_at": self._gfn_checked_at, "steam_app_ids": sorted(self._gfn_app_ids)},
@@ -1171,10 +1177,12 @@ class Plugin:
                 }
             return {
                 "success": True,
-                "availability": {app_id: app_id in self._gfn_app_ids for app_id in requested},
+                "availability": {app_id: True if app_id in self._gfn_app_ids else (None if self._gfn_last_error else False) for app_id in requested},
                 "unavailable": [],
                 "catalog_entries": len(self._gfn_app_ids),
-                "cached_for_hours": 24,
+                "cached_for_hours": GFN_CACHE_TTL_SECONDS / 3600,
+                "checked_at": self._gfn_checked_at,
+                "stale": bool(self._gfn_last_error),
             }
 
     @staticmethod
@@ -1304,14 +1312,19 @@ class Plugin:
             raise ValueError("Boosteroid catalog contained no Steam games")
         return steam_app_ids, maintenance_app_ids - active_app_ids
 
-    async def _ensure_boosteroid_catalog(self) -> bool:
+    async def _ensure_boosteroid_catalog(self, force: bool = False) -> bool:
+        requested_at = time.time()
         async with self._boosteroid_lock:
             now = time.time()
             if (
                 self._boosteroid_app_ids
-                and now - self._boosteroid_checked_at < BOOSTEROID_CACHE_TTL_SECONDS
+                and ((not force and not self._boosteroid_last_error and now - self._boosteroid_checked_at < BOOSTEROID_CACHE_TTL_SECONDS)
+                     or self._boosteroid_checked_at >= requested_at)
             ):
                 return True
+            if not force and self._boosteroid_last_error and now - self._boosteroid_attempted_at < 60:
+                return bool(self._boosteroid_app_ids)
+            self._boosteroid_attempted_at = now
             try:
                 fetched_app_ids, fetched_maintenance_ids = await self._run_blocking(
                     self._fetch_boosteroid_catalog
@@ -1322,7 +1335,7 @@ class Plugin:
                 return bool(self._boosteroid_app_ids)
             self._boosteroid_app_ids = fetched_app_ids
             self._boosteroid_maintenance_app_ids = fetched_maintenance_ids
-            self._boosteroid_checked_at = now
+            self._boosteroid_checked_at = time.time()
             self._boosteroid_last_error = ""
             payload = json.dumps(
                 {
@@ -1341,6 +1354,19 @@ class Plugin:
             )
             return True
 
+    async def refresh_cloud_catalogs(self) -> Dict[str, Any]:
+        results = await asyncio.gather(self._ensure_gfn_catalog(force=True),
+                                       self._ensure_boosteroid_catalog(force=True), return_exceptions=True)
+        gfn_ok = results[0] is True and not self._gfn_last_error
+        boosteroid_ok = results[1] is True and not self._boosteroid_last_error
+        errors = []
+        if not gfn_ok:
+            errors.append("GFN: " + (self._gfn_last_error or str(results[0])))
+        if not boosteroid_ok:
+            errors.append("Boosteroid: " + (self._boosteroid_last_error or str(results[1])))
+        return {"success": bool(gfn_ok and boosteroid_ok), "gfn_success": gfn_ok,
+                "boosteroid_success": boosteroid_ok, "checked_at": time.time(), "error": "; ".join(errors)}
+
     async def get_boosteroid_availability(self, app_ids: Any) -> Dict[str, Any]:
         requested = self._valid_app_ids(app_ids)
         available = await self._ensure_boosteroid_catalog()
@@ -1356,13 +1382,15 @@ class Plugin:
                 }
             return {
                 "success": True,
-                "availability": {app_id: app_id in self._boosteroid_app_ids for app_id in requested},
+                "availability": {app_id: True if app_id in self._boosteroid_app_ids else (None if self._boosteroid_last_error else False) for app_id in requested},
                 "maintenance": {
                     app_id: app_id in self._boosteroid_maintenance_app_ids for app_id in requested
                 },
                 "unavailable": [],
                 "catalog_entries": len(self._boosteroid_app_ids),
-                "cached_for_hours": 24,
+                "cached_for_hours": BOOSTEROID_CACHE_TTL_SECONDS / 3600,
+                "checked_at": self._boosteroid_checked_at,
+                "stale": bool(self._boosteroid_last_error),
             }
 
     @staticmethod
@@ -1552,6 +1580,8 @@ class Plugin:
             self._ensure_boosteroid_catalog(),
         )
 
+        gfn_available = gfn_available and not self._gfn_last_error
+        boosteroid_available = boosteroid_available and not self._boosteroid_last_error
         async with self._gfn_lock:
             current_gfn = self._gfn_app_ids & gfn_tracked_app_ids
         async with self._boosteroid_lock:

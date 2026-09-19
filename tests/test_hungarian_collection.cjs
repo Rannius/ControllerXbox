@@ -5,7 +5,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 
-function fixture() {
+function fixture(batchSize = 2, intervalMs = 5000) {
   const timers = new Map();
   let timerId = 0;
   const exports = {};
@@ -38,7 +38,7 @@ function fixture() {
     lookup:async ids=>{requests.push([...ids]);const result={};ids.forEach(id=>result[id]=cache[id]=Number(id)%2===1);return {success:true,hungarian:result};},
     onLanguages:()=>{},
   };
-  const manager = new exports.HungarianCollection(deps);
+  const manager = new exports.HungarianCollection(deps, batchSize, intervalMs);
   manager.setEnabled(true);
   // Execute each scheduled callback and drain its async work without real sleeps.
   async function step() {
@@ -212,3 +212,15 @@ for (const failure of ['timeout', 'unsuccessful', 'unavailable']) {
     assert.notEqual(f.manager.progress.phase,'done');
   });
 }
+
+test('larger batches finish the 410 uncached games in 41 rounds without visible tiles',async()=>{
+  const f=fixture(10,15000);
+  f.apps.splice(0,f.apps.length,...Array.from({length:906},(_,i)=>({appid:i+1,app_type:1,installed:false})));
+  for(let id=1;id<=496;id++)f.cache[id]=false;
+  for(let i=0;i<41;i++)await f.step();
+  assert.equal(f.requests.length,41);
+  assert.ok(f.requests.every(batch=>batch.length===10));
+  assert.equal(f.manager.progress.checked,906);
+  assert.equal(f.manager.progress.processed,906);
+  assert.equal([...f.timers.values()][0].ms,15000);
+});

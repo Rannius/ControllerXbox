@@ -75,6 +75,80 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(settings["show_boosteroid_badges"])
         self.assertTrue(settings["show_hungarian_badges"])
 
+    def prepare_boosteroid_watch(self):
+        self.plugin._gfn_app_ids = {"1"}
+        self.plugin._gfn_checked_at = time.time()
+        self.plugin._boosteroid_app_ids = {"1"}
+        self.plugin._boosteroid_checked_at = time.time()
+        self.plugin._watchlist = {"4126040": {"app_id": "4126040", "title": "Aniimo",
+            "added_at": time.time(), "watch_gfn": False, "watch_boosteroid": True}}
+
+    async def test_boosteroid_new_game_updates_watchlist_badge_and_notifies_once(self):
+        self.prepare_boosteroid_watch()
+        await self.plugin.get_notification_events([])
+        self.assertEqual((await self.plugin.get_watchlist())["entries"][0]["boosteroid"], "not_available")
+        self.plugin._boosteroid_checked_at = time.time() - 901
+        with patch.object(self.plugin, "_fetch_boosteroid_catalog", return_value=({"1", "4126040"}, set())) as fetch:
+            watch = await self.plugin.get_watchlist()
+            badge = await self.plugin.get_boosteroid_availability(["4126040"])
+            events = await self.plugin.get_notification_events([])
+            repeated = await self.plugin.get_notification_events([])
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(watch["entries"][0]["boosteroid"], "available")
+        self.assertTrue(badge["availability"]["4126040"])
+        self.assertEqual(events["boosteroid_added_app_ids"], ["4126040"])
+        self.assertEqual(repeated["boosteroid_added_app_ids"], [])
+
+    async def test_manual_boosteroid_refresh_bypasses_fresh_cache_without_erasing_notification_baseline(self):
+        self.prepare_boosteroid_watch()
+        await self.plugin.get_notification_events([])
+        with patch.object(self.plugin, "_fetch_boosteroid_catalog", return_value=({"4126040"}, set())) as fetch, \
+                patch.object(self.plugin, "_fetch_gfn_catalog", return_value={"1"}):
+            result = await self.plugin.refresh_cloud_catalogs()
+        self.assertTrue(result["success"])
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual((await self.plugin.get_notification_events([]))["boosteroid_added_app_ids"], ["4126040"])
+
+    async def test_wake_refresh_fetches_both_fresh_catalogs_and_keeps_timestamps_separate(self):
+        self.prepare_boosteroid_watch()
+        with patch.object(self.plugin, "_fetch_gfn_catalog", return_value={"10"}) as gfn, \
+                patch.object(self.plugin, "_fetch_boosteroid_catalog", return_value=({"4126040"}, set())) as boosteroid:
+            result = await self.plugin.refresh_cloud_catalogs()
+        self.assertTrue(result["success"])
+        self.assertEqual(gfn.call_count, 1)
+        self.assertEqual(boosteroid.call_count, 1)
+        self.plugin._gfn_checked_at = time.time() - 100
+        gfn_result = await self.plugin.get_gfn_availability(["10"])
+        boosteroid_result = await self.plugin.get_boosteroid_availability(["4126040"])
+        self.assertEqual(gfn_result["checked_at"], self.plugin._gfn_checked_at)
+        self.assertEqual(gfn_result["cached_for_hours"], 24)
+        self.assertEqual(boosteroid_result["cached_for_hours"], 0.25)
+
+    async def test_failed_boosteroid_refresh_does_not_present_old_negative_as_current_or_erase_baseline(self):
+        self.prepare_boosteroid_watch()
+        self.plugin._boosteroid_app_ids.add("4126040")
+        await self.plugin.get_notification_events([])
+        self.plugin._boosteroid_app_ids = {"1"}
+        self.plugin._boosteroid_checked_at = time.time() - 901
+        with patch.object(self.plugin, "_fetch_boosteroid_catalog", side_effect=OSError("offline")) as fetch:
+            badge = await self.plugin.get_boosteroid_availability(["4126040"])
+            watch = await self.plugin.get_watchlist()
+            await self.plugin.get_notification_events([])
+        self.assertEqual(fetch.call_count, 1)
+        self.assertIsNone(badge["availability"]["4126040"])
+        self.assertEqual(watch["entries"][0]["boosteroid"], "unavailable")
+        self.assertIn("4126040", self.plugin._read_notification_state()["boosteroid_available"])
+
+    def test_aniimo_official_boosteroid_record_maps_to_steam_without_title_guess(self):
+        payload = {"meta": {"current_page": 1, "last_page": 1}, "data": [
+            {"id": 3144, "name": "Aniimo", "platform": [6], "applicationLink": None,
+             "maintenance": False, "stores": {"steam": "https://store.steampowered.com/app/4126040"}}]}
+        with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(payload))), \
+                patch.object(self.plugin, "_resolve_steam_app_id_by_name", side_effect=AssertionError("must use official ID")):
+            ids, maintenance = self.plugin._fetch_boosteroid_catalog()
+        self.assertEqual(ids, {"4126040"})
+        self.assertEqual(maintenance, set())
+
     async def test_independent_badge_sizes_persist_and_reject_invalid_values(self):
         self.assertEqual((await self.plugin.get_settings())["store_badge_percent"], 100)
         result = await self.plugin.set_badge_sizes(85, 175)
