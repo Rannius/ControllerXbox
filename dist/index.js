@@ -645,7 +645,7 @@ async function toggleWatchlistGame(appId) {
         const current = watchedGames.get(appId);
         const response = current
             ? await withBackendTimeout(removeWatchlistGame(appId), 120_000)
-            : await withBackendTimeout(addWatchlistGame(appId, true, true), 120_000);
+            : await withBackendTimeout(addWatchlistGame(appId, true, true, false), 120_000);
         if (!response.success)
             throw new Error(response.error || "A figyelőlista módosítása sikertelen.");
         applyWatchlistEntries(response.entries ?? []);
@@ -849,7 +849,13 @@ function watchlistBoosteroidLabel(state) {
         return "nem elérhető";
     return "katalógushiba";
 }
+function controllerWatchLabel(entry) {
+    const label = { none: "nincs jelzett támogatás", partial: "részleges támogatás", full: "teljes támogatás", unknown: "még nem ellenőrzött" }[entry.controller] ?? "még nem ellenőrzött";
+    return label + (entry.controller_checked_at && Date.now() / 1000 - entry.controller_checked_at >= 86400 ? " · korábbi adat" : "");
+}
 function historyEventLabel(entry) {
+    if (entry.platform === "controller")
+        return entry.event_type === "full" ? "Teljes kontroller-támogatást kapott" : "Részleges kontroller-támogatást kapott";
     if (entry.platform === "gfn")
         return "Felkerült a GeForce NOW-ra";
     if (entry.event_type === "maintenance")
@@ -928,28 +934,29 @@ function refreshCloudData() {
         const result = await withBackendTimeout(refreshCloudCatalogs(), 180_000);
         if (!pluginActive)
             return;
-        await checkBackgroundNotifications();
+        await checkBackgroundNotifications(0, true);
         await refreshCloudViews();
         if (!result.success)
             throw new Error(result.error || "A felhőkatalógus frissítése sikertelen.");
     })().finally(() => { cloudRefresh = undefined; });
     return cloudRefresh;
 }
-function checkBackgroundNotifications(attempt = 0) {
+function checkBackgroundNotifications(attempt = 0, refreshControllers = false) {
     if (notificationCheck)
         return notificationCheck;
     if (notificationTimer !== undefined)
         window.clearTimeout(notificationTimer);
     notificationTimer = undefined;
-    notificationCheck = runBackgroundNotifications(attempt).finally(() => { notificationCheck = undefined; });
+    notificationCheck = runBackgroundNotifications(attempt, refreshControllers).finally(() => { notificationCheck = undefined; });
     return notificationCheck;
 }
-async function runBackgroundNotifications(attempt = 0) {
+async function runBackgroundNotifications(attempt = 0, refreshControllers = false) {
+    let controllerPending = false;
     const appIds = getSteamLibraryAppIds();
     if (!pluginActive)
         return;
     if (!appIds.length && attempt < 3) {
-        notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(attempt + 1), 10_000);
+        notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(attempt + 1, refreshControllers), 10_000);
         return;
     }
     notificationTimer = undefined;
@@ -972,9 +979,14 @@ async function runBackgroundNotifications(attempt = 0) {
         console.warn("Deck Play Badges update notification check failed", error);
     }
     try {
-        const response = await withBackendTimeout(getNotificationEvents(appIds, getSteamLibraryGameNames()), 180_000);
+        const response = await withBackendTimeout(getNotificationEvents(appIds, getSteamLibraryGameNames(), refreshControllers), 180_000);
         if (!response.success)
             throw new Error(response.error || "Az értesítési ellenőrzés sikertelen.");
+        controllerPending = (response.controller_pending ?? 0) > 0;
+        const controllerIds = response.controller_improved_app_ids ?? [];
+        if (controllerIds.length)
+            toaster.toast({ title: "Javult a kontroller-támogatás",
+                body: formatNotificationGameNames(controllerIds, controllerIds.length, response.app_names) + ". Részletek az előzményekben." });
         const gfnAdded = response.gfn_added ?? 0;
         if (gfnAdded > 0) {
             toaster.toast({
@@ -1007,7 +1019,7 @@ async function runBackgroundNotifications(attempt = 0) {
     }
     finally {
         if (pluginActive) {
-            notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(), NOTIFICATION_CHECK_INTERVAL_MS);
+            notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(), controllerPending ? 1000 : NOTIFICATION_CHECK_INTERVAL_MS);
         }
     }
 }
@@ -2109,6 +2121,7 @@ function Content() {
     const [searchWorking, setSearchWorking] = SP_REACT.useState(false);
     const [newWatchGfn, setNewWatchGfn] = SP_REACT.useState(true);
     const [newWatchBoosteroid, setNewWatchBoosteroid] = SP_REACT.useState(true);
+    const [newWatchController, setNewWatchController] = SP_REACT.useState(false);
     const [history, setHistory] = SP_REACT.useState([]);
     const [unreadHistoryCount, setUnreadHistoryCount] = SP_REACT.useState(0);
     const [historyWorking, setHistoryWorking] = SP_REACT.useState(false);
@@ -2300,13 +2313,13 @@ function Content() {
         }
     };
     const addWatchedGame = async (appId) => {
-        if (!newWatchGfn && !newWatchBoosteroid) {
-            toaster.toast({ title: "Figyelőlista", body: "Legalább egy platformot válassz ki." });
+        if (!newWatchGfn && !newWatchBoosteroid && !newWatchController) {
+            toaster.toast({ title: "Figyelőlista", body: "Legalább egy figyelési szempontot válassz ki." });
             return;
         }
         setWatchWorking(true);
         try {
-            const response = await withBackendTimeout(addWatchlistGame(appId, newWatchGfn, newWatchBoosteroid), 120_000);
+            const response = await withBackendTimeout(addWatchlistGame(appId, newWatchGfn, newWatchBoosteroid, newWatchController), 120_000);
             if (!response.success)
                 throw new Error(response.error || "A játék felvétele sikertelen.");
             const entries = response.entries ?? [];
@@ -2340,14 +2353,14 @@ function Content() {
             setWatchWorking(false);
         }
     };
-    const updateWatchedPlatforms = async (entry, watchGfn, watchBoosteroid) => {
-        if (!watchGfn && !watchBoosteroid) {
-            toaster.toast({ title: "Figyelőlista", body: "Legalább egy platformot hagyj bekapcsolva." });
+    const updateWatchedPlatforms = async (entry, watchGfn, watchBoosteroid, watchController = entry.watch_controller ?? false) => {
+        if (!watchGfn && !watchBoosteroid && !watchController) {
+            toaster.toast({ title: "Figyelőlista", body: "Legalább egy figyelési szempontot hagyj bekapcsolva." });
             return;
         }
         setWatchWorking(true);
         try {
-            const response = await withBackendTimeout(setWatchlistPlatforms(entry.app_id, watchGfn, watchBoosteroid), 120_000);
+            const response = await withBackendTimeout(setWatchlistPlatforms(entry.app_id, watchGfn, watchBoosteroid, watchController), 120_000);
             if (!response.success)
                 throw new Error(response.error || "A platformbeállítás mentése sikertelen.");
             const entries = response.entries ?? [];
@@ -2490,10 +2503,10 @@ function Content() {
         }
     };
     if (page === "watchlist")
-        return SP_JSX.jsxs(DFL.PanelSection, { title: "Figyel\u0151lista", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(CatalogStatus, {}) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: cloudRefreshing, onClick: () => void refreshWatchedClouds(), children: cloudRefreshing ? "Katalógusok frissítése…" : "GFN és Boosteroid ellenőrzése most" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: cloudRefreshStatus || "Ébredéskor mindkét katalógus frissül. Ellenőrzés 15 percenként is, amíg a plugin fut." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "J\u00E1t\u00E9kn\u00E9v vagy Steam AppID", value: searchQuery, bShowClearAction: true, disabled: searchWorking || watchWorking, onChange: (event) => setSearchQuery(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: searchWorking || watchWorking || searchQuery.trim().length < 2, onClick: searchForGames, children: "Keres\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW figyel\u00E9se", checked: newWatchGfn, disabled: watchWorking, onChange: setNewWatchGfn }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid figyel\u00E9se", checked: newWatchBoosteroid, disabled: watchWorking, onChange: setNewWatchBoosteroid }) }), searchResults.map((entry) => {
+        return SP_JSX.jsxs(DFL.PanelSection, { title: "Figyel\u0151lista", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(CatalogStatus, {}) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: cloudRefreshing, onClick: () => void refreshWatchedClouds(), children: cloudRefreshing ? "Figyelt adatok frissítése…" : "Figyelőlista és katalógusok ellenőrzése most" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: cloudRefreshStatus || "Ébredéskor mindkét katalógus frissül. Ellenőrzés 15 percenként is, amíg a plugin fut." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "J\u00E1t\u00E9kn\u00E9v vagy Steam AppID", value: searchQuery, bShowClearAction: true, disabled: searchWorking || watchWorking, onChange: (event) => setSearchQuery(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: searchWorking || watchWorking || searchQuery.trim().length < 2, onClick: searchForGames, children: "Keres\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW figyel\u00E9se", checked: newWatchGfn, disabled: watchWorking, onChange: setNewWatchGfn }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid figyel\u00E9se", checked: newWatchBoosteroid, disabled: watchWorking, onChange: setNewWatchBoosteroid }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Kontroller-t\u00E1mogat\u00E1s figyel\u00E9se", checked: newWatchController, disabled: watchWorking, onChange: setNewWatchController }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: "Kontroller: a Steam szerinti t\u00E1mogat\u00E1s megjelen\u00E9sekor vagy javul\u00E1sakor jelez. Els\u0151 ellen\u0151rz\u00E9skor kiindul\u00F3 \u00E1llapotot ment. \u00C9bred\u00E9skor frissen ellen\u0151rzi a figyelt j\u00E1t\u00E9kokat, egy\u00E9bk\u00E9nt naponta. A sor folyamatosan halad; Steam-hib\u00E1n\u00E1l k\u00E9s\u0151bb \u00FAjrapr\u00F3b\u00E1lja." }) }), searchResults.map((entry) => {
                     const alreadyWatched = watchedGames.has(entry.app_id);
                     return SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", label: entry.title, description: "Steam AppID: " + entry.app_id, disabled: watchWorking || alreadyWatched, onClick: () => void addWatchedGame(entry.app_id), children: alreadyWatched ? "Már figyelve" : "Hozzáadás" }) }, "search-" + entry.app_id);
-                }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { marginTop: "12px", fontWeight: 700 }, children: ["Figyelt j\u00E1t\u00E9kok (", watchlist.length, ")"] }) }), watchlist.length ? watchlist.map((entry) => SP_JSX.jsxs(SP_REACT.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { paddingTop: "6px", fontWeight: 700 }, children: entry.title }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { opacity: 0.75 }, children: ["GFN: ", entry.watch_gfn ? watchlistGfnLabel(entry.gfn) : "kikapcsolva", " · Boosteroid: ", entry.watch_boosteroid ? watchlistBoosteroidLabel(entry.boosteroid) : "kikapcsolva"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: entry.watch_gfn, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, checked, entry.watch_boosteroid) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: entry.watch_boosteroid, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, entry.watch_gfn, checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: watchWorking, onClick: () => void removeWatchedGame(entry.app_id), children: "Elt\u00E1vol\u00EDt\u00E1s" }) })] }, entry.app_id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A figyel\u0151lista \u00FCres." }) })] });
+                }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { marginTop: "12px", fontWeight: 700 }, children: ["Figyelt j\u00E1t\u00E9kok (", watchlist.length, ")"] }) }), watchlist.length ? watchlist.map((entry) => SP_JSX.jsxs(SP_REACT.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { paddingTop: "6px", fontWeight: 700 }, children: entry.title }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { opacity: 0.75 }, children: ["GFN: ", entry.watch_gfn ? watchlistGfnLabel(entry.gfn) : "kikapcsolva", " · Boosteroid: ", entry.watch_boosteroid ? watchlistBoosteroidLabel(entry.boosteroid) : "kikapcsolva", SP_JSX.jsxs("div", { children: ["Kontroller: ", entry.watch_controller ? controllerWatchLabel(entry) : "kikapcsolva"] })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: entry.watch_gfn, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, checked, entry.watch_boosteroid) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: entry.watch_boosteroid, disabled: watchWorking, onChange: (checked) => void updateWatchedPlatforms(entry, entry.watch_gfn, checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Kontroller-t\u00E1mogat\u00E1s", checked: entry.watch_controller ?? false, disabled: watchWorking, onChange: checked => void updateWatchedPlatforms(entry, entry.watch_gfn, entry.watch_boosteroid, checked) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: watchWorking, onClick: () => void removeWatchedGame(entry.app_id), children: "Elt\u00E1vol\u00EDt\u00E1s" }) })] }, entry.app_id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "A figyel\u0151lista \u00FCres." }) })] });
     if (page === "history")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "El\u0151zm\u00E9nyek", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), history.length ? history.map((entry) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { padding: "6px 0" }, children: [SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: entry.title }), SP_JSX.jsx("div", { children: historyEventLabel(entry) }), SP_JSX.jsxs("div", { style: { opacity: 0.7, fontSize: "12px" }, children: [new Date(entry.created_at * 1000).toLocaleString("hu-HU"), " \u00B7 Steam AppID: ", entry.app_id] })] }) }, entry.id)) : SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "M\u00E9g nincs r\u00F6gz\u00EDtett esem\u00E9ny." }) }), history.length ? SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: historyWorking, onClick: clearHistory, children: "El\u0151zm\u00E9nyek t\u00F6rl\u00E9se" }) }) : null] });
     return SP_JSX.jsxs(DFL.PanelSection, { title: "Deck Play Badges", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("watchlist"), children: ["Figyel\u0151lista (", watchlist.length, ")"] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", onClick: () => openPage("history"), children: ["El\u0151zm\u00E9nyek", unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: status }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(HungarianProgress, { manager: hungarianCollection, loadCurator: loadCuratorProgress }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(CatalogStatus, {}) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: stats

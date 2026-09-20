@@ -18,6 +18,74 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_wake_refreshes_all_watched_controllers_even_with_fresh_cache(self):
+        self.prepare_boosteroid_watch()
+        self.plugin._watchlist = {str(i): {"app_id": str(i), "title": str(i), "added_at": time.time(),
+            "watch_gfn": False, "watch_boosteroid": False, "watch_controller": True} for i in range(12)}
+        for key in self.plugin._watchlist:
+            self.plugin._cache[key] = {"schema_version": self.cache_schema_version, "checked_at": time.time(),
+                "controller_support_level": "none", "hungarian": False}
+        await self.plugin.get_notification_events([])
+        with patch.object(self.plugin, "_fetch_support", return_value={"controller_support_level": "full", "hungarian": False}) as fetch:
+            first = await self.plugin.get_notification_events([], {}, True)
+            self.assertEqual(first["controller_pending"], 4)
+            second = await self.plugin.get_notification_events([])
+            self.assertEqual(second["controller_pending"], 0)
+            self.assertEqual(fetch.call_count, 12)
+        self.assertEqual(len(first["controller_improved_app_ids"] + second["controller_improved_app_ids"]), 12)
+
+    async def test_controller_watch_notifies_improvements_once_and_keeps_baseline_on_failure(self):
+        self.prepare_boosteroid_watch()
+        self.plugin._watchlist["4126040"]["watch_controller"] = True
+        def details(level):
+            return {"controller_support_level": level, "hungarian": False}
+        with patch.object(self.plugin, "_fetch_support", return_value=details("none")):
+            first = await self.plugin.get_notification_events([])
+        self.assertEqual(first["controller_improved_app_ids"], [])
+        self.plugin._cache["4126040"]["checked_at"] -= 86401
+        with patch.object(self.plugin, "_fetch_support", return_value=None):
+            failed = await self.plugin.get_notification_events([])
+        self.assertEqual(failed["controller_improved_app_ids"], [])
+        self.assertEqual(self.plugin._read_notification_state()["controller_levels"]["4126040"], "none")
+        self.plugin._steam_retry.clear()
+        for level in ("partial", "full"):
+            self.plugin._cache["4126040"]["checked_at"] -= 86401
+            with patch.object(self.plugin, "_fetch_support", return_value=details(level)) as fetch:
+                result = await self.plugin.get_notification_events([])
+                repeated = await self.plugin.get_notification_events([])
+            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(result["controller_improved_app_ids"], ["4126040"])
+            self.assertEqual(repeated["controller_improved_app_ids"], [])
+        history = await self.plugin.get_notification_history()
+        self.assertEqual([entry["event_type"] for entry in history["entries"] if entry["platform"] == "controller"], ["full", "partial"])
+
+    async def test_controller_only_watch_persists_and_reenable_resets_baseline(self):
+        self.prepare_boosteroid_watch()
+        result = await self.plugin.set_watchlist_platforms("4126040", False, False, True)
+        self.assertTrue(result["success"])
+        restarted = self.plugin_type()
+        await restarted._load_watchlist()
+        self.assertTrue(restarted._watchlist["4126040"]["watch_controller"])
+        self.assertFalse(restarted._watchlist["4126040"]["watch_gfn"])
+        with patch.object(self.plugin, "_fetch_support", return_value={"controller_support_level": "none", "hungarian": False}):
+            await self.plugin.get_notification_events([])
+        await self.plugin.set_watchlist_platforms("4126040", True, False, False)
+        self.plugin._cache["4126040"]["controller_support_level"] = "full"
+        await self.plugin.set_watchlist_platforms("4126040", False, False, True)
+        result = await self.plugin.get_notification_events([])
+        self.assertEqual(result["controller_improved_app_ids"], [])
+        invalid = await self.plugin.set_watchlist_platforms("4126040", False, False, False)
+        self.assertFalse(invalid["success"])
+
+    async def test_controller_queue_bounds_work_and_skips_backoff_games(self):
+        watchlist = {str(i): {"watch_controller": True} for i in range(20)}
+        self.plugin._steam_retry["0"] = {"attempted_at": time.time(), "retry_at": time.time() + 900}
+        with patch.object(self.plugin, "_fetch_support", return_value={"controller_support_level": "full", "hungarian": False}) as fetch:
+            levels = await self.plugin._watched_controller_levels(watchlist)
+        self.assertEqual(fetch.call_count, 8)
+        self.assertNotIn("0", levels)
+        self.assertEqual(len(levels), 8)
+
     async def test_catalog_loss_requires_two_spaced_successes_and_survives_restart(self):
         for provider in ("gfn", "boosteroid"):
             setattr(self.plugin, "_" + provider + "_app_ids", {"1", "2"})

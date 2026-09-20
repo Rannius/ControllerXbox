@@ -97,6 +97,8 @@ type SettingsResponse = PluginSettings & { success: boolean; error?: string };
 type NotificationEventsResponse = {
   success: boolean;
   tracked_games?: number;
+  controller_improved_app_ids?: string[];
+  controller_pending?: number;
   gfn_added?: number;
   gfn_added_app_ids?: string[];
   boosteroid_added?: number;
@@ -112,6 +114,9 @@ type WatchlistEntry = {
   added_at: number;
   watch_gfn: boolean;
   watch_boosteroid: boolean;
+  watch_controller: boolean;
+  controller: "none" | "partial" | "full" | "unknown";
+  controller_checked_at: number;
   gfn: "available" | "not_available" | "unavailable";
   boosteroid: "available" | "maintenance" | "not_available" | "unavailable";
 };
@@ -120,8 +125,8 @@ type SteamSearchEntry = { app_id: string; title: string };
 type SteamSearchResponse = { success: boolean; entries?: SteamSearchEntry[]; error?: string };
 type NotificationHistoryEntry = {
   id: string;
-  platform: "gfn" | "boosteroid";
-  event_type: "available" | "maintenance";
+  platform: "gfn" | "boosteroid" | "controller";
+  event_type: "available" | "maintenance" | "partial" | "full";
   app_id: string;
   title: string;
   created_at: number;
@@ -202,18 +207,21 @@ const setNotificationPreferences = callable<[
 const getNotificationEvents = callable<[
   appIds: string[],
   appNames: Record<string, string>,
+  refreshControllers: boolean,
 ], NotificationEventsResponse>("get_notification_events");
 const getWatchlist = callable<[], WatchlistResponse>("get_watchlist");
 const addWatchlistGame = callable<[
   appId: string,
   watchGfn: boolean,
   watchBoosteroid: boolean,
+  watchController: boolean,
 ], WatchlistResponse>("add_watchlist_game");
 const removeWatchlistGame = callable<[appId: string], WatchlistResponse>("remove_watchlist_game");
 const setWatchlistPlatforms = callable<[
   appId: string,
   watchGfn: boolean,
   watchBoosteroid: boolean,
+  watchController: boolean,
 ], WatchlistResponse>("set_watchlist_platforms");
 const searchSteamGames = callable<[query: string], SteamSearchResponse>("search_steam_games");
 const getNotificationHistory = callable<[], NotificationHistoryResponse>("get_notification_history");
@@ -361,7 +369,7 @@ async function toggleWatchlistGame(appId: string): Promise<void> {
     const current = watchedGames.get(appId);
     const response = current
       ? await withBackendTimeout(removeWatchlistGame(appId), 120_000)
-      : await withBackendTimeout(addWatchlistGame(appId, true, true), 120_000);
+      : await withBackendTimeout(addWatchlistGame(appId, true, true, false), 120_000);
     if (!response.success) throw new Error(response.error || "A figyelőlista módosítása sikertelen.");
     applyWatchlistEntries(response.entries ?? []);
     toaster.toast({
@@ -555,7 +563,13 @@ function watchlistBoosteroidLabel(state: WatchlistEntry["boosteroid"]): string {
   return "katalógushiba";
 }
 
+function controllerWatchLabel(entry: WatchlistEntry): string {
+  const label = { none: "nincs jelzett támogatás", partial: "részleges támogatás", full: "teljes támogatás", unknown: "még nem ellenőrzött" }[entry.controller] ?? "még nem ellenőrzött";
+  return label + (entry.controller_checked_at && Date.now() / 1000 - entry.controller_checked_at >= 86400 ? " · korábbi adat" : "");
+}
+
 function historyEventLabel(entry: NotificationHistoryEntry): string {
+  if (entry.platform === "controller") return entry.event_type === "full" ? "Teljes kontroller-támogatást kapott" : "Részleges kontroller-támogatást kapott";
   if (entry.platform === "gfn") return "Felkerült a GeForce NOW-ra";
   if (entry.event_type === "maintenance") return "Boosteroid-karbantartás alá került";
   return "Felkerült a Boosteroidra";
@@ -638,26 +652,27 @@ function refreshCloudData(): Promise<void> {
     if (!pluginActive) return;
     const result = await withBackendTimeout(refreshCloudCatalogs(), 180_000);
     if (!pluginActive) return;
-    await checkBackgroundNotifications();
+    await checkBackgroundNotifications(0, true);
     await refreshCloudViews();
     if (!result.success) throw new Error(result.error || "A felhőkatalógus frissítése sikertelen.");
   })().finally(() => { cloudRefresh = undefined; });
   return cloudRefresh;
 }
 
-function checkBackgroundNotifications(attempt = 0): Promise<void> {
+function checkBackgroundNotifications(attempt = 0, refreshControllers = false): Promise<void> {
   if (notificationCheck) return notificationCheck;
   if (notificationTimer !== undefined) window.clearTimeout(notificationTimer);
   notificationTimer = undefined;
-  notificationCheck = runBackgroundNotifications(attempt).finally(() => { notificationCheck = undefined; });
+  notificationCheck = runBackgroundNotifications(attempt, refreshControllers).finally(() => { notificationCheck = undefined; });
   return notificationCheck;
 }
 
-async function runBackgroundNotifications(attempt = 0): Promise<void> {
+async function runBackgroundNotifications(attempt = 0, refreshControllers = false): Promise<void> {
+  let controllerPending = false;
   const appIds = getSteamLibraryAppIds();
   if (!pluginActive) return;
   if (!appIds.length && attempt < 3) {
-    notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(attempt + 1), 10_000);
+    notificationTimer = window.setTimeout(() => void checkBackgroundNotifications(attempt + 1, refreshControllers), 10_000);
     return;
   }
   notificationTimer = undefined;
@@ -681,10 +696,14 @@ async function runBackgroundNotifications(attempt = 0): Promise<void> {
   }
   try {
     const response = await withBackendTimeout(
-      getNotificationEvents(appIds, getSteamLibraryGameNames()),
+      getNotificationEvents(appIds, getSteamLibraryGameNames(), refreshControllers),
       180_000,
     );
     if (!response.success) throw new Error(response.error || "Az értesítési ellenőrzés sikertelen.");
+    controllerPending = (response.controller_pending ?? 0) > 0;
+    const controllerIds = response.controller_improved_app_ids ?? [];
+    if (controllerIds.length) toaster.toast({ title: "Javult a kontroller-támogatás",
+      body: formatNotificationGameNames(controllerIds, controllerIds.length, response.app_names) + ". Részletek az előzményekben." });
     const gfnAdded = response.gfn_added ?? 0;
     if (gfnAdded > 0) {
       toaster.toast({
@@ -721,7 +740,7 @@ async function runBackgroundNotifications(attempt = 0): Promise<void> {
     if (pluginActive) {
       notificationTimer = window.setTimeout(
         () => void checkBackgroundNotifications(),
-        NOTIFICATION_CHECK_INTERVAL_MS,
+        controllerPending ? 1000 : NOTIFICATION_CHECK_INTERVAL_MS,
       );
     }
   }
@@ -1782,6 +1801,7 @@ function Content() {
   const [searchWorking, setSearchWorking] = useState(false);
   const [newWatchGfn, setNewWatchGfn] = useState(true);
   const [newWatchBoosteroid, setNewWatchBoosteroid] = useState(true);
+  const [newWatchController, setNewWatchController] = useState(false);
   const [history, setHistory] = useState<NotificationHistoryEntry[]>([]);
   const [unreadHistoryCount, setUnreadHistoryCount] = useState(0);
   const [historyWorking, setHistoryWorking] = useState(false);
@@ -1973,14 +1993,14 @@ function Content() {
   };
 
   const addWatchedGame = async (appId: string) => {
-    if (!newWatchGfn && !newWatchBoosteroid) {
-      toaster.toast({ title: "Figyelőlista", body: "Legalább egy platformot válassz ki." });
+    if (!newWatchGfn && !newWatchBoosteroid && !newWatchController) {
+      toaster.toast({ title: "Figyelőlista", body: "Legalább egy figyelési szempontot válassz ki." });
       return;
     }
     setWatchWorking(true);
     try {
       const response = await withBackendTimeout(
-        addWatchlistGame(appId, newWatchGfn, newWatchBoosteroid),
+        addWatchlistGame(appId, newWatchGfn, newWatchBoosteroid, newWatchController),
         120_000,
       );
       if (!response.success) throw new Error(response.error || "A játék felvétele sikertelen.");
@@ -2016,15 +2036,16 @@ function Content() {
     entry: WatchlistEntry,
     watchGfn: boolean,
     watchBoosteroid: boolean,
+    watchController: boolean = entry.watch_controller ?? false,
   ) => {
-    if (!watchGfn && !watchBoosteroid) {
-      toaster.toast({ title: "Figyelőlista", body: "Legalább egy platformot hagyj bekapcsolva." });
+    if (!watchGfn && !watchBoosteroid && !watchController) {
+      toaster.toast({ title: "Figyelőlista", body: "Legalább egy figyelési szempontot hagyj bekapcsolva." });
       return;
     }
     setWatchWorking(true);
     try {
       const response = await withBackendTimeout(
-        setWatchlistPlatforms(entry.app_id, watchGfn, watchBoosteroid),
+        setWatchlistPlatforms(entry.app_id, watchGfn, watchBoosteroid, watchController),
         120_000,
       );
       if (!response.success) throw new Error(response.error || "A platformbeállítás mentése sikertelen.");
@@ -2206,7 +2227,7 @@ function Content() {
   if (page === "watchlist") return <PanelSection title="Figyelőlista">
     <PanelSectionRow><CatalogStatus /></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={cloudRefreshing}
-      onClick={() => void refreshWatchedClouds()}>{cloudRefreshing ? "Katalógusok frissítése…" : "GFN és Boosteroid ellenőrzése most"}</ButtonItem></PanelSectionRow>
+      onClick={() => void refreshWatchedClouds()}>{cloudRefreshing ? "Figyelt adatok frissítése…" : "Figyelőlista és katalógusok ellenőrzése most"}</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{cloudRefreshStatus || "Ébredéskor mindkét katalógus frissül. Ellenőrzés 15 percenként is, amíg a plugin fut."}</div></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
     <PanelSectionRow><TextField
@@ -2233,6 +2254,11 @@ function Content() {
       disabled={watchWorking}
       onChange={setNewWatchBoosteroid}
     /></PanelSectionRow>
+    <PanelSectionRow><ToggleField label="Kontroller-támogatás figyelése" checked={newWatchController}
+      disabled={watchWorking} onChange={setNewWatchController} /></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>
+      Kontroller: a Steam szerinti támogatás megjelenésekor vagy javulásakor jelez. Első ellenőrzéskor kiinduló állapotot ment. Ébredéskor frissen ellenőrzi a figyelt játékokat, egyébként naponta. A sor folyamatosan halad; Steam-hibánál később újrapróbálja.
+    </div></PanelSectionRow>
     {searchResults.map((entry) => {
       const alreadyWatched = watchedGames.has(entry.app_id);
       return <PanelSectionRow key={"search-" + entry.app_id}><ButtonItem
@@ -2251,6 +2277,7 @@ function Content() {
       <PanelSectionRow><div style={{ opacity: 0.75 }}>
         GFN: {entry.watch_gfn ? watchlistGfnLabel(entry.gfn) : "kikapcsolva"}
         {" · Boosteroid: "}{entry.watch_boosteroid ? watchlistBoosteroidLabel(entry.boosteroid) : "kikapcsolva"}
+        <div>Kontroller: {entry.watch_controller ? controllerWatchLabel(entry) : "kikapcsolva"}</div>
       </div></PanelSectionRow>
       <PanelSectionRow><ToggleField
         label="GeForce NOW"
@@ -2264,6 +2291,8 @@ function Content() {
         disabled={watchWorking}
         onChange={(checked) => void updateWatchedPlatforms(entry, entry.watch_gfn, checked)}
       /></PanelSectionRow>
+      <PanelSectionRow><ToggleField label="Kontroller-támogatás" checked={entry.watch_controller ?? false}
+        disabled={watchWorking} onChange={checked => void updateWatchedPlatforms(entry, entry.watch_gfn, entry.watch_boosteroid, checked)} /></PanelSectionRow>
       <PanelSectionRow><ButtonItem
         layout="below"
         disabled={watchWorking}

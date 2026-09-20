@@ -314,12 +314,12 @@ class Plugin:
                                   "retry": self._steam_retry}, separators=(",", ":"))
             await self._run_blocking(self._write_file_atomically, self._steam_state_path, "steam-scan-", payload)
 
-    async def _get_support_shared(self, app_id: str) -> Optional[Dict[str, Any]]:
+    async def _get_support_shared(self, app_id: str, max_age: float = CACHE_TTL_SECONDS) -> Optional[Dict[str, Any]]:
         if self._steam_stopping:
             return None
         task = self._steam_tasks.get(app_id)
         if task is None:
-            task = asyncio.create_task(self._lookup_and_save_support(app_id, self._steam_scan_epoch))
+            task = asyncio.create_task(self._lookup_and_save_support(app_id, self._steam_scan_epoch, max_age))
             self._steam_tasks[app_id] = task
             def completed(done: asyncio.Task) -> None:
                 if self._steam_tasks.get(app_id) is done:
@@ -333,13 +333,13 @@ class Plugin:
             if task.done() and self._steam_tasks.get(app_id) is task:
                 self._steam_tasks.pop(app_id, None)
 
-    async def _lookup_and_save_support(self, app_id: str, epoch: float) -> Optional[Dict[str, Any]]:
+    async def _lookup_and_save_support(self, app_id: str, epoch: float, max_age: float = CACHE_TTL_SECONDS) -> Optional[Dict[str, Any]]:
         async with self._steam_gate:
             if self._steam_stopping or epoch != self._steam_scan_epoch:
                 return None
             entry = self._cache.get(app_id)
             now = time.time()
-            if isinstance(entry, dict) and self._is_fresh(entry, now) and entry.get("controller_support_level") in {"full", "partial", "none"}:
+            if isinstance(entry, dict) and self._is_fresh(entry, now) and now - entry["checked_at"] < max_age and entry.get("controller_support_level") in {"full", "partial", "none"}:
                 return entry
             if self._steam_retry.get(app_id, {}).get("retry_at", 0) > now or self._steam_backoff_until > now:
                 return None
@@ -681,6 +681,9 @@ class Plugin:
                         "app_id": app_id,
                         "title": title,
                         "added_at": float(added_at),
+                        "watch_controller": entry.get("watch_controller") is True,
+                        "controller_refresh_after": entry.get("controller_refresh_after", 0)
+                        if type(entry.get("controller_refresh_after", 0)) in (int, float) else 0,
                         "watch_gfn": entry.get("watch_gfn")
                         if isinstance(entry.get("watch_gfn"), bool)
                         else True,
@@ -729,6 +732,8 @@ class Plugin:
             "entries": [
                 {
                     **entry,
+                    "controller": self._cache.get(entry["app_id"], {}).get("controller_support_level", "unknown"),
+                    "controller_checked_at": self._cache.get(entry["app_id"], {}).get("checked_at", 0),
                     "gfn": (
                         "available" if entry["app_id"] in gfn_app_ids else "unavailable" if self._gfn_last_error else "not_available"
                     ) if gfn_available else "unavailable",
@@ -749,20 +754,21 @@ class Plugin:
         app_id: Any,
         watch_gfn: Any = True,
         watch_boosteroid: Any = True,
+        watch_controller: Any = False,
     ) -> Dict[str, Any]:
         normalized = str(app_id).strip()
         if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
             return {"success": False, "error": "Adj meg egy érvényes Steam AppID-t."}
-        if not isinstance(watch_gfn, bool) or not isinstance(watch_boosteroid, bool):
+        if not all(isinstance(value, bool) for value in (watch_gfn, watch_boosteroid, watch_controller)):
             return {"success": False, "error": "A platformbeállítás érvénytelen."}
-        if not watch_gfn and not watch_boosteroid:
-            return {"success": False, "error": "Legalább egy platformot válassz ki."}
+        if not watch_gfn and not watch_boosteroid and not watch_controller:
+            return {"success": False, "error": "Legalább egy figyelési szempontot válassz ki."}
         async with self._watchlist_lock:
             already_present = normalized in self._watchlist
             if not already_present and len(self._watchlist) >= WATCHLIST_MAX_ENTRIES:
                 return {"success": False, "error": "A figyelőlista legfeljebb 200 játékot tartalmazhat."}
         if already_present:
-            return await self.set_watchlist_platforms(normalized, watch_gfn, watch_boosteroid)
+            return await self.set_watchlist_platforms(normalized, watch_gfn, watch_boosteroid, watch_controller)
         title = await self._run_blocking(self._fetch_steam_title, normalized)
         if not title:
             return {"success": False, "error": "A Steam-játék nem található vagy az Áruház nem válaszolt."}
@@ -773,10 +779,12 @@ class Plugin:
                 "added_at": time.time(),
                 "watch_gfn": watch_gfn,
                 "watch_boosteroid": watch_boosteroid,
+                "watch_controller": watch_controller,
             }
             await self._save_watchlist()
         await asyncio.gather(self._ensure_gfn_catalog(), self._ensure_boosteroid_catalog())
         await self._baseline_notification_app(normalized, watch_gfn, watch_boosteroid)
+        await self._reset_controller_baseline(normalized)
         return await self.get_watchlist()
 
     async def set_watchlist_platforms(
@@ -784,21 +792,26 @@ class Plugin:
         app_id: Any,
         watch_gfn: Any,
         watch_boosteroid: Any,
+        watch_controller: Any = False,
     ) -> Dict[str, Any]:
         normalized = str(app_id).strip()
-        if not isinstance(watch_gfn, bool) or not isinstance(watch_boosteroid, bool):
+        if not all(isinstance(value, bool) for value in (watch_gfn, watch_boosteroid, watch_controller)):
             return {"success": False, "error": "A platformbeállítás érvénytelen."}
-        if not watch_gfn and not watch_boosteroid:
-            return {"success": False, "error": "Legalább egy platformot hagyj bekapcsolva."}
+        if not watch_gfn and not watch_boosteroid and not watch_controller:
+            return {"success": False, "error": "Legalább egy figyelési szempontot hagyj bekapcsolva."}
         async with self._watchlist_lock:
             entry = self._watchlist.get(normalized)
             if entry is None:
                 return {"success": False, "error": "A játék nincs a figyelőlistán."}
+            controller_enabled = watch_controller and not entry.get("watch_controller", False)
+            entry["watch_controller"] = watch_controller
             entry["watch_gfn"] = watch_gfn
             entry["watch_boosteroid"] = watch_boosteroid
             await self._save_watchlist()
         await asyncio.gather(self._ensure_gfn_catalog(), self._ensure_boosteroid_catalog())
         await self._baseline_notification_app(normalized, watch_gfn, watch_boosteroid)
+        if controller_enabled or not watch_controller:
+            await self._reset_controller_baseline(normalized)
         return await self.get_watchlist()
 
     async def remove_watchlist_game(self, app_id: Any) -> Dict[str, Any]:
@@ -1607,8 +1620,8 @@ class Plugin:
             if (
                 app_id.isdigit()
                 and title
-                and platform in {"gfn", "boosteroid"}
-                and event_type in {"available", "maintenance"}
+                and platform in {"gfn", "boosteroid", "controller"}
+                and event_type in {"available", "maintenance", "partial", "full"}
                 and isinstance(created_at, (int, float))
                 and event_id
             ):
@@ -1712,12 +1725,46 @@ class Plugin:
                 json.dumps(state, separators=(",", ":")),
             )
 
-    async def get_notification_events(self, app_ids: Any, app_names: Any = None) -> Dict[str, Any]:
+    async def _reset_controller_baseline(self, app_id: str) -> None:
+        async with self._notification_lock:
+            state = await self._run_blocking(self._read_notification_state)
+            levels = state.get("controller_levels", {})
+            if isinstance(levels, dict):
+                levels.pop(app_id, None)
+                state["controller_levels"] = levels
+                await self._run_blocking(self._write_file_atomically, self._notification_state_path,
+                                         "controller-notifications-", json.dumps(state, separators=(",", ":")))
+
+    async def _watched_controller_levels(self, watchlist: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+        ids = [key for key, entry in watchlist.items() if entry.get("watch_controller", False)]
+        now = time.time()
+        pending = sorted((key for key in ids if not self._is_fresh(self._cache.get(key, {}), now)
+                          or self._cache[key].get("controller_support_level") not in {"none", "partial", "full"}
+                          or now - self._cache[key]["checked_at"] >= 86400
+                          or self._cache[key]["checked_at"] < watchlist[key].get("controller_refresh_after", 0)),
+                         key=lambda key: self._cache.get(key, {}).get("checked_at", 0))
+        # Bound notification latency even for a large watchlist; failed entries
+        # in backoff must not starve the remaining games.
+        pending = [key for key in pending if self._steam_retry.get(key, {}).get("retry_at", 0) <= now]
+        await asyncio.gather(*(self._get_support_shared(key, 0) for key in pending[:8]))
+        return {key: self._cache[key]["controller_support_level"] for key in ids
+                if self._is_fresh(self._cache.get(key, {}), time.time())
+                and time.time() - self._cache[key]["checked_at"] < 86400
+                and self._cache[key]["checked_at"] >= watchlist[key].get("controller_refresh_after", 0)
+                and self._cache[key].get("controller_support_level") in {"none", "partial", "full"}}
+
+    async def get_notification_events(self, app_ids: Any, app_names: Any = None, refresh_controllers: Any = False) -> Dict[str, Any]:
         """Return each catalog/update change once for the library and watchlist."""
         library_app_ids = self._valid_library_app_ids(app_ids)
         supplied_names = self._valid_app_names(app_names)
         async with self._watchlist_lock:
+            if refresh_controllers is True:
+                for entry in self._watchlist.values():
+                    if entry.get("watch_controller", False):
+                        entry["controller_refresh_after"] = time.time()
+                await self._save_watchlist()
             watchlist = {app_id: dict(entry) for app_id, entry in self._watchlist.items()}
+        current_controller = await self._watched_controller_levels(watchlist)
         tracked_app_ids = library_app_ids | set(watchlist)
         gfn_tracked_app_ids = library_app_ids | {
             app_id for app_id, entry in watchlist.items() if entry.get("watch_gfn", True)
@@ -1774,10 +1821,21 @@ class Plugin:
                 else []
             )
 
+            previous_controller = state.get("controller_levels", {}) if valid_state else {}
+            if not isinstance(previous_controller, dict):
+                previous_controller = {}
+            previous_controller = {key: value for key, value in previous_controller.items()
+                                   if key in watchlist and watchlist[key].get("watch_controller", False)
+                                   and value in {"none", "partial", "full"}}
+            ranks = {"none": 0, "partial": 1, "full": 2}
+            controller_improved = sorted(key for key, value in current_controller.items()
+                                         if key in previous_controller and ranks[value] > ranks[previous_controller[key]])
+            previous_controller.update(current_controller)
             last_notified_update = str(state.get("last_notified_update", "")) if valid_state else ""
 
             next_state = {
                 "schema_version": NOTIFICATION_SCHEMA_VERSION,
+                "controller_levels": previous_controller,
                 "gfn_initialized": gfn_initialized or bool(gfn_available and gfn_tracked_app_ids),
                 "boosteroid_initialized": boosteroid_initialized or bool(
                     boosteroid_available and boosteroid_tracked_app_ids
@@ -1807,7 +1865,7 @@ class Plugin:
                 json.dumps(next_state, separators=(",", ":")),
             )
 
-            history_events = [
+            history_events = [("controller", current_controller[key], key) for key in controller_improved] + [
                 ("gfn", "available", app_id) for app_id in gfn_added_app_ids
             ] + [
                 ("boosteroid", "available", app_id) for app_id in boosteroid_added_app_ids
@@ -1850,7 +1908,7 @@ class Plugin:
                     ),
                 )
 
-        event_app_ids = set(gfn_added_app_ids) | set(boosteroid_added_app_ids) | set(boosteroid_maintenance_app_ids)
+        event_app_ids = set(controller_improved) | set(gfn_added_app_ids) | set(boosteroid_added_app_ids) | set(boosteroid_maintenance_app_ids)
         event_names = {
             app_id: known_names.get(app_id) or "Steam AppID {}".format(app_id)
             for app_id in event_app_ids
@@ -1859,6 +1917,11 @@ class Plugin:
         return {
             "success": True,
             "tracked_games": len(tracked_app_ids),
+            "controller_improved_app_ids": controller_improved,
+            "controller_pending": sum(1 for key, entry in watchlist.items()
+                                      if entry.get("watch_controller", False) and key not in current_controller
+                                      and self._steam_retry.get(key, {}).get("retry_at", 0) <= time.time())
+                                      if self._steam_backoff_until <= time.time() else 0,
             "gfn_added": (
                 len(gfn_added_app_ids) if self._settings.get("notify_gfn_additions", True) else 0
             ),
