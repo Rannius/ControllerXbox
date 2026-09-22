@@ -18,6 +18,73 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def aks_fixture():
+        return {"merchants": {"1": {"name": "Eneba"}, "2": {"name": "GAMIVO"}},
+                "editions": {"1": {"name": "Standard"}, "2": {"name": "Deluxe"}},
+                "regions": {"2": {"filter_name": "STEAM GLOBAL"}, "25": {"filter_name": "STEAM GIFT GLOBAL"},
+                            "412": {"filter_name": "STEAM ACCOUNT"}, "9": {"filter_name": "STEAM EU"}},
+                "prices": [{"account": False, "activationPlatform": "steam", "dispo": 1, "isFirstParty": False,
+                            "allowCard": True, "region": "2", "merchant": 1, "edition": "1", "priceCard": 10,
+                            "voucher_code": "SAVE"}]}
+
+    def test_aks_filters_exclude_accounts_other_platforms_unknown_types_and_wrong_editions(self):
+        data = self.aks_fixture()
+        base = data["prices"][0]
+        invalid = [{"account": True}, {"account": None}, {"activationPlatform": "epic"}, {"region": "412"},
+                   {"region": "unknown"}, {"edition": "2"}, {"dispo": 0}, {"isFirstParty": True},
+                   {"priceCard": 0.02}, {"priceCard": float("nan")}, {"priceCard": -1}, {"allowCard": False}]
+        data["prices"] += [{**base, **change} for change in invalid]
+        data["prices"].append({**base, "region": "25", "priceCard": 8, "merchant": 2})
+        result = self.plugin._aks_filter(data, {"merchants": [], "allow_gifts": True})
+        self.assertEqual([r["price"] for r in result], [8, 10])
+        self.assertIn("Gift", result[0]["kind"])
+        self.assertEqual(len(self.plugin._aks_filter(data, {"merchants": [], "allow_gifts": False})), 1)
+        self.assertEqual(self.plugin._aks_filter(data, {"merchants": ["ENEBA"], "allow_gifts": True})[0]["price"], 10)
+        self.assertEqual(self.plugin._aks_filter(data, {"merchants": ["missing"], "allow_gifts": True}), [])
+
+    def test_aks_requires_unique_exact_pc_title_and_decodes_json_without_execution(self):
+        row = '<li data-platforms="pc"><a href="https://www.allkeyshop.com/blog/buy-satisfactory-cd-key-compare-prices/"><h2 class="ls-results-row-game-title">Satisfactory</h2></a></li>'
+        self.assertIn('satisfactory', self.plugin._aks_search_match(row, 'Satisfactory™'))
+        legacy = row.replace('buy-satisfactory-cd-key-compare-prices', 'compare-and-buy-cd-key-for-digital-download-portal-2').replace('Satisfactory', 'Portal 2')
+        self.assertIn('portal-2', self.plugin._aks_search_match(legacy, 'Portal 2'))
+        for fragment in (row.replace('Satisfactory</h2>', 'Satisfactory Steam Account</h2>'),
+                         row.replace('data-platforms="pc"', 'data-platforms="ps5"'),
+                         row + row.replace('buy-satisfactory-cd-key', 'buy-satisfactory-key')):
+            with self.assertRaises(ValueError):
+                self.plugin._aks_search_match(fragment, 'Satisfactory')
+        page = '<script>var gamePageTrans = ' + json.dumps(self.aks_fixture()) + '; throw Error("must not run");</script>'
+        self.assertEqual(self.plugin._aks_parse(page)["prices"][0]["priceCard"], 10)
+        with self.assertRaises(ValueError):
+            self.plugin._aks_parse('<html>temporary error</html>')
+
+    async def test_aks_preferences_persist_and_cached_offers_refilter_without_network(self):
+        data = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-key/",
+                "data": self.aks_fixture(), "checked_at": time.time()}
+        with patch.object(self.plugin, "_fetch_aks_game", return_value=data) as fetch:
+            first, duplicate = await asyncio.gather(self.plugin.get_allkeyshop_price('10'), self.plugin.get_allkeyshop_price('10'))
+            self.assertEqual(first["offers"], duplicate["offers"])
+            await self.plugin.set_price_preferences(True, False, ["GAMIVO"])
+            filtered = await self.plugin.get_allkeyshop_price('10')
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(filtered["offers"], [])
+        restarted = self.plugin_type()
+        await restarted._load_price_preferences()
+        self.assertEqual(restarted._price_preferences["merchants"], ["GAMIVO"])
+        await self.plugin.set_price_preferences(False, True, [])
+        with patch.object(self.plugin, "_fetch_aks_game") as fetch:
+            self.assertTrue((await self.plugin.get_allkeyshop_price('20'))["disabled"])
+        fetch.assert_not_called()
+
+    async def test_aks_failure_backoff_does_not_return_an_unfiltered_price(self):
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=ValueError("changed schema")) as fetch:
+            first = await self.plugin.get_allkeyshop_price('10')
+            second = await self.plugin.get_allkeyshop_price('10')
+        self.assertFalse(first["success"])
+        self.assertFalse(second["success"])
+        self.assertNotIn("offers", first)
+        self.assertEqual(fetch.call_count, 1)
+
     async def test_wake_refreshes_all_watched_controllers_even_with_fresh_cache(self):
         self.prepare_boosteroid_watch()
         self.plugin._watchlist = {str(i): {"app_id": str(i), "title": str(i), "added_at": time.time(),

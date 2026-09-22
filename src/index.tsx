@@ -3,6 +3,7 @@ import { CloudResumeRefresh } from "./cloudResumeRefresh";
 import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
 import { HungarianProgress, CuratorProgress } from "./HungarianProgress";
 import { CatalogStatus } from "./CatalogStatus";
+import { AllKeyShopSettings, resetPriceView, updatePriceView } from "./AllKeyShop";
 import { HungarianCollection, readyCollectionStore } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
@@ -1485,6 +1486,7 @@ async function scanStorePage(): Promise<void> {
   if (!storeMounted || !storeWebSocketReady) return;
   try {
     const result = await sendStoreRuntime(buildStoreScanScript(), true) as StorePageScan | undefined;
+    updatePriceView(result?.url ?? "", sendStoreRuntime);
     const nextIds = new Set(
       (Array.isArray(result?.appIds) ? result.appIds : [])
         .map((value) => String(value))
@@ -1575,6 +1577,7 @@ async function connectToStoreDebugger(): Promise<void> {
 }
 
 function disconnectStoreDebugger(): void {
+  resetPriceView();
   if (storeScanTimer !== undefined) window.clearTimeout(storeScanTimer);
   if (storeReconnectTimer !== undefined) window.clearTimeout(storeReconnectTimer);
   storeScanTimer = undefined;
@@ -1583,6 +1586,7 @@ function disconnectStoreDebugger(): void {
     void sendStoreRuntime(`
       (function() {
         document.getElementById('controller-xbox-store-detail-badges')?.remove();
+        document.getElementById('deck-play-badges-price')?.remove();
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
         delete window.__controllerXboxWatchActions;
@@ -2187,6 +2191,7 @@ function Content() {
     /></PanelSectionRow>
     <BadgeSizeSettings initial={{ library_badge_percent: visibility.library_badge_percent ?? 100,
       store_badge_percent: visibility.store_badge_percent ?? 100 }} save={saveSizes} />
+    <AllKeyShopSettings />
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Értesítések</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Új GeForce NOW-játékok"

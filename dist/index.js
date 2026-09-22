@@ -207,6 +207,126 @@ function CatalogStatus() {
             })] });
 }
 
+const getPreferences = callable("get_price_preferences");
+const setPreferences = callable("set_price_preferences");
+const getPrice = callable("get_allkeyshop_price");
+async function timed(request) {
+    let timer;
+    try {
+        return await Promise.race([request, new Promise((_, reject) => {
+                timer = setTimeout(() => reject(new Error("Az árlekérdezés nem válaszolt időben.")), 60000);
+            })]);
+    }
+    finally {
+        clearTimeout(timer);
+    }
+}
+function AllKeyShopSettings() {
+    const [prefs, setPrefs] = SP_REACT.useState();
+    const [shops, setShops] = SP_REACT.useState("");
+    const [busy, setBusy] = SP_REACT.useState(false);
+    const [message, setMessage] = SP_REACT.useState("");
+    SP_REACT.useEffect(() => {
+        let active = true;
+        void timed(getPreferences()).then(value => {
+            if (active) {
+                if (!value.success)
+                    throw new Error(value.error || "Betöltési hiba");
+                setPrefs(value);
+                setShops(value.merchants.join(", "));
+            }
+        }).catch(error => { if (active)
+            setMessage(String(error)); });
+        return () => { active = false; };
+    }, []);
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "AllKeyShop \u00E1rak" }) }), prefs && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi j\u00E1t\u00E9koldalon", checked: prefs.enabled, disabled: busy, onChange: enabled => setPrefs({ ...prefs, enabled }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Steam Gift is megengedett", checked: prefs.allow_gifts, disabled: busy, onChange: allow_gifts => setPrefs({ ...prefs, allow_gifts }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "El\u0151nyben r\u00E9szes\u00EDtett boltok", description: "Pontos boltnevek vessz\u0151vel elv\u00E1lasztva, pl. Eneba, GAMIVO. \u00DCresen minden megfelel\u0151 bolt.", value: shops, disabled: busy, onChange: event => setShops(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
+                                setBusy(true);
+                                setMessage("");
+                                try {
+                                    const value = await timed(setPreferences(prefs.enabled, prefs.allow_gifts, shops.split(",").map(s => s.trim()).filter(Boolean)));
+                                    if (!value.success)
+                                        throw new Error(value.error || "Mentési hiba");
+                                    setPrefs(value);
+                                    resetPriceView();
+                                    setMessage("Árbeállítások mentve.");
+                                }
+                                catch (error) {
+                                    setMessage(String(error));
+                                }
+                                finally {
+                                    setBusy(false);
+                                }
+                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Csak a megnyitott játékhoz kér le árat; 15 percig tárolja." }) })] });
+}
+// Keep this renderer independent of Steam selectors except for its insertion
+// point. All third-party text is assigned through textContent, never HTML.
+function buildPricePanelScript(appId, result) {
+    return `(() => {
+    const appId = ${JSON.stringify(appId)};
+    const data = ${JSON.stringify(result ?? null).replace(/</g, "\\u003c")};
+    const id = 'deck-play-badges-price';
+    const pageId = location.pathname.match(/^\\/app\\/(\\d+)/)?.[1];
+    let panel = document.getElementById(id);
+    if (!appId || pageId !== appId || data?.disabled) { panel?.remove(); return; }
+    const host = document.querySelector('.game_area_purchase');
+    if (!host) { panel?.remove(); return; }
+    const key = appId + ':' + JSON.stringify(data);
+    if (panel?.dataset.state === key && panel.parentElement === host) return;
+    panel?.remove(); panel = document.createElement('section'); panel.id = id; panel.dataset.state = key;
+    panel.style.cssText = 'box-sizing:border-box;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;margin:12px 0;color:#dce6ed;font:14px/1.5 Arial,sans-serif;overflow-wrap:anywhere;max-width:100%';
+    const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; panel.appendChild(node); };
+    line('AllKeyShop · Steam-kulcs / Gift', true);
+    if (!data) line('Árak betöltése…');
+    else if (!data.success) line(data.error || 'Az ár most nem érhető el.');
+    else {
+      line(data.preferred_only ? 'Legalacsonyabb ár a kiválasztott boltokból' : 'Legalacsonyabb megfelelő ajánlat');
+      if (!data.offers?.length) line('Nincs megfelelő Steam-kulcs vagy Gift az aktuális szűrőkkel.');
+      for (const [index, offer] of (data.offers || []).entries()) {
+        line(offer.price.toFixed(2) + ' € · ' + offer.merchant, index === 0);
+        line(offer.kind + ' · ' + offer.edition + (offer.coupon ? ' · Kupon: ' + offer.coupon : ''));
+      }
+      line('AKS szerinti, kártyadíjat tartalmazó ár; kupon esetén annak feltételeivel.');
+      line('Global/EU besorolás. A végösszeget és a magyarországi aktiválhatóságot az eladónál ellenőrizd.');
+      if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
+      if (/^https:\\/\\/www\\.allkeyshop\\.com\\/blog\\/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+\\/$/.test(data.url || '')) {
+        const link = document.createElement('a'); link.href = data.url; link.textContent = 'AllKeyShop adatlap megnyitása (az ottani lista külön szűrhető)';
+        link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; panel.appendChild(link);
+      }
+    }
+    host.prepend(panel);
+  })();`;
+}
+const prices = new Map();
+let fetching = false;
+let revision = 0;
+let currentApp = "";
+function resetPriceView() { prices.clear(); revision++; currentApp = ""; }
+function updatePriceView(url, send) {
+    let id = "";
+    try {
+        const parsed = new URL(url);
+        if (parsed.hostname === "store.steampowered.com")
+            id = parsed.pathname.match(/^\/app\/(\d+)/)?.[1] ?? "";
+    }
+    catch { /* no game */ }
+    currentApp = id;
+    const cached = prices.get(id);
+    void send(buildPricePanelScript(id, cached?.value)).catch(() => { });
+    if (!id || fetching || (cached && cached.expires > Date.now()))
+        return;
+    fetching = true;
+    const requestRevision = revision;
+    void timed(getPrice(id)).catch(error => ({ success: false, error: String(error) })).then(value => {
+        if (requestRevision !== revision)
+            return;
+        if (prices.size >= 100)
+            prices.delete(prices.keys().next().value);
+        prices.set(id, { value, expires: Date.now() + (value.success && !value.disabled ? 900000 : 60000) });
+        if (currentApp === id)
+            void send(buildPricePanelScript(id, value)).catch(() => { });
+    }).finally(() => { fetching = false; });
+}
+
 const HUNGARIAN_COLLECTION_NAME = "🇭🇺 Magyar nyelvű játékok";
 // Steam's userCollections computed getter calls .values() before storage exists.
 // Do not evaluate it, even inside try/catch: MobX shares that computed failure
@@ -1733,6 +1853,7 @@ async function scanStorePage() {
         return;
     try {
         const result = await sendStoreRuntime(buildStoreScanScript(), true);
+        updatePriceView(result?.url ?? "", sendStoreRuntime);
         const nextIds = new Set((Array.isArray(result?.appIds) ? result.appIds : [])
             .map((value) => String(value))
             .filter((value) => /^\d+$/.test(value) && Number(value) > 0));
@@ -1834,6 +1955,7 @@ async function connectToStoreDebugger() {
     }
 }
 function disconnectStoreDebugger() {
+    resetPriceView();
     if (storeScanTimer !== undefined)
         window.clearTimeout(storeScanTimer);
     if (storeReconnectTimer !== undefined)
@@ -1844,6 +1966,7 @@ function disconnectStoreDebugger() {
         void sendStoreRuntime(`
       (function() {
         document.getElementById('controller-xbox-store-detail-badges')?.remove();
+        document.getElementById('deck-play-badges-price')?.remove();
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
         delete window.__controllerXboxWatchActions;
@@ -2487,7 +2610,7 @@ function Content() {
     };
     if (page === "settings")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Magyar nyelv a Steam nyelvi list\u00E1ja vagy a Magyar Felirat kur\u00E1tor alapj\u00E1n. A teljes k\u00F6nyvt\u00E1rb\u00F3l magyar gy\u0171jtem\u00E9nyt k\u00E9sz\u00EDt. Kikapcsolva a gy\u0171jt\u00E9s sz\u00FCnetel, a gy\u0171jtem\u00E9ny megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(BadgeSizeSettings, { initial: { library_badge_percent: visibility.library_badge_percent ?? 100,
-                        store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
+                        store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes }), SP_JSX.jsx(AllKeyShopSettings, {}), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
     const refreshWatchedClouds = async () => {
         setCloudRefreshing(true);
         setCloudRefreshStatus("A GFN és Boosteroid katalógusának letöltése…");

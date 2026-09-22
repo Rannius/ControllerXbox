@@ -153,6 +153,9 @@ class HungarianCuratorParser:
 
 class Plugin:
     def __init__(self) -> None:
+        self._price_preferences = {"enabled": True, "allow_gifts": True, "merchants": []}
+        self._price_cache: Dict[str, Dict[str, Any]] = {}
+        self._price_lock = asyncio.Lock()
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._steam_backoff_until = 0.0
         self._steam_failures = 0
@@ -196,6 +199,7 @@ class Plugin:
         settings_directory = getattr(decky, "decky_SETTINGS_DIR", None) or getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", None)
         if not settings_directory:
             raise RuntimeError("Decky settings directory is unavailable")
+        self._price_settings_path = Path(settings_directory) / "price-preferences.json"
         self._steam_state_path = Path(settings_directory) / "steam-scan-state.json"
         self._cache_path = Path(settings_directory) / "controller-support-cache.json"
         self._hungarian_curator_cache_path = Path(settings_directory) / "hungarian-curator-cache.json"
@@ -214,6 +218,7 @@ class Plugin:
         self._watchlist_lock = asyncio.Lock()
 
     async def _main(self) -> None:
+        await self._load_price_preferences()
         await self._load_cache()
         await self._load_steam_scan_state()
         await self._load_hungarian_curator_cache()
@@ -360,6 +365,150 @@ class Plugin:
                 await self._save_cache()
             await self._save_steam_scan_state()
             return details
+
+    async def _load_price_preferences(self) -> None:
+        try:
+            value = json.loads(await self._run_blocking(lambda: self._price_settings_path.read_text(encoding="utf-8")))
+            if (isinstance(value, dict) and type(value.get("enabled")) is bool
+                    and type(value.get("allow_gifts")) is bool and isinstance(value.get("merchants"), list)
+                    and all(isinstance(item, str) and len(item) <= 80 for item in value["merchants"])
+                    and len(value["merchants"]) <= 100):
+                self._price_preferences = value
+        except (OSError, ValueError, TypeError):
+            pass
+
+    async def get_price_preferences(self) -> Dict[str, Any]:
+        return {"success": True, **self._price_preferences}
+
+    async def set_price_preferences(self, enabled: Any, allow_gifts: Any, merchants: Any) -> Dict[str, Any]:
+        if (type(enabled) is not bool or type(allow_gifts) is not bool or not isinstance(merchants, list)
+                or len(merchants) > 100 or any(not isinstance(item, str) or len(item) > 80 for item in merchants)):
+            return {"success": False, "error": "Érvénytelen árfigyelési beállítás."}
+        value = {"enabled": enabled, "allow_gifts": allow_gifts,
+                 "merchants": sorted(set(item.strip() for item in merchants if item.strip()))}
+        await self._run_blocking(self._write_file_atomically, self._price_settings_path,
+                                 "price-preferences-", json.dumps(value, ensure_ascii=False))
+        self._price_preferences = value
+        return await self.get_price_preferences()
+
+    @staticmethod
+    def _aks_title(value: str) -> str:
+        value = html.unescape(re.sub(r"<[^>]*>", "", value)).replace("™", "").replace("®", "")
+        return re.sub(r"[^\w]", "", unicodedata.normalize("NFKC", value).casefold())
+
+    def _aks_read(self, url: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme != "https" or parsed.netloc != "www.allkeyshop.com":
+            raise ValueError("Invalid AllKeyShop URL")
+        request = urllib.request.Request(url, headers={"User-Agent": "Deck Play Badges price comparison/1.0",
+                                                        "Accept-Encoding": "identity", "Accept": "text/html,application/json"})
+        with self._open_request(request, timeout=12) as response:
+            if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
+                raise ValueError("Unexpected AllKeyShop redirect")
+            body = response.read(4000001)
+        if len(body) > 4000000:
+            raise ValueError("AllKeyShop page is too large")
+        return body.decode("utf-8")
+
+    @classmethod
+    def _aks_search_match(cls, fragment: str, title: str) -> str:
+        matches: Set[str] = set()
+        for row in re.findall(r'<li\b[^>]*data-platforms="pc"[^>]*>(.*?)</li>', fragment, re.S):
+            name = re.search(r'<h2\b[^>]*class="ls-results-row-game-title"[^>]*>(.*?)</h2>', row, re.S)
+            link = re.search(r'<a\b[^>]*href="(https://www\.allkeyshop\.com/blog/[^"]+)"', row)
+            if name and link and cls._aks_title(name.group(1)) == cls._aks_title(title):
+                url = html.unescape(link.group(1))
+                if re.fullmatch(r"https://www\.allkeyshop\.com/blog/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+/", url) and "account" not in url:
+                    matches.add(url)
+        if len(matches) != 1:
+            raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
+        return matches.pop()
+
+    @staticmethod
+    def _aks_parse(page: str) -> Dict[str, Any]:
+        # Decode the site's public embedded JSON; never execute its JavaScript.
+        match = re.search(r"\bvar\s+gamePageTrans\s*=\s*", page)
+        if not match:
+            raise ValueError("Az AllKeyShop ajánlatai most nem olvashatók.")
+        data, _ = json.JSONDecoder().raw_decode(page[match.end():])
+        if (not isinstance(data, dict) or not isinstance(data.get("prices"), list)
+                or any(not isinstance(data.get(key), dict) for key in ("merchants", "regions", "editions"))):
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
+        return data
+
+    @staticmethod
+    def _aks_filter(data: Dict[str, Any], preferences: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # Exact allowlist: never infer that an unknown product is a key.
+        regions = {"STEAM GLOBAL": "Steam-kulcs · Global", "STEAM EU": "Steam-kulcs · EU",
+                   "STEAM GIFT GLOBAL": "Steam Gift · Global", "STEAM GIFT EU": "Steam Gift · EU"}
+        allowed = {value.casefold() for value in preferences["merchants"]}
+        offers: List[Dict[str, Any]] = []
+        for row in data["prices"]:
+            if (not isinstance(row, dict) or row.get("account") is not False
+                    or row.get("activationPlatform") != "steam" or row.get("dispo") != 1
+                    or row.get("isFirstParty") is not False or row.get("allowCard") is not True):
+                continue
+            region = data["regions"].get(str(row.get("region")), {})
+            edition = data["editions"].get(str(row.get("edition")), {})
+            merchant = data["merchants"].get(str(row.get("merchant")), {})
+            if not all(isinstance(item, dict) for item in (region, edition, merchant)):
+                continue
+            region_name = region.get("filter_name")
+            name = merchant.get("name")
+            if (region_name not in regions or edition.get("name") != "Standard" or not isinstance(name, str)
+                    or not name or (allowed and name.casefold() not in allowed)
+                    or ("GIFT" in region_name and not preferences["allow_gifts"])):
+                continue
+            price = row.get("priceCard")
+            if type(price) not in (int, float) or not 0.02 < price < 100000:
+                continue
+            coupon = row.get("voucher_code")
+            offers.append({"merchant": name[:80], "price": price, "kind": regions[region_name], "edition": "Standard",
+                           "coupon": coupon[:80] if isinstance(coupon, str) else ""})
+        return sorted(offers, key=lambda offer: (offer["price"], offer["merchant"]))
+
+    def _fetch_aks_game(self, app_id: str) -> Dict[str, Any]:
+        title = self._fetch_steam_title(app_id)
+        if not title:
+            raise ValueError("A Steam-játék neve most nem kérdezhető le.")
+        query = urllib.parse.urlencode({"action": "quicksearch", "search_name": title, "currency": "eur",
+                                        "locale": "en", "platform": "pc", "activation_country": "HU"})
+        search = json.loads(self._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?" + query))
+        fragment = search.get("resultsGames", search.get("results", "")) if isinstance(search, dict) else ""
+        if not isinstance(fragment, str):
+            raise ValueError("Az AllKeyShop keresője nem válaszolt megfelelően.")
+        url = self._aks_search_match(fragment, title)
+        page = self._aks_read(url + "?currency=eur")
+        currency = re.search(r'"currency"\s*:\s*"([a-zA-Z]+)"', page)
+        if not currency or currency.group(1).lower() != "eur":
+            raise ValueError("Az AllKeyShop pénzneme nem ellenőrizhető.")
+        return {"title": title, "url": url, "data": self._aks_parse(page), "checked_at": time.time()}
+
+    async def get_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
+        normalized = str(app_id)
+        if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
+            return {"success": False, "error": "Érvénytelen Steam AppID."}
+        if not self._price_preferences["enabled"]:
+            return {"success": True, "disabled": True}
+        async with self._price_lock:
+            entry = self._price_cache.get(normalized)
+            if not entry or time.time() - entry["checked_at"] >= (60 if "error" in entry else 900):
+                try:
+                    entry = await self._run_blocking(self._fetch_aks_game, normalized)
+                except (OSError, ValueError, TypeError, KeyError) as error:
+                    decky.logger.debug("AllKeyShop lookup failed: %s", error)
+                    entry = {"error": "Az ár nem kérdezhető le vagy nem azonosítható biztosan. Később újrapróbáljuk.",
+                             "checked_at": time.time()}
+                if len(self._price_cache) >= 100:
+                    self._price_cache.pop(next(iter(self._price_cache)))
+                self._price_cache[normalized] = entry
+            if "error" in entry:
+                return {"success": False, "error": entry["error"]}
+            offers = self._aks_filter(entry["data"], self._price_preferences)
+            return {"success": True, "offers": offers[:3], "matched_offers": len(offers),
+                    "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
+                    "currency": "EUR", "preferred_only": bool(self._price_preferences["merchants"])}
+
 
     async def _load_cache(self) -> None:
         try:
