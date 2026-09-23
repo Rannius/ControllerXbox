@@ -629,7 +629,7 @@ class Plugin:
                     entry = {**details, "checked_at": time.time()}
                     if details["global_error"]:
                         self._price_service_failures += 1
-                        delay = min(1800, 60 * (2 ** min(4, self._price_service_failures - 1)))
+                        delay = min(1800, 60 * (2 ** (self._price_service_failures - 1)))
                         self._price_service_retry_at = time.time() + delay
                         self._price_service_error = details
                         return {"success": False, **details, "retry_after": delay}
