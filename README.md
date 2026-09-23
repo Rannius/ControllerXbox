@@ -101,3 +101,7 @@ Az áruház főoldalának csempéin nem jelennek meg AllKeyShop-árak, és ezekh
 ## 1.0.72 – Csempeárak kapcsolójának eltávolítása
 
 Az áruházi csempeárak kapcsolója megszűnt. A csempék sem a főoldalon, sem más listákban nem indítanak AllKeyShop-árlekérést, a korábban elmentett bekapcsolt beállítástól függetlenül. Az árösszehasonlítás a megnyitott játék adatlapján továbbra is elérhető.
+
+## 1.0.73 – Hosszabb árlekérési várakozás
+
+Az AllKeyShop hálózati kéréseinek időkorlátja 12-ről 30 másodpercre nőtt. A felület 60 helyett 120 másodpercet vár a teljes műveletre. A kérések közötti 5 másodperces szünet, a 30 perces gyorsítótár és a kizárólag a játék adatlapján történő árlekérés változatlan.

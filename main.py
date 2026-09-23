@@ -474,7 +474,7 @@ class Plugin:
             if wait:
                 time.sleep(wait)
             try:
-                with self._open_request(request, timeout=12) as response:
+                with self._open_request(request, timeout=30) as response:
                     if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
                         raise ValueError("Unexpected AllKeyShop redirect")
                     body = response.read(4000001)

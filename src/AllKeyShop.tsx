@@ -16,7 +16,7 @@ const getPrice = callable<[string], PriceResult>("get_allkeyshop_price");
 async function timed<T>(request: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   try { return await Promise.race([request, new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("Az árlekérdezés nem válaszolt időben.")), 60000);
+    timer = setTimeout(() => reject(new Error("Az árlekérdezés nem válaszolt időben.")), 120000);
   })]); } finally { clearTimeout(timer!); }
 }
 
