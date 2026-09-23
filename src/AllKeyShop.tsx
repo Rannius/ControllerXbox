@@ -5,12 +5,13 @@ import { callable } from "@decky/api";
 
 
 type Preferences = { success: boolean; enabled: boolean; allow_gifts: boolean; merchants: string[]; restrict_merchants: boolean; error?: string };
-export type PriceResult = { success: boolean; skipped?: "unreleased" | "release_unknown" | "free"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
+export type PriceResult = { success: boolean; missing?: boolean; stale?: boolean; skipped?: "unreleased" | "release_unknown" | "free"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
   checked_at?: number; currency?: string; preferred_only?: boolean; matched_offers?: number;
   offers?: { merchant: string; price: number; kind: string; edition: string; coupon: string }[] };
 const getPreferences = callable<[], Preferences>("get_price_preferences");
 const setPreferences = callable<[boolean, boolean, string[], boolean], Preferences>("set_price_preferences");
 const getMerchants = callable<[boolean], { success: boolean; merchants: string[]; error?: string }>("get_price_merchants");
+const getCachedPrice = callable<[string], PriceResult>("get_cached_allkeyshop_price");
 const getPrice = callable<[string], PriceResult>("get_allkeyshop_price");
 
 async function timed<T>(request: Promise<T>): Promise<T> {
@@ -18,6 +19,53 @@ async function timed<T>(request: Promise<T>): Promise<T> {
   try { return await Promise.race([request, new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error("Az árlekérdezés nem válaszolt időben.")), 120000);
   })]); } finally { clearTimeout(timer!); }
+}
+
+type PriceStats = {
+  price_entries: number; price_fresh_entries: number; price_wishlist_total: number;
+  price_wishlist_ready: number; price_wishlist_skipped: number; price_wishlist_current: string; price_wishlist_deferred: number;
+  price_wishlist_active: boolean; price_retry_after: number; price_disk_error: string; price_wishlist_error: string;
+};
+const getPriceStats = callable<[], PriceStats>("get_price_cache_stats");
+const clearPriceCache = callable<[], PriceStats>("clear_price_cache");
+export function PriceCacheStatus() {
+  const [stats, setStats] = useState<PriceStats>();
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try { const value = await timed(getPriceStats()); if (active) { setStats(value); setError(""); } }
+      catch (error) { if (active) setError(String(error)); }
+      finally { if (active) timer = setTimeout(() => void poll(), 5000); }
+    };
+    void poll();
+    return () => { active = false; clearTimeout(timer); };
+  }, []);
+  return <>
+    <PanelSectionRow><div role="status" style={{ fontSize: "12px", lineHeight: 1.5 }}>
+      {stats ? <>
+        <div>AKS árgyorsítótár: {stats.price_fresh_entries}/{stats.price_entries} friss · 30 perc · lemezre mentve</div>
+        <div>Kívánságlista: {stats.price_wishlist_ready}/{stats.price_wishlist_total} ellenőrizve
+          {stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""}</div>
+        {stats.price_wishlist_deferred > 0 && <div>{stats.price_wishlist_deferred} sikertelen ellenőrzés · újabb háttérpróba 30 perc után.</div>}
+        <div>{stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
+          : !stats.price_wishlist_active ? "Előtöltés szünetel. Az áruház megnyitásakor indul."
+          : stats.price_wishlist_current ? `Ellenőrzés: Steam ${stats.price_wishlist_current}`
+          : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 30 percnél régebbi adatok frissülnek."
+          : "A következő játék ellenőrzésére vár."}</div>
+        {stats.price_disk_error && <div>{stats.price_disk_error}</div>}
+        {stats.price_wishlist_error && <div>Kívánságlista: {stats.price_wishlist_error}</div>}
+      </> : "Árgyorsítótár betöltése…"}
+      {error && <div>{error}</div>}
+    </div></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={async () => {
+      setBusy(true);
+      try { const value = await timed(clearPriceCache()); resetPriceView(); setStats(value); }
+      catch (error) { setError(String(error)); } finally { setBusy(false); }
+    }}>AKS árgyorsítótár törlése</ButtonItem></PanelSectionRow>
+  </>;
 }
 
 export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void }) {
@@ -60,7 +108,7 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
         } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
       }}>{busy ? "Mentés…" : "Árbeállítások alkalmazása"}</ButtonItem></PanelSectionRow>
     </>}
-    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Alapból a megnyitott játékhoz, külön engedéllyel a látható áruházi csempékhez is kér árat; 30 percig tárolja. Az AllKeyShop-kérések között legalább 5 másodperc szünet van."}</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Az AllKeyShop-kérések között legalább 5 másodperc szünet van."}</div></PanelSectionRow>
   </>;
 }
 
@@ -193,6 +241,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
       }
       line('AKS szerinti, kártyadíjat tartalmazó ár; kupon esetén annak feltételeivel.');
       line('Global/EU besorolás. A végösszeget és a magyarországi aktiválhatóságot az eladónál ellenőrizd.');
+      if (data.stale) line("Korábban mentett ár · frissítés folyamatban vagy kapcsolatra vár.");
       if (data.checked_at) line('Utoljára ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
       if (/^https:\\/\\/www\\.allkeyshop\\.com\\/blog\\/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+\\/$/.test(data.url || '')) {
         const link = document.createElement('a'); link.href = data.url; link.textContent = 'AllKeyShop adatlap megnyitása (az ottani lista külön szűrhető)';
@@ -288,11 +337,24 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   const pending = [...refreshQueue];
   const requestId = id && needsRequest(id) ? id : pending.find(app => !prices.has(app)) ??
     pending[0] ?? tileIds.find(needsRequest);
-  if (!requestId || fetching || (serviceFailure && serviceFailure.expires > Date.now())) return;
+  if (!requestId || fetching) return;
   fetching = true;
   const requestRevision = revision;
-  void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 15 } as PriceResult)).then(value => {
-    if (requestRevision !== revision) return;
+  void (async () => {
+    const cached = await timed(getCachedPrice(requestId));
+    if (requestRevision !== revision) return { success: true, disabled: true } as PriceResult;
+    if (cached.disabled) return cached;
+    if (cached.success && cached.checked_at) {
+      prices.set(requestId, { value: cached, expires: cached.checked_at * 1000 + 1800000 });
+      if (currentApp === requestId) void send(buildPricePanelScript(requestId, cached)).catch(() => {});
+      if (!cached.stale) return cached;
+    }
+    if (!visibleApps.has(requestId)) return { success: true, missing: true } as PriceResult;
+    if (serviceFailure && serviceFailure.expires > Date.now())
+      return { ...serviceFailure.value, retry_after: (serviceFailure.expires - Date.now()) / 1000 };
+    return await timed(getPrice(requestId));
+  })().catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 15 } as PriceResult)).then(value => {
+    if (requestRevision !== revision || value.missing) return;
     if (value.global_error) {
       const expires = Date.now() + Math.max(1, Math.min(300, value.retry_after ?? 15)) * 1000;
       serviceFailure = { value: { ...value, retry_at: expires }, expires };
@@ -302,6 +364,9 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     }
     serviceFailure = undefined;
     refreshQueue.delete(requestId);
+    if (!value.success && prices.get(requestId)?.value.success) {
+      value = { ...prices.get(requestId)!.value, stale: true, error: value.error };
+    }
     if (prices.size >= 500) prices.delete(prices.keys().next().value!);
     const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
     const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(300, value.retry_after ?? 30)) * 1000);

@@ -1,3 +1,82 @@
+// Runs in the signed-in Steam Store webview; cookies never leave that webview.
+function wishlistScript(knownOwner, useKnownList) {
+    return `(async () => {
+    if (location.hostname !== 'store.steampowered.com') return { owner: '', ids: [] };
+    let info = {};
+    try { info = JSON.parse(document.getElementById('application_config')?.getAttribute('data-userinfo') || '{}'); } catch {}
+    const account = Number(window.g_AccountID || 0);
+    const owner = account > 0 && Number.isInteger(account)
+      ? String(BigInt('76561197960265728') + BigInt(account)) : String(info.steamid || '');
+    if (info.logged_in === false || !/^\\d{17}$/.test(owner)) return { owner: '', ids: [] };
+    if (owner === ${JSON.stringify(knownOwner)} && ${useKnownList}) return { owner };
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+      const response = await fetch('/dynamicstore/userdata/?id=' + account, { credentials: 'same-origin', signal: controller.signal });
+      if (!response.ok) throw new Error('Steam HTTP ' + response.status);
+      const data = await response.json();
+      if (!Array.isArray(data.rgWishlist) || data.rgWishlist.length > 10000) throw new Error('A kívánságlista nem olvasható.');
+      const ids = Array.from(new Set(data.rgWishlist.map(String)));
+      if (ids.some(id => !/^\\d+$/.test(id) || Number(id) <= 0 || Number(id) >= 10000000000)) throw new Error('Érvénytelen kívánságlista.');
+      return { owner, ids };
+    } finally { clearTimeout(timer); }
+  })()`;
+}
+class PriceWishlistSync {
+    constructor(deps) {
+        this.deps = deps;
+        this.owner = '';
+        this.ids = [];
+        this.listExpires = 0;
+        this.nextSync = 0;
+        this.running = false;
+        this.revision = 0;
+    }
+    scan(send) {
+        if (this.running || Date.now() < this.nextSync)
+            return;
+        this.nextSync = Date.now() + 30000;
+        this.running = true;
+        const revision = this.revision;
+        void (async () => {
+            if (!await this.deps.enabled()) {
+                if (revision === this.revision)
+                    await this.deps.sync('', []);
+                return;
+            }
+            if (revision !== this.revision)
+                return;
+            const value = await send(wishlistScript(this.owner, Date.now() < this.listExpires), true);
+            if (revision !== this.revision)
+                return;
+            if (!value || typeof value.owner !== 'string')
+                throw new Error('A Steam kívánságlista nem érhető el.');
+            if (Array.isArray(value.ids)) {
+                this.owner = value.owner;
+                this.ids = value.ids;
+                this.listExpires = Date.now() + 300000;
+            }
+            else if (value.owner !== this.owner)
+                throw new Error('Megváltozott Steam-fiók.');
+            await this.deps.sync(this.owner, this.ids);
+        })().catch(error => {
+            if (revision === this.revision) {
+                this.listExpires = 0;
+                this.deps.error(error);
+                void this.deps.sync('', [], String(error)).catch(() => { });
+            }
+        }).finally(() => { this.running = false; });
+    }
+    stop() {
+        this.revision++;
+        this.nextSync = 0;
+        this.listExpires = 0;
+        this.owner = '';
+        this.ids = [];
+        void this.deps.sync('', []).catch(() => { });
+    }
+}
+
 function getHungarianBadgeHtml(source = "steam") {
     return source === "curator"
         ? HUNGARIAN_BADGE_HTML.replace('aria-label="Hivatalos magyar nyelvi támogatás"', 'aria-label="Magyar nyelv a Magyar Felirat kurátor szerint"')
@@ -254,6 +333,7 @@ const storePriceTilesScript = `
 const getPreferences = callable("get_price_preferences");
 const setPreferences = callable("set_price_preferences");
 const getMerchants = callable("get_price_merchants");
+const getCachedPrice = callable("get_cached_allkeyshop_price");
 const getPrice = callable("get_allkeyshop_price");
 async function timed(request) {
     let timer;
@@ -265,6 +345,54 @@ async function timed(request) {
     finally {
         clearTimeout(timer);
     }
+}
+const getPriceStats = callable("get_price_cache_stats");
+const clearPriceCache = callable("clear_price_cache");
+function PriceCacheStatus() {
+    const [stats, setStats] = SP_REACT.useState();
+    const [error, setError] = SP_REACT.useState("");
+    const [busy, setBusy] = SP_REACT.useState(false);
+    SP_REACT.useEffect(() => {
+        let active = true;
+        let timer;
+        const poll = async () => {
+            try {
+                const value = await timed(getPriceStats());
+                if (active) {
+                    setStats(value);
+                    setError("");
+                }
+            }
+            catch (error) {
+                if (active)
+                    setError(String(error));
+            }
+            finally {
+                if (active)
+                    timer = setTimeout(() => void poll(), 5000);
+            }
+        };
+        void poll();
+        return () => { active = false; clearTimeout(timer); };
+    }, []);
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { role: "status", style: { fontSize: "12px", lineHeight: 1.5 }, children: [stats ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { children: ["AKS \u00E1rgyors\u00EDt\u00F3t\u00E1r: ", stats.price_fresh_entries, "/", stats.price_entries, " friss \u00B7 30 perc \u00B7 lemezre mentve"] }), SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_ready, "/", stats.price_wishlist_total, " ellen\u0151rizve", stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""] }), stats.price_wishlist_deferred > 0 && SP_JSX.jsxs("div", { children: [stats.price_wishlist_deferred, " sikertelen ellen\u0151rz\u00E9s \u00B7 \u00FAjabb h\u00E1tt\u00E9rpr\u00F3ba 30 perc ut\u00E1n."] }), SP_JSX.jsx("div", { children: stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
+                                        : !stats.price_wishlist_active ? "Előtöltés szünetel. Az áruház megnyitásakor indul."
+                                            : stats.price_wishlist_current ? `Ellenőrzés: Steam ${stats.price_wishlist_current}`
+                                                : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 30 percnél régebbi adatok frissülnek."
+                                                    : "A következő játék ellenőrzésére vár." }), stats.price_disk_error && SP_JSX.jsx("div", { children: stats.price_disk_error }), stats.price_wishlist_error && SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_error] })] }) : "Árgyorsítótár betöltése…", error && SP_JSX.jsx("div", { children: error })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
+                        setBusy(true);
+                        try {
+                            const value = await timed(clearPriceCache());
+                            resetPriceView();
+                            setStats(value);
+                        }
+                        catch (error) {
+                            setError(String(error));
+                        }
+                        finally {
+                            setBusy(false);
+                        }
+                    }, children: "AKS \u00E1rgyors\u00EDt\u00F3t\u00E1r t\u00F6rl\u00E9se" }) })] });
 }
 function AllKeyShopSettings({ openMerchants }) {
     const [prefs, setPrefs] = SP_REACT.useState();
@@ -324,7 +452,7 @@ function AllKeyShopSettings({ openMerchants }) {
                                 finally {
                                     setBusy(false);
                                 }
-                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Alapból a megnyitott játékhoz, külön engedéllyel a látható áruházi csempékhez is kér árat; 30 percig tárolja. Az AllKeyShop-kérések között legalább 5 másodperc szünet van." }) })] });
+                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Az AllKeyShop-kérések között legalább 5 másodperc szünet van." }) })] });
 }
 function AllKeyShopMerchants({ onBack }) {
     const [names, setNames] = SP_REACT.useState([]);
@@ -468,6 +596,7 @@ function buildPricePanelScript(appId, result) {
       }
       line('AKS szerinti, kártyadíjat tartalmazó ár; kupon esetén annak feltételeivel.');
       line('Global/EU besorolás. A végösszeget és a magyarországi aktiválhatóságot az eladónál ellenőrizd.');
+      if (data.stale) line("Korábban mentett ár · frissítés folyamatban vagy kapcsolatra vár.");
       if (data.checked_at) line('Utoljára ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
       if (/^https:\\/\\/www\\.allkeyshop\\.com\\/blog\\/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+\\/$/.test(data.url || '')) {
         const link = document.createElement('a'); link.href = data.url; link.textContent = 'AllKeyShop adatlap megnyitása (az ottani lista külön szűrhető)';
@@ -570,12 +699,30 @@ function updatePriceView(url, send, visibleTileIds = []) {
     const pending = [...refreshQueue];
     const requestId = id && needsRequest(id) ? id : pending.find(app => !prices.has(app)) ??
         pending[0] ?? tileIds.find(needsRequest);
-    if (!requestId || fetching || (serviceFailure && serviceFailure.expires > Date.now()))
+    if (!requestId || fetching)
         return;
     fetching = true;
     const requestRevision = revision;
-    void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 15 })).then(value => {
+    void (async () => {
+        const cached = await timed(getCachedPrice(requestId));
         if (requestRevision !== revision)
+            return { success: true, disabled: true };
+        if (cached.disabled)
+            return cached;
+        if (cached.success && cached.checked_at) {
+            prices.set(requestId, { value: cached, expires: cached.checked_at * 1000 + 1800000 });
+            if (currentApp === requestId)
+                void send(buildPricePanelScript(requestId, cached)).catch(() => { });
+            if (!cached.stale)
+                return cached;
+        }
+        if (!visibleApps.has(requestId))
+            return { success: true, missing: true };
+        if (serviceFailure && serviceFailure.expires > Date.now())
+            return { ...serviceFailure.value, retry_after: (serviceFailure.expires - Date.now()) / 1000 };
+        return await timed(getPrice(requestId));
+    })().catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 15 })).then(value => {
+        if (requestRevision !== revision || value.missing)
             return;
         if (value.global_error) {
             const expires = Date.now() + Math.max(1, Math.min(300, value.retry_after ?? 15)) * 1000;
@@ -588,6 +735,9 @@ function updatePriceView(url, send, visibleTileIds = []) {
         }
         serviceFailure = undefined;
         refreshQueue.delete(requestId);
+        if (!value.success && prices.get(requestId)?.value.success) {
+            value = { ...prices.get(requestId).value, stale: true, error: value.error };
+        }
         if (prices.size >= 500)
             prices.delete(prices.keys().next().value);
         const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
@@ -918,6 +1068,20 @@ const getGfnAvailability = callable("get_gfn_availability");
 const refreshCloudCatalogs = callable("refresh_cloud_catalogs");
 const getBoosteroidAvailability = callable("get_boosteroid_availability");
 const clearCache = callable("clear_cache");
+const syncPriceWishlist = callable("sync_price_wishlist");
+const getPricePreferences = callable("get_price_preferences");
+const priceWishlist = new PriceWishlistSync({
+    enabled: async () => {
+        const result = await withBackendTimeout(getPricePreferences());
+        return result.success && result.enabled;
+    },
+    sync: async (owner, ids, error = "") => {
+        const result = await withBackendTimeout(syncPriceWishlist(owner, ids, error));
+        if (!result.success)
+            throw new Error(result.error || "Kívánságlista-szinkronizálási hiba");
+    },
+    error: error => console.warn("AllKeyShop wishlist sync failed", error),
+});
 const getCacheStats = callable("get_cache_stats");
 const getBackendDiagnostics = callable("get_backend_diagnostics");
 const checkForUpdate = callable("check_for_update");
@@ -2186,6 +2350,7 @@ async function scanStorePage() {
     try {
         const result = await sendStoreRuntime(buildStoreScanScript(), true);
         updatePriceView(result?.url ?? "", sendStoreRuntime);
+        priceWishlist.scan(sendStoreRuntime);
         const nextIds = new Set((Array.isArray(result?.appIds) ? result.appIds : [])
             .map((value) => String(value))
             .filter((value) => /^\d+$/.test(value) && Number(value) > 0));
@@ -2287,6 +2452,7 @@ async function connectToStoreDebugger() {
     }
 }
 function disconnectStoreDebugger() {
+    priceWishlist.stop();
     resetPriceView();
     if (storeScanTimer !== undefined)
         window.clearTimeout(storeScanTimer);
@@ -2989,7 +3155,8 @@ function Content() {
                         ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
                             + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
                             + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
-                        : "Állapot betöltése..." }) }), diagnosticLog !== "Nincs rögzített hiba." ?
+                            + " · AKS: " + String(stats.price_fresh_entries ?? 0) + "/" + String(stats.price_entries ?? 0)
+                        : "Állapot betöltése..." }) }), SP_JSX.jsx(PriceCacheStatus, {}), diagnosticLog !== "Nincs rögzített hiba." ?
                 SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hiba: ", diagnosticLog] }) }) : null, SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "J\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "Pluginfriss\u00EDt\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: updateStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: updateWorking, onClick: () => void refreshUpdateInfo(), children: "Friss\u00EDt\u00E9sek keres\u00E9se" }) }), updateInfo?.has_update && updateInfo.latest_version && !installedUpdate ?
                 SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", disabled: updateWorking, onClick: installAvailableUpdate, children: ["Friss\u00EDt\u00E9s telep\u00EDt\u00E9se: v", updateInfo.latest_version] }) }) : null, installedUpdate ?
                 SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: updateWorking, onClick: reloadAfterUpdate, children: "Steam \u00E9s plugin \u00FAjraind\u00EDt\u00E1sa" }) }) : null] });

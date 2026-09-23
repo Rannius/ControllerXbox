@@ -1,9 +1,10 @@
+import { PriceWishlistSync } from "./priceWishlist";
 import { getHungarianBadgeHtml, HungarianSource } from "./hungarianBadge";
 import { CloudResumeRefresh } from "./cloudResumeRefresh";
 import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
 import { HungarianProgress, CuratorProgress } from "./HungarianProgress";
 import { CatalogStatus } from "./CatalogStatus";
-import { AllKeyShopSettings, AllKeyShopMerchants, tilePriceCleanupScript, resetPriceView, updatePriceView } from "./AllKeyShop";
+import { AllKeyShopSettings, AllKeyShopMerchants, PriceCacheStatus, tilePriceCleanupScript, resetPriceView, updatePriceView } from "./AllKeyShop";
 import { storeBadgeDockScript, storeBadgeDockCleanupScript } from "./storeBadgeDock";
 import { HungarianCollection, readyCollectionStore } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
@@ -51,6 +52,8 @@ type BoosteroidResponse = {
   error?: string;
 };
 type CacheStats = {
+  price_entries?: number;
+  price_fresh_entries?: number;
   entries: number;
   fresh_entries: number;
   ttl_days: number;
@@ -187,6 +190,19 @@ const getGfnAvailability = callable<[appIds: string[]], GfnResponse>("get_gfn_av
 const refreshCloudCatalogs = callable<[], { success: boolean; checked_at: number; error?: string }>("refresh_cloud_catalogs");
 const getBoosteroidAvailability = callable<[appIds: string[]], BoosteroidResponse>("get_boosteroid_availability");
 const clearCache = callable<[], { success: boolean; removed: number; gfn_removed?: number; boosteroid_removed?: number }>("clear_cache");
+const syncPriceWishlist = callable<[owner: string, ids: string[], error: string], { success: boolean; error?: string }>("sync_price_wishlist");
+const getPricePreferences = callable<[], { success: boolean; enabled: boolean }>("get_price_preferences");
+const priceWishlist = new PriceWishlistSync({
+  enabled: async () => {
+    const result = await withBackendTimeout(getPricePreferences());
+    return result.success && result.enabled;
+  },
+  sync: async (owner, ids, error = "") => {
+    const result = await withBackendTimeout(syncPriceWishlist(owner, ids, error));
+    if (!result.success) throw new Error(result.error || "Kívánságlista-szinkronizálási hiba");
+  },
+  error: error => console.warn("AllKeyShop wishlist sync failed", error),
+});
 const getCacheStats = callable<[], CacheStats>("get_cache_stats");
 const getBackendDiagnostics = callable<[], BackendDiagnostics>("get_backend_diagnostics");
 const checkForUpdate = callable<[], UpdateCheckResponse>("check_for_update");
@@ -1505,6 +1521,7 @@ async function scanStorePage(): Promise<void> {
   try {
     const result = await sendStoreRuntime(buildStoreScanScript(), true) as StorePageScan | undefined;
     updatePriceView(result?.url ?? "", sendStoreRuntime);
+    priceWishlist.scan(sendStoreRuntime);
     const nextIds = new Set(
       (Array.isArray(result?.appIds) ? result.appIds : [])
         .map((value) => String(value))
@@ -1595,6 +1612,7 @@ async function connectToStoreDebugger(): Promise<void> {
 }
 
 function disconnectStoreDebugger(): void {
+  priceWishlist.stop();
   resetPriceView();
   if (storeScanTimer !== undefined) window.clearTimeout(storeScanTimer);
   if (storeReconnectTimer !== undefined) window.clearTimeout(storeReconnectTimer);
@@ -2378,7 +2396,9 @@ function Content() {
       ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
         + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
         + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
+        + " · AKS: " + String(stats.price_fresh_entries ?? 0) + "/" + String(stats.price_entries ?? 0)
       : "Állapot betöltése..."}</div></PanelSectionRow>
+    <PriceCacheStatus />
     {diagnosticLog !== "Nincs rögzített hiba." ?
       <PanelSectionRow><div style={{ whiteSpace: "pre-wrap", userSelect: "text" }}>Hiba: {diagnosticLog}</div></PanelSectionRow> : null}
     <PanelSectionRow><ButtonItem layout="below" disabled={working} onClick={backendCheck}>Játékok újraellenőrzése</ButtonItem></PanelSectionRow>

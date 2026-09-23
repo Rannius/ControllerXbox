@@ -18,6 +18,115 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_price_cache_survives_restart_and_respects_current_merchant_filters(self):
+        entry = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+                 "data": self.aks_fixture(), "checked_at": time.time()}
+        self.plugin._price_cache = {"10": entry, "20": {"title": "Free", "skipped": "free", "checked_at": time.time()},
+                                    "30": {"error": "offline", "checked_at": time.time()}}
+        await self.plugin._save_price_cache()
+        restarted = self.plugin_type()
+        await restarted._load_price_cache()
+        self.assertEqual(set(restarted._price_cache), {"10", "20"})
+        with patch.object(restarted, "_fetch_aks_game") as fetch:
+            async with restarted._price_lock:
+                cached = await asyncio.wait_for(restarted.get_cached_allkeyshop_price("10"), 1)
+            self.assertTrue(cached["success"])
+            self.assertFalse(cached["stale"])
+            self.assertTrue(cached["offers"])
+            restarted._price_preferences.update({"restrict_merchants": True, "merchants": []})
+            self.assertEqual((await restarted.get_cached_allkeyshop_price("10"))["offers"], [])
+            restarted._price_cache["10"]["checked_at"] -= 1801
+            self.assertTrue((await restarted.get_cached_allkeyshop_price("10"))["stale"])
+            fetch.assert_not_called()
+        self.assertEqual((await restarted.get_price_cache_stats())["price_entries"], 2)
+        await restarted.clear_price_cache()
+        empty = self.plugin_type()
+        await empty._load_price_cache()
+        self.assertEqual(empty._price_cache, {})
+
+    async def test_invalid_persistent_price_entries_do_not_load(self):
+        self.plugin._price_cache_path.write_text(json.dumps({"version": 1, "entries": {
+            "10": {"title": "Bad", "checked_at": time.time(), "url": "https://evil.invalid/", "data": self.aks_fixture()},
+            "20": {"title": "Future", "checked_at": time.time() + 10000, "skipped": "free"},
+            "oops": {"title": "Bad ID", "checked_at": time.time(), "skipped": "free"}}}), encoding="utf-8")
+        await self.plugin._load_price_cache()
+        self.assertEqual(self.plugin._price_cache, {})
+        self.plugin._price_cache_path.write_text("broken", encoding="utf-8")
+        await self.plugin._load_price_cache()
+        self.assertEqual(self.plugin._price_cache, {})
+
+    async def test_wishlist_only_refreshes_due_games_and_yields_to_foreground(self):
+        self.plugin._price_wishlist = ["10", "20", "30"]
+        self.plugin._price_wishlist_lease = time.monotonic() + 90
+        self.plugin._price_cache["10"] = {"title": "Free", "skipped": "free", "checked_at": time.time()}
+        self.plugin._price_cache["20"] = {"title": "Old", "skipped": "unreleased", "checked_at": time.time() - 1801}
+        with patch.object(self.plugin, "_fetch_aks_game", return_value={"title": "Skipped", "skipped": "free", "checked_at": time.time()}) as fetch:
+            self.plugin._price_foreground_waiters = 1
+            self.assertFalse(await self.plugin._price_wishlist_step())
+            fetch.assert_not_called()
+            self.plugin._price_foreground_waiters = 0
+            self.assertTrue(await self.plugin._price_wishlist_step())
+            self.assertEqual(fetch.call_args.args, ("30",))
+            self.assertTrue(await self.plugin._price_wishlist_step())
+            self.assertEqual(fetch.call_args.args, ("20",))
+            self.assertFalse(await self.plugin._price_wishlist_step())
+            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual((await self.plugin.get_price_cache_stats())["price_wishlist_ready"], 3)
+            self.plugin._price_cache.clear()
+            self.plugin._price_wishlist_lease = 0
+            self.assertFalse(await self.plugin._price_wishlist_step())
+            self.plugin._price_wishlist_lease = time.monotonic() + 90
+            self.plugin._price_preferences["enabled"] = False
+            self.assertFalse(await self.plugin._price_wishlist_step())
+
+    async def test_wishlist_failure_pauses_and_preserves_previous_price(self):
+        entry = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+                 "data": self.aks_fixture(), "checked_at": time.time() - 1801}
+        self.plugin._price_cache["10"] = entry
+        self.plugin._price_wishlist = ["10"]
+        self.plugin._price_wishlist_lease = time.monotonic() + 90
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=OSError("offline")) as fetch:
+            await self.plugin._price_wishlist_step()
+            self.assertFalse(await self.plugin._price_wishlist_step())
+            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(self.plugin._price_cache["10"], entry)
+        self.plugin._price_service_retry_at = 0
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")):
+            await self.plugin._price_wishlist_step()
+        self.assertEqual(self.plugin._price_cache["10"], entry)
+        self.assertGreater(self.plugin._price_wishlist_retry["10"], time.time())
+
+    async def test_wishlist_account_change_and_stop_replace_pending_ids(self):
+        owner = "76561198000000001"
+        with patch.object(self.plugin, "_price_wishlist_worker", return_value=None):
+            await self.plugin.sync_price_wishlist(owner, ["10", "10", "20"])
+            await self.plugin._price_wishlist_task
+            self.assertEqual(self.plugin._price_wishlist, ["10", "20"])
+            self.plugin._price_wishlist_retry["10"] = time.time() + 1800
+            await self.plugin.sync_price_wishlist("76561198000000002", ["30"])
+            await self.plugin._price_wishlist_task
+            self.assertEqual(self.plugin._price_wishlist, ["30"])
+            self.assertEqual(self.plugin._price_wishlist_retry, {})
+            await self.plugin.sync_price_wishlist("", [])
+            self.assertFalse((await self.plugin.get_price_cache_stats())["price_wishlist_active"])
+
+    async def test_cache_clear_discards_a_price_lookup_already_in_flight(self):
+        started, finish = asyncio.Event(), asyncio.Event()
+        async def blocking(function, *args):
+            if function == self.plugin._fetch_aks_game:
+                started.set()
+                await finish.wait()
+                return {"title": "Late", "skipped": "free", "checked_at": time.time()}
+            return function(*args)
+        with patch.object(self.plugin, "_run_blocking", side_effect=blocking):
+            request = asyncio.create_task(self.plugin.get_allkeyshop_price("10"))
+            await started.wait()
+            await self.plugin.clear_price_cache()
+            finish.set()
+            response = await request
+        self.assertFalse(response["success"])
+        self.assertEqual(self.plugin._price_cache, {})
+
     def test_aks_timeout_does_not_hide_another_thirty_second_attempt(self):
         with patch.object(self.plugin, "_open_request", side_effect=TimeoutError("slow")) as fetch, patch("time.sleep") as sleep:
             with self.assertRaises(TimeoutError):

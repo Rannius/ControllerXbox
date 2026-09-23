@@ -113,3 +113,13 @@ A már azonosított AllKeyShop-adatlap címét a plugin legfeljebb 24 óráig me
 A hálózati hibát nem követi a folyamaton belül újabb rejtett kérés: az újrapróbálkozás a látható visszaszámláláshoz igazodik. A 30 másodperces AKS-időkorlát, 120 másodperces felületi várakozás és a kérések közötti 5 másodperc megmarad. A visszaszámláló most a backend legfeljebb 300 másodperces várakozását is helyesen kezeli.
 
 Az azonnal mentő kapcsoló és az egyetlen legolcsóbb megfelelő ajánlat megjelenítése megmaradt. Az első, még ismeretlen játék lekéréséhez továbbra is szükséges a Steam-adat, az AKS-keresés és az ajánlatoldal.
+
+## 1.0.81 – Kívánságlista-előtöltés és tartós árgyorsítótár
+
+Az áruház megnyitásakor a plugin a bejelentkezett Steam-fiók teljes kívánságlistáját olvassa be, nem csak a látható csempéket. A lista ötpercenként ellenőrizhető újra; az előtöltés az áruház használata közben fut. Ismeretlen játékokkal kezd, majd a legrégebbi árakat frissíti. A 30 percen belüli adatokat nem kéri le újra. Az előtérben megnyitott játék a következő háttérfeladat elé kerül; a már folyamatban lévő kérés befejeződhet.
+
+Az AKS-áradatok lemezre mentődnek, így plugin- és gépújraindítás után is használhatók. A mentett ár olvasása nem vár a hálózati sorra. Lejárt adat esetén a korábbi ár azonnal látható, az utolsó ellenőrzés idejével és elavultsági jelzéssel; a frissítés külön történik. Sikertelen frissítés nem törli a korábbi használható árat. A kiválasztott boltok és a Gift-szűrő a mentett adatokra is érvényes.
+
+A plugin főoldalán AKS friss/összes számláló, kívánságlista-feldolgozási állapot, kihagyott játékok száma és külön árgyorsítótár-törlés jelenik meg. A teljes cache-törlés az AKS-adatokat is törli. Az ingyenes és meg nem jelent játékokhoz nincs AKS-kérés. Az 5 másodperces kérésköz és a kapcsolati hibák utáni közös szünet megmaradt. Az áruház bezárásakor, kijelentkezéskor vagy az árak kikapcsolásakor nem indul új háttérkérés. A kívánságlista tagságát és a bejelentkezési adatokat nem mentjük lemezre.
+
+Ellenőrzés: TypeScript, frontend- és Python-regressziós tesztek, köztük 906 elemű teljes kívánságlista, fiókváltás, háttérsor elsőbbsége, újraindítás, cache-törlés közben befejeződő kérés és offline gyorsítótár. Fizikai Steam Decken a bejelentkezett kívánságlista kiolvasása külön kipróbálást igényel.

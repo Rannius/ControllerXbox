@@ -161,6 +161,18 @@ class Plugin:
         self._price_cache: Dict[str, Dict[str, Any]] = {}
         self._aks_matches: Dict[str, Dict[str, Any]] = {}
         self._price_lock = asyncio.Lock()
+        self._price_disk_lock = asyncio.Lock()
+        self._price_foreground_waiters = 0
+        self._price_epoch = 0
+        self._price_stopping = False
+        self._price_wishlist: List[str] = []
+        self._price_wishlist_owner = ""
+        self._price_wishlist_lease = 0.0
+        self._price_wishlist_retry: Dict[str, float] = {}
+        self._price_wishlist_task: Optional[asyncio.Task] = None
+        self._price_wishlist_current = ""
+        self._price_wishlist_error = ""
+        self._price_disk_error = ""
         self._aks_request_lock = threading.Lock()
         self._aks_next_request_at = 0.0
         self._price_service_error: Optional[Dict[str, Any]] = None
@@ -211,6 +223,7 @@ class Plugin:
         settings_directory = getattr(decky, "decky_SETTINGS_DIR", None) or getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", None)
         if not settings_directory:
             raise RuntimeError("Decky settings directory is unavailable")
+        self._price_cache_path = Path(settings_directory) / "allkeyshop-price-cache.json"
         self._price_settings_path = Path(settings_directory) / "price-preferences.json"
         self._price_merchants_path = Path(settings_directory) / "price-merchants.json"
         self._steam_state_path = Path(settings_directory) / "steam-scan-state.json"
@@ -233,6 +246,7 @@ class Plugin:
     async def _main(self) -> None:
         await self._load_price_preferences()
         await self._load_price_merchants()
+        await self._load_price_cache()
         await self._load_cache()
         await self._load_steam_scan_state()
         await self._load_hungarian_curator_cache()
@@ -243,6 +257,11 @@ class Plugin:
         decky.logger.info("ControllerXbox backend loaded")
 
     async def _unload(self) -> None:
+        self._price_stopping = True
+        self._price_wishlist_lease = 0
+        if self._price_wishlist_task:
+            await self._price_wishlist_task
+        await self._save_price_cache()
         self._steam_stopping = True
         await asyncio.gather(*list(self._steam_tasks.values()), return_exceptions=True)
         await self._save_steam_scan_state()
@@ -379,6 +398,146 @@ class Plugin:
                 await self._save_cache()
             await self._save_steam_scan_state()
             return details
+
+    def _price_result(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        if entry.get("skipped"):
+            return {"success": True, "skipped": entry["skipped"], "title": entry["title"],
+                    "checked_at": entry["checked_at"], "offers": []}
+        offers = self._aks_filter(entry["data"], self._price_preferences)
+        return {"success": True, "offers": offers[:1], "matched_offers": len(offers),
+                "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
+                "currency": "EUR", "preferred_only": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
+
+    @staticmethod
+    def _valid_price_entry(entry: Any) -> bool:
+        if (not isinstance(entry, dict) or "error" in entry or not isinstance(entry.get("title"), str)
+                or type(entry.get("checked_at")) not in (int, float)
+                or not 0 < entry["checked_at"] <= time.time() + 60):
+            return False
+        if "skipped" in entry:
+            return entry["skipped"] in ("free", "unreleased", "release_unknown")
+        data = entry.get("data")
+        return (isinstance(entry.get("url"), str) and bool(re.fullmatch(
+            r"https://www\.allkeyshop\.com/blog/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+/", entry["url"]))
+            and isinstance(data, dict) and isinstance(data.get("prices"), list)
+            and all(isinstance(data.get(key), dict) for key in ("merchants", "regions", "editions")))
+
+    async def _load_price_cache(self) -> None:
+        try:
+            def read() -> str:
+                if self._price_cache_path.stat().st_size > 64 * 1024 * 1024:
+                    raise ValueError("Price cache too large")
+                return self._price_cache_path.read_text(encoding="utf-8")
+            payload = json.loads(await self._run_blocking(read))
+            if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("entries"), dict):
+                return
+            self._price_cache = {key: value for key, value in list(payload["entries"].items())[-10000:]
+                                 if key.isdigit() and 0 < int(key) < 10000000000 and self._valid_price_entry(value)}
+            for key, entry in self._price_cache.items():
+                if entry.get("url") and time.time() - entry["checked_at"] < 86400:
+                    self._aks_matches[key] = {name: entry[name] for name in ("title", "url", "checked_at")}
+        except (OSError, ValueError, TypeError):
+            decky.logger.debug("AllKeyShop cache unavailable; starting empty")
+
+    async def _save_price_cache(self) -> None:
+        async with self._price_disk_lock:
+            entries = {key: value for key, value in self._price_cache.items() if self._valid_price_entry(value)}
+            entries = {key: ({**value, "data": {field: value["data"][field] for field in
+                        ("prices", "merchants", "regions", "editions")}} if "data" in value else value)
+                       for key, value in entries.items()}
+            try:
+                payload = json.dumps({"version": 1, "entries": entries}, ensure_ascii=False)
+                if len(payload.encode("utf-8")) > 64 * 1024 * 1024:
+                    raise OSError("Price cache exceeds disk limit")
+                await self._run_blocking(self._write_file_atomically, self._price_cache_path, "aks-cache-", payload)
+                self._price_disk_error = ""
+            except OSError:
+                self._price_disk_error = "Az árgyorsítótár lemezre mentése sikertelen."
+                decky.logger.warning(self._price_disk_error)
+
+    async def get_cached_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
+        # No network and no price lock: a slow background lookup must not delay display.
+        if not self._price_preferences["enabled"]:
+            return {"success": True, "disabled": True}
+        entry = self._price_cache.get(str(app_id))
+        if not entry or "error" in entry:
+            return {"success": True, "missing": True}
+        return {**self._price_result(entry), "stale": time.time() - entry["checked_at"] >= 1800}
+
+    async def clear_price_cache(self) -> Dict[str, Any]:
+        self._price_epoch += 1
+        self._price_cache.clear()
+        self._aks_matches.clear()
+        self._price_wishlist_retry.clear()
+        await self._save_price_cache()
+        return {"success": True, **self._price_stats()}
+
+    def _price_stats(self) -> Dict[str, Any]:
+        now = time.time()
+        valid = {key: value for key, value in self._price_cache.items() if "error" not in value}
+        fresh = {key for key, value in valid.items() if now - value["checked_at"] < 1800}
+        wishlist = set(self._price_wishlist)
+        return {"price_entries": len(valid), "price_fresh_entries": len(fresh),
+                "price_wishlist_total": len(wishlist), "price_wishlist_ready": len(wishlist & fresh),
+                "price_wishlist_skipped": sum(bool(valid[key].get("skipped")) for key in wishlist & fresh),
+                "price_wishlist_current": self._price_wishlist_current,
+                "price_wishlist_deferred": sum(self._price_wishlist_retry.get(key, 0) > now for key in wishlist - fresh),
+                "price_wishlist_active": self._price_preferences["enabled"] and time.monotonic() < self._price_wishlist_lease,
+                "price_retry_after": max(0, int(self._price_service_retry_at - now)),
+                "price_wishlist_error": self._price_wishlist_error,
+                "price_disk_error": self._price_disk_error}
+
+    async def get_price_cache_stats(self) -> Dict[str, Any]:
+        return {"success": True, **self._price_stats()}
+
+    async def sync_price_wishlist(self, owner: Any, app_ids: Any, error: Any = "") -> Dict[str, Any]:
+        if (not isinstance(owner, str) or (owner and not re.fullmatch(r"\d{17}", owner))
+                or not isinstance(app_ids, list) or len(app_ids) > 10000
+                or any(not str(key).isdigit() or not 0 < int(str(key)) < 10000000000 for key in app_ids)):
+            return {"success": False, "error": "Érvénytelen kívánságlista."}
+        if owner != self._price_wishlist_owner:
+            self._price_wishlist_retry.clear()
+        self._price_wishlist_owner = owner
+        self._price_wishlist_error = str(error)[:200] if isinstance(error, str) else ""
+        self._price_wishlist = list(dict.fromkeys(str(key) for key in app_ids)) if owner else []
+        self._price_wishlist_lease = time.monotonic() + 90 if owner else 0
+        if self._price_wishlist and (self._price_wishlist_task is None or self._price_wishlist_task.done()):
+            self._price_wishlist_task = asyncio.create_task(self._price_wishlist_worker())
+        return {"success": True, **self._price_stats()}
+
+    async def _price_wishlist_step(self) -> bool:
+        if (self._price_stopping or not self._price_preferences["enabled"] or self._price_foreground_waiters
+                or self._price_lock.locked() or time.monotonic() >= self._price_wishlist_lease
+                or time.time() < self._price_service_retry_at):
+            return False
+        now = time.time()
+        # Unknown games first, then oldest entries: large lists must not keep
+        # refreshing their first items while the tail has never been checked.
+        for app_id in sorted(self._price_wishlist, key=lambda key: self._price_cache.get(key, {}).get("checked_at", 0)):
+            entry = self._price_cache.get(app_id)
+            if entry and "error" not in entry and now - entry["checked_at"] < 1800:
+                continue
+            if self._price_wishlist_retry.get(app_id, 0) > now:
+                continue
+            self._price_wishlist_current = app_id
+            epoch = self._price_epoch
+            try:
+                result = await self._get_allkeyshop_price(app_id)
+                if epoch == self._price_epoch and not result.get("success") and not result.get("global_error"):
+                    self._price_wishlist_retry[app_id] = time.time() + 1800
+            finally:
+                self._price_wishlist_current = ""
+            return True
+        return False
+
+    async def _price_wishlist_worker(self) -> None:
+        while not self._price_stopping and time.monotonic() < self._price_wishlist_lease:
+            try:
+                await self._price_wishlist_step()
+            except Exception as error:
+                decky.logger.warning("Wishlist price prefetch failed: %s", error)
+                self._price_service_retry_at = max(self._price_service_retry_at, time.time() + 60)
+            await asyncio.sleep(2)
 
     async def _load_price_preferences(self) -> None:
         try:
@@ -624,19 +783,33 @@ class Plugin:
         return {"error": message, "error_code": code, "global_error": shared}
 
     async def get_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
+        self._price_foreground_waiters += 1
+        try:
+            return await self._get_allkeyshop_price(app_id)
+        finally:
+            self._price_foreground_waiters -= 1
+
+    async def _get_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
         normalized = str(app_id)
         if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
             return {"success": False, "error": "Érvénytelen Steam AppID."}
         if not self._price_preferences["enabled"]:
             return {"success": True, "disabled": True}
         async with self._price_lock:
+            if not self._price_preferences["enabled"] or self._price_stopping:
+                return {"success": True, "disabled": True}
             entry = self._price_cache.get(normalized)
+            previous = entry
+            epoch = self._price_epoch
             if not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else 1800):
                 if self._price_service_error and time.time() < self._price_service_retry_at:
                     return {"success": False, **self._price_service_error,
                             "retry_after": max(1, int(self._price_service_retry_at - time.time()))}
                 try:
                     entry = await self._run_blocking(self._fetch_aks_game, normalized)
+                    if epoch != self._price_epoch:
+                        self._aks_matches.pop(normalized, None)
+                        return {"success": False, "error": "Az árgyorsítótár törölve lett.", "retry_after": 30}
                     if not entry.get("skipped"):
                         self._price_service_error = None
                         self._price_service_failures = 0
@@ -655,9 +828,12 @@ class Plugin:
                         self._price_service_retry_at = time.time() + delay
                         self._price_service_error = details
                         return {"success": False, **details, "retry_after": delay}
-                if len(self._price_cache) >= 500:
-                    self._price_cache.pop(next(iter(self._price_cache)))
-                self._price_cache[normalized] = entry
+                if "error" not in entry or not previous or "error" in previous:
+                    if normalized not in self._price_cache and len(self._price_cache) >= 10000:
+                        self._price_cache.pop(next(iter(self._price_cache)))
+                    self._price_cache[normalized] = entry
+                if "error" not in entry:
+                    await self._save_price_cache()
             if "error" in entry:
                 return {"success": False, "error": entry["error"], "error_code": entry.get("error_code", "lookup"),
                         "global_error": False, "retry_after": max(1, int(30 - (time.time() - entry["checked_at"])))}
@@ -673,10 +849,7 @@ class Plugin:
                         await self._save_price_merchants()
                     except OSError as error:
                         decky.logger.debug("AllKeyShop discovered merchants could not be saved: %s", error)
-            offers = self._aks_filter(entry["data"], self._price_preferences)
-            return {"success": True, "offers": offers[:1], "matched_offers": len(offers),
-                    "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
-                    "currency": "EUR", "preferred_only": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
+            return self._price_result(entry)
 
 
     async def _load_cache(self) -> None:
@@ -2381,6 +2554,7 @@ class Plugin:
             pass
 
     async def clear_cache(self) -> Dict[str, Any]:
+        await self.clear_price_cache()
         self._steam_scan_epoch = time.time()
         self._steam_retry.clear()
         self._steam_backoff_until = 0.0
@@ -2445,6 +2619,7 @@ class Plugin:
             )
             return {
                 "success": True,
+                **self._price_stats(),
                 "entries": len(self._cache),
                 "fresh_entries": fresh,
                 "ttl_days": 30,
