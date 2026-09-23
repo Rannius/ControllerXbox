@@ -18,6 +18,46 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    def test_aks_requests_have_a_shared_five_second_gap(self):
+        class Response(io.BytesIO):
+            def geturl(self):
+                return "https://www.allkeyshop.com/blog/"
+        with patch.object(self.plugin, "_open_request", side_effect=lambda *args, **kwargs: Response(b"{}")) as fetch, patch("time.monotonic", return_value=100.0), patch("time.sleep") as sleep:
+            self.plugin._aks_read("https://www.allkeyshop.com/blog/?search=one")
+            self.plugin._aks_read("https://www.allkeyshop.com/blog/?search=two")
+        self.assertEqual(fetch.call_count, 2)
+        sleep.assert_called_once_with(5.0)
+
+    async def test_aks_prices_are_cached_for_thirty_minutes(self):
+        data = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+                "data": self.aks_fixture(), "checked_at": time.time() - 1200}
+        self.plugin._price_cache["10"] = data
+        with patch.object(self.plugin, "_fetch_aks_game", return_value={**data, "checked_at": time.time()}) as fetch:
+            await self.plugin.get_allkeyshop_price("10")
+            fetch.assert_not_called()
+            self.plugin._price_cache["10"]["checked_at"] = time.time() - 1801
+            await self.plugin.get_allkeyshop_price("10")
+            self.assertEqual(fetch.call_count, 1)
+
+    async def test_unreleased_and_unknown_release_never_query_allkeyshop(self):
+        for app_id, release in (("10", {"coming_soon": True}), ("20", {}), ("30", None)):
+            body = {app_id: {"success": True, "data": {"name": "Future game", "release_date": release}}}
+            with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(body))) as steam, patch.object(self.plugin, "_aks_read") as aks:
+                response = await self.plugin.get_allkeyshop_price(app_id)
+                cached = await self.plugin.get_allkeyshop_price(app_id)
+            self.assertTrue(response["success"])
+            self.assertIn(response["skipped"], ("unreleased", "release_unknown"))
+            self.assertEqual(cached["skipped"], response["skipped"])
+            self.assertEqual(steam.call_count, 1)
+            aks.assert_not_called()
+
+    def test_released_game_still_queries_allkeyshop(self):
+        body = {"10": {"success": True, "data": {"name": "Released game", "release_date": {"coming_soon": False}}}}
+        with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(body))), patch.object(self.plugin, "_aks_read", side_effect=OSError("test stop")) as aks:
+            with self.assertRaises(OSError):
+                self.plugin._fetch_aks_game("10")
+        self.assertEqual(aks.call_count, 1)
+
     async def test_aks_connection_failure_is_shared_and_recovers(self):
         with patch.object(self.plugin, "_fetch_aks_game", side_effect=urllib.error.URLError(TimeoutError("timed out"))) as fetch:
             first = await self.plugin.get_allkeyshop_price("10")

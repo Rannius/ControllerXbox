@@ -66,3 +66,22 @@ test('countdown uses a fixed deadline, one timer, and stops after removal',()=>{
  now=16000;tick();assert.match(node.textContent,/újrapróbálkozás/);
  nodes=[];tick();assert.equal(cleared,1);assert.equal(context.window.__dpbPriceCountdown,undefined);
 });
+
+test('new tiles precede expired cached tiles and open game has priority',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/';
+ f.api.updatePriceView(url,f.send,['10']);f.requests[0].resolve({success:true,checked_at:f.clock.now/1000,offers:[]});await f.drain();
+ f.clock.now+=1200000;f.api.updatePriceView(url,f.send,['10']);assert.equal(f.requests.length,1);
+ f.clock.now+=601000;f.api.updatePriceView(url,f.send,['10','20']);assert.equal(f.requests[1].id,'20');
+ f.requests[1].resolve({success:true,offers:[]});await f.drain();
+ f.api.updatePriceView('https://store.steampowered.com/app/30/',f.send,['10','40']);assert.equal(f.requests[2].id,'30');
+ f.requests[2].resolve({success:true,offers:[]});await f.drain();
+});
+
+test('successful prices refresh only on reappearance after 30 minutes',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/';
+ f.api.updatePriceView(url,f.send,['10']);f.requests[0].resolve({success:true,checked_at:f.clock.now/1000,offers:[]});await f.drain();
+ f.clock.now+=1801000;f.api.updatePriceView(url,f.send,['10']);assert.equal(f.requests.length,1);
+ f.api.updatePriceView(url,f.send,[]);f.api.updatePriceView(url,f.send,['10']);assert.equal(f.requests.length,2);
+ f.requests[1].resolve({success:true,checked_at:f.clock.now/1000,offers:[]});await f.drain();
+ f.api.updatePriceView(url,f.send,[]);f.api.updatePriceView(url,f.send,['10']);assert.equal(f.requests.length,2);
+});

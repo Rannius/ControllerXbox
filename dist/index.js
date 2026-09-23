@@ -291,7 +291,7 @@ function AllKeyShopSettings({ openMerchants }) {
                                 finally {
                                     setBusy(false);
                                 }
-                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Alapból a megnyitott játékhoz, külön engedéllyel a látható áruházi csempékhez is kér árat; 15 percig tárolja." }) })] });
+                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Alapból a megnyitott játékhoz, külön engedéllyel a látható áruházi csempékhez is kér árat; 30 percig tárolja. Az AllKeyShop-kérések között legalább 5 másodperc szünet van." }) })] });
 }
 function AllKeyShopMerchants({ onBack }) {
     const [names, setNames] = SP_REACT.useState([]);
@@ -393,7 +393,7 @@ function buildPricePanelScript(appId, result) {
     let panel = document.getElementById(id);
     if (!appId) { panel?.remove(); return; }
     if (pageId !== appId) return;
-    if (data?.disabled) { panel?.remove(); return; }
+    if (data?.disabled || data?.skipped) { panel?.remove(); return; }
     // Gamepad Store is a React page, with no legacy purchase markup.
     const gamepadPrice = document.documentElement.classList.contains('GamepadMode')
       ? Array.from(document.querySelectorAll('.StoreSalePriceWidgetContainer')).find(node =>
@@ -435,7 +435,7 @@ function buildPricePanelScript(appId, result) {
       }
       line('AKS szerinti, kártyadíjat tartalmazó ár; kupon esetén annak feltételeivel.');
       line('Global/EU besorolás. A végösszeget és a magyarországi aktiválhatóságot az eladónál ellenőrizd.');
-      if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
+      if (data.checked_at) line('Utoljára ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
       if (/^https:\\/\\/www\\.allkeyshop\\.com\\/blog\\/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+\\/$/.test(data.url || '')) {
         const link = document.createElement('a'); link.href = data.url; link.textContent = 'AllKeyShop adatlap megnyitása (az ottani lista külön szűrhető)';
         link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; content.appendChild(link);
@@ -464,7 +464,7 @@ function buildTilePricesScript(url, values) {
     const saved = window.__dpbPriceTiles = new Map();
     ${storePriceTilesScript}
     for (const {host, id} of collectPriceTiles()) {
-      if (!(id in values) || values[id]?.disabled) continue;
+      if (!(id in values) || values[id]?.disabled || values[id]?.skipped) continue;
       saved.set(host, ['position', 'padding-bottom', 'box-sizing', 'overflow'].map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
       const oldPadding = parseFloat(getComputedStyle(host).paddingBottom) || 0;
       if (getComputedStyle(host).position === 'static') host.style.setProperty('position', 'relative');
@@ -489,13 +489,15 @@ let revision = 0;
 let currentApp = "";
 let tileUrl = "";
 let tileIds = [];
+let visibleApps = new Set();
+const refreshQueue = new Set();
 function visiblePrice(id) {
     const cached = prices.get(id);
-    if (cached && cached.expires > Date.now())
+    if (cached)
         return cached.value;
     return serviceFailure && serviceFailure.expires > Date.now() ? serviceFailure.value : undefined;
 }
-function resetPriceView() { prices.clear(); serviceFailure = undefined; revision++; currentApp = ""; tileIds = []; tileUrl = ""; }
+function resetPriceView() { prices.clear(); serviceFailure = undefined; revision++; currentApp = ""; tileIds = []; tileUrl = ""; visibleApps.clear(); refreshQueue.clear(); }
 function updatePriceView(url, send, visibleTileIds = []) {
     let id = "";
     try {
@@ -504,9 +506,20 @@ function updatePriceView(url, send, visibleTileIds = []) {
             id = parsed.pathname.match(/^\/app\/(\d+)/)?.[1] ?? "";
     }
     catch { /* no game */ }
+    const previousApp = currentApp;
     currentApp = id;
     tileUrl = url;
     tileIds = /^https:\/\/store\.steampowered\.com\//.test(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
+    const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
+    for (const app of nextVisible) {
+        const entry = prices.get(app);
+        if ((!visibleApps.has(app) || (app === id && id !== previousApp)) && (!entry || entry.expires <= Date.now()))
+            refreshQueue.add(app);
+    }
+    for (const app of refreshQueue)
+        if (!nextVisible.has(app))
+            refreshQueue.delete(app);
+    visibleApps = nextVisible;
     const renderTiles = () => {
         const values = {};
         for (const tile of tileIds)
@@ -514,9 +527,14 @@ function updatePriceView(url, send, visibleTileIds = []) {
         void send(buildTilePricesScript(tileUrl, values)).catch(() => { });
     };
     renderTiles();
-    const cached = prices.get(id);
     void send(buildPricePanelScript(id, visiblePrice(id))).catch(() => { });
-    const requestId = id && (!cached || cached.expires <= Date.now()) ? id : tileIds.find(tile => !prices.has(tile) || prices.get(tile).expires <= Date.now());
+    // Expiry alone never refreshes a successful visible price. Failed requests retain
+    // the existing retry countdown; stale successful prices wait for a new appearance.
+    const needsRequest = (app) => refreshQueue.has(app) ||
+        (prices.has(app) && !prices.get(app).value.success && prices.get(app).expires <= Date.now());
+    const pending = [...refreshQueue];
+    const requestId = id && needsRequest(id) ? id : pending.find(app => !prices.has(app)) ??
+        pending[0] ?? tileIds.find(needsRequest);
     if (!requestId || fetching || (serviceFailure && serviceFailure.expires > Date.now()))
         return;
     fetching = true;
@@ -534,9 +552,11 @@ function updatePriceView(url, send, visibleTileIds = []) {
             return;
         }
         serviceFailure = undefined;
-        if (prices.size >= 100)
+        refreshQueue.delete(requestId);
+        if (prices.size >= 500)
             prices.delete(prices.keys().next().value);
-        const expires = Date.now() + (value.success && !value.disabled ? 900000 : Math.max(1, Math.min(60, value.retry_after ?? 30)) * 1000);
+        const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
+        const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(60, value.retry_after ?? 30)) * 1000);
         if (!value.success)
             value = { ...value, retry_at: expires };
         prices.set(requestId, { value, expires });

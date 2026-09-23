@@ -83,3 +83,9 @@ Közös szolgáltatási hiba esetén nem várakoztatja végig egyenként az öss
 ## 1.0.68 – Újrapróbálkozási visszaszámlálás
 
 Az AllKeyShop ársorok kiírják az újrapróbálkozásig hátralévő másodperceket. Kapcsolati hibánál a közös szünet 15, 30, majd legfeljebb 60 másodperc; a játékspecifikus hibánál 30 másodperc. A számláló nem indít hálózati forgalmat.
+
+## 1.0.69 – Kímélő árlekérési sor
+
+A megnyitott játék elsőbbséget kap, utána a látható, még le nem kért csempék, végül az újra megjelent, lejárt adatú játékok következnek. Az AllKeyShop-kérések között legalább 5 másodperc szünet van. A sikeres adatok 30 percig használhatók új kérés nélkül (500 játék, a futó plugin memóriájában). A lejárat önmagában nem frissít: a játék későbbi újbóli megjelenése vagy adatlapjának újbóli megnyitása indítja a frissítést. A kibővített nézet mutatja az utolsó ellenőrzés idejét.
+
+A Steam szerint meg nem jelent vagy ismeretlen megjelenési állapotú játékhoz nem indul AllKeyShop-kérés, a személyre szabott naptárban sem. Ehhez a Steam megjelenési adatát továbbra is lekéri.

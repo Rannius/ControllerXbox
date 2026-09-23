@@ -159,6 +159,8 @@ class Plugin:
         self._price_merchants_lock = asyncio.Lock()
         self._price_cache: Dict[str, Dict[str, Any]] = {}
         self._price_lock = asyncio.Lock()
+        self._aks_request_lock = threading.Lock()
+        self._aks_next_request_at = 0.0
         self._price_service_error: Optional[Dict[str, Any]] = None
         self._price_service_retry_at = 0.0
         self._price_service_failures = 0
@@ -465,13 +467,22 @@ class Plugin:
             raise ValueError("Invalid AllKeyShop URL")
         request = urllib.request.Request(url, headers={"User-Agent": "Deck Play Badges price comparison/1.0",
                                                         "Accept-Encoding": "identity", "Accept": "text/html,application/json"})
-        with self._open_request(request, timeout=12) as response:
-            if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
-                raise ValueError("Unexpected AllKeyShop redirect")
-            body = response.read(4000001)
-        if len(body) > 4000000:
-            raise ValueError("AllKeyShop page is too large")
-        return body.decode("utf-8")
+        # Executed only in the blocking worker: one global AKS request at a time,
+        # including search, offer pages and merchant-directory refreshes.
+        with self._aks_request_lock:
+            wait = max(0.0, self._aks_next_request_at - time.monotonic())
+            if wait:
+                time.sleep(wait)
+            try:
+                with self._open_request(request, timeout=12) as response:
+                    if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
+                        raise ValueError("Unexpected AllKeyShop redirect")
+                    body = response.read(4000001)
+                if len(body) > 4000000:
+                    raise ValueError("AllKeyShop page is too large")
+                return body.decode("utf-8")
+            finally:
+                self._aks_next_request_at = time.monotonic() + 5.0
 
     @classmethod
     def _aks_search_match(cls, fragment: str, title: str) -> str:
@@ -532,9 +543,26 @@ class Plugin:
         return sorted(offers, key=lambda offer: (offer["price"], offer["merchant"]))
 
     def _fetch_aks_game(self, app_id: str) -> Dict[str, Any]:
-        title = self._fetch_steam_title(app_id)
+        request = urllib.request.Request(STORE_URL.format(app_id=app_id),
+                                         headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"})
+        try:
+            with self._open_request(request, timeout=10) as response:
+                payload = json.load(response)
+            item = payload.get(app_id, {})
+            metadata = item.get("data", {}) if item.get("success") else {}
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            raise ValueError("A Steam-játék neve most nem kérdezhető le.") from error
+        if not isinstance(metadata, dict):
+            raise ValueError("A Steam-játék neve most nem kérdezhető le.")
+        title = str(metadata.get("name", "")).strip()[:200]
         if not title:
             raise ValueError("A Steam-játék neve most nem kérdezhető le.")
+        release = metadata.get("release_date")
+        coming_soon = release.get("coming_soon") if isinstance(release, dict) else None
+        # No AKS search or offer download until Steam confirms the game is released.
+        if coming_soon is not False:
+            return {"title": title, "skipped": "unreleased" if coming_soon is True else "release_unknown",
+                    "checked_at": time.time()}
         query = urllib.parse.urlencode({"action": "quicksearch", "search_name": title, "currency": "eur",
                                         "locale": "en", "platform": "pc", "activation_country": "HU"})
         search = json.loads(self._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?" + query))
@@ -583,15 +611,16 @@ class Plugin:
             return {"success": True, "disabled": True}
         async with self._price_lock:
             entry = self._price_cache.get(normalized)
-            if not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else 900):
+            if not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else 1800):
                 if self._price_service_error and time.time() < self._price_service_retry_at:
                     return {"success": False, **self._price_service_error,
                             "retry_after": max(1, int(self._price_service_retry_at - time.time()))}
                 try:
                     entry = await self._run_blocking(self._fetch_aks_game, normalized)
-                    self._price_service_error = None
-                    self._price_service_failures = 0
-                    self._price_service_retry_at = 0.0
+                    if not entry.get("skipped"):
+                        self._price_service_error = None
+                        self._price_service_failures = 0
+                        self._price_service_retry_at = 0.0
                 except (OSError, ValueError, TypeError, KeyError) as error:
                     decky.logger.debug("AllKeyShop lookup failed: %s", error)
                     details = self._aks_error_details(error)
@@ -602,12 +631,15 @@ class Plugin:
                         self._price_service_retry_at = time.time() + delay
                         self._price_service_error = details
                         return {"success": False, **details, "retry_after": delay}
-                if len(self._price_cache) >= 100:
+                if len(self._price_cache) >= 500:
                     self._price_cache.pop(next(iter(self._price_cache)))
                 self._price_cache[normalized] = entry
             if "error" in entry:
                 return {"success": False, "error": entry["error"], "error_code": entry.get("error_code", "lookup"),
                         "global_error": False, "retry_after": max(1, int(30 - (time.time() - entry["checked_at"])))}
+            if entry.get("skipped"):
+                return {"success": True, "skipped": entry["skipped"], "title": entry["title"],
+                        "checked_at": entry["checked_at"], "offers": []}
             async with self._price_merchants_lock:
                 discovered = {row["name"] for row in entry["data"]["merchants"].values()
                               if isinstance(row, dict) and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 80}
