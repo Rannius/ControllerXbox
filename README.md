@@ -123,3 +123,13 @@ Az AKS-áradatok lemezre mentődnek, így plugin- és gépújraindítás után i
 A plugin főoldalán AKS friss/összes számláló, kívánságlista-feldolgozási állapot, kihagyott játékok száma és külön árgyorsítótár-törlés jelenik meg. A teljes cache-törlés az AKS-adatokat is törli. Az ingyenes és meg nem jelent játékokhoz nincs AKS-kérés. Az 5 másodperces kérésköz és a kapcsolati hibák utáni közös szünet megmaradt. Az áruház bezárásakor, kijelentkezéskor vagy az árak kikapcsolásakor nem indul új háttérkérés. A kívánságlista tagságát és a bejelentkezési adatokat nem mentjük lemezre.
 
 Ellenőrzés: TypeScript, frontend- és Python-regressziós tesztek, köztük 906 elemű teljes kívánságlista, fiókváltás, háttérsor elsőbbsége, újraindítás, cache-törlés közben befejeződő kérés és offline gyorsítótár. Fizikai Steam Decken a bejelentkezett kívánságlista kiolvasása külön kipróbálást igényel.
+
+## 1.0.82 – Kívánságlistasor javítása és pontos kapcsolati hibák
+
+Kapcsolati szünet után a kívánságlistasor a még nem próbált játékokkal folytatódik: egy hibázó adatlap nem kerül folyamatosan a sor elejére. Egyetlen hiányzó AKS-adatlap (HTTP 404/410) nem állítja le az összes játék ellenőrzését.
+
+A plugin főoldalán és az ársor részleteiben látható a hiba lépése (Steam-adatok, AKS-kereső vagy AKS-ajánlatoldal), az eltelt idő, illetve az időtúllépés, DNS-, TLS- és kapcsolatmegszakítási hiba vagy HTTP-státusz. Ez nem minősít minden kapcsolati hibát IP-tiltásnak.
+
+A szolgáltató másodpercben megadott Retry-After várakozását a backend és a felület is tiszteletben tartja, legfeljebb 24 óráig. A kérések közötti öt másodperc és a tartós árgyorsítótár megmaradt.
+
+Ellenőrzés: 32 frontend- és 63 Python-teszt. A kiadás előtti, fejlesztői hálózaton végzett Gas Station Simulator lekérés a Steam-adatokkal, AKS-kereséssel, ajánlatoldallal és az öt másodperces szünettel együtt 6,55 másodperc alatt sikerült. Ez nem igazolja a Steam Deck hálózatának működését; a Deck pontos hibáját az új kijelzés teszi megismerhetővé.

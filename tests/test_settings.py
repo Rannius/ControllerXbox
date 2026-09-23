@@ -18,6 +18,42 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_global_failure_rotates_wishlist_after_shared_pause(self):
+        self.plugin._price_wishlist = ["10", "20"]
+        self.plugin._price_wishlist_lease = time.monotonic() + 90
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=[TimeoutError("slow"),
+                {"title": "Second", "skipped": "free", "checked_at": time.time()}]) as fetch:
+            await self.plugin._price_wishlist_step()
+            self.assertFalse(await self.plugin._price_wishlist_step())
+            self.plugin._price_service_retry_at = 0
+            await self.plugin._price_wishlist_step()
+        self.assertEqual([call.args[0] for call in fetch.call_args_list], ["10", "20"])
+        self.assertIn("20", self.plugin._price_cache)
+
+    def test_network_diagnostic_identifies_step_elapsed_and_timeout(self):
+        with patch.object(self.plugin, "_open_request", side_effect=urllib.error.URLError(TimeoutError("slow"))), patch("time.monotonic", side_effect=[100, 100, 130, 130]):
+            try:
+                self.plugin._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?search=game")
+            except urllib.error.URLError as error:
+                details = self.plugin._aks_error_details(error)
+        self.assertEqual(details["error_code"], "connection")
+        self.assertIn("AKS-kereső (30.0 mp)", details["error"])
+        self.assertIn("Időtúllépés", details["error"])
+
+    async def test_server_retry_after_is_honored_and_missing_game_does_not_pause_others(self):
+        error = urllib.error.HTTPError("https://www.allkeyshop.com/", 429, "slow", {"Retry-After": "600"}, None)
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=error) as fetch:
+            result = await self.plugin.get_allkeyshop_price("10")
+            self.assertEqual(result["retry_after"], 600)
+            await self.plugin.get_allkeyshop_price("20")
+            self.assertEqual(fetch.call_count, 1)
+        self.plugin._price_service_retry_at = 0
+        missing = urllib.error.HTTPError("https://www.allkeyshop.com/", 404, "missing", {}, None)
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=missing):
+            result = await self.plugin.get_allkeyshop_price("30")
+        self.assertFalse(result["global_error"])
+        self.assertEqual(self.plugin._price_service_retry_at, 0)
+
     async def test_price_cache_survives_restart_and_respects_current_merchant_filters(self):
         entry = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
                  "data": self.aks_fixture(), "checked_at": time.time()}

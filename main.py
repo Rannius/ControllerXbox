@@ -169,10 +169,12 @@ class Plugin:
         self._price_wishlist_owner = ""
         self._price_wishlist_lease = 0.0
         self._price_wishlist_retry: Dict[str, float] = {}
+        self._price_wishlist_attempts: Dict[str, float] = {}
         self._price_wishlist_task: Optional[asyncio.Task] = None
         self._price_wishlist_current = ""
         self._price_wishlist_error = ""
         self._price_disk_error = ""
+        self._price_last_error = ""
         self._aks_request_lock = threading.Lock()
         self._aks_next_request_at = 0.0
         self._price_service_error: Optional[Dict[str, Any]] = None
@@ -469,6 +471,7 @@ class Plugin:
         self._price_cache.clear()
         self._aks_matches.clear()
         self._price_wishlist_retry.clear()
+        self._price_wishlist_attempts.clear()
         await self._save_price_cache()
         return {"success": True, **self._price_stats()}
 
@@ -485,6 +488,7 @@ class Plugin:
                 "price_wishlist_active": self._price_preferences["enabled"] and time.monotonic() < self._price_wishlist_lease,
                 "price_retry_after": max(0, int(self._price_service_retry_at - now)),
                 "price_wishlist_error": self._price_wishlist_error,
+                "price_last_error": self._price_last_error,
                 "price_disk_error": self._price_disk_error}
 
     async def get_price_cache_stats(self) -> Dict[str, Any]:
@@ -497,6 +501,7 @@ class Plugin:
             return {"success": False, "error": "Érvénytelen kívánságlista."}
         if owner != self._price_wishlist_owner:
             self._price_wishlist_retry.clear()
+            self._price_wishlist_attempts.clear()
         self._price_wishlist_owner = owner
         self._price_wishlist_error = str(error)[:200] if isinstance(error, str) else ""
         self._price_wishlist = list(dict.fromkeys(str(key) for key in app_ids)) if owner else []
@@ -513,13 +518,15 @@ class Plugin:
         now = time.time()
         # Unknown games first, then oldest entries: large lists must not keep
         # refreshing their first items while the tail has never been checked.
-        for app_id in sorted(self._price_wishlist, key=lambda key: self._price_cache.get(key, {}).get("checked_at", 0)):
+        for app_id in sorted(self._price_wishlist, key=lambda key: max(
+                self._price_cache.get(key, {}).get("checked_at", 0), self._price_wishlist_attempts.get(key, 0))):
             entry = self._price_cache.get(app_id)
             if entry and "error" not in entry and now - entry["checked_at"] < 1800:
                 continue
             if self._price_wishlist_retry.get(app_id, 0) > now:
                 continue
             self._price_wishlist_current = app_id
+            self._price_wishlist_attempts[app_id] = now
             epoch = self._price_epoch
             try:
                 result = await self._get_allkeyshop_price(app_id)
@@ -634,6 +641,7 @@ class Plugin:
             wait = max(0.0, self._aks_next_request_at - time.monotonic())
             if wait:
                 time.sleep(wait)
+            started = time.monotonic()
             try:
                 with self._open_request(request, timeout=30) as response:
                     if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
@@ -642,6 +650,11 @@ class Plugin:
                 if len(body) > 4000000:
                     raise ValueError("AllKeyShop page is too large")
                 return body.decode("utf-8")
+            except (OSError, ValueError) as error:
+                error.price_stage = "AKS-kereső" if "admin-ajax.php" in parsed.path else (
+                    "AKS-boltlista" if "cdkey-store-reviews" in parsed.path else "AKS-ajánlatoldal")
+                error.price_elapsed = round(time.monotonic() - started, 1)
+                raise
             finally:
                 self._aks_next_request_at = time.monotonic() + 5.0
 
@@ -706,13 +719,17 @@ class Plugin:
     def _fetch_aks_game(self, app_id: str) -> Dict[str, Any]:
         request = urllib.request.Request(STORE_URL.format(app_id=app_id),
                                          headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"})
+        started = time.monotonic()
         try:
             with self._open_request(request, timeout=10) as response:
                 payload = json.load(response)
             item = payload.get(app_id, {})
             metadata = item.get("data", {}) if item.get("success") else {}
         except (OSError, ValueError, TypeError, AttributeError) as error:
-            raise ValueError("A Steam-játék neve most nem kérdezhető le.") from error
+            failure = ValueError("A Steam-játék neve most nem kérdezhető le.")
+            failure.price_stage = "Steam-adatok"
+            failure.price_elapsed = round(time.monotonic() - started, 1)
+            raise failure from error
         if not isinstance(metadata, dict):
             raise ValueError("A Steam-játék neve most nem kérdezhető le.")
         title = str(metadata.get("name", "")).strip()[:200]
@@ -759,8 +776,14 @@ class Plugin:
     def _aks_error_details(error: Exception) -> Dict[str, Any]:
         code, message, shared = "lookup", "Az AllKeyShop válasza nem dolgozható fel.", False
         if isinstance(error, urllib.error.HTTPError):
-            code, shared = ("rate_limit" if error.code == 429 else "http"), True
-            message = "Az AllKeyShop HTTP %s választ adott. A lekéréseket átmenetileg szüneteltetjük." % error.code
+            code, shared = ("rate_limit" if error.code == 429 else "http"), error.code not in (404, 410)
+            message = "Az AllKeyShop HTTP %s választ adott." % error.code
+            if error.code == 429:
+                message += " Túl sok kérés: a szolgáltató szünetet kér."
+            elif error.code == 403:
+                message += " A szolgáltató megtagadta a hozzáférést."
+            elif error.code in (404, 410):
+                message += " Ez az adatlap nem érhető el; a többi játék ellenőrizhető."
         elif isinstance(error, (urllib.error.URLError, OSError)):
             code, shared = "connection", True
             message = "Nem sikerült kapcsolódni az AllKeyShophoz, vagy a kapcsolat túllépte az időkorlátot. Ez nem jelenti azt, hogy nincs ajánlat."
@@ -780,7 +803,30 @@ class Plugin:
                 code = "match"
             else:
                 code, shared = "format", True
-        return {"error": message, "error_code": code, "global_error": shared}
+        cause = error.__cause__ or error
+        reason = getattr(cause, "reason", cause)
+        network = ""
+        if isinstance(reason, TimeoutError) or getattr(reason, "errno", None) in (110, 10060):
+            network = "Időtúllépés: a kapcsolat nem válaszolt időben."
+        elif type(reason).__name__ == "gaierror":
+            network = "DNS-hiba: a kiszolgáló címe nem oldható fel."
+        elif isinstance(reason, ssl.SSLError):
+            network = "TLS-hiba: a biztonságos kapcsolat nem hozható létre."
+        elif isinstance(reason, ConnectionRefusedError):
+            network = "A kiszolgáló elutasította a kapcsolatot."
+        elif isinstance(reason, (ConnectionResetError, BrokenPipeError)):
+            network = "A kapcsolat adatátvitel közben megszakadt."
+        if network:
+            message = network
+        stage = getattr(error, "price_stage", "Steam-adatok" if code == "steam" else "AllKeyShop")
+        elapsed = getattr(error, "price_elapsed", None)
+        message = stage + (" (%.1f mp)" % elapsed if isinstance(elapsed, (int, float)) else "") + ": " + message
+        details = {"error": message, "error_code": code, "global_error": shared}
+        if isinstance(cause, urllib.error.HTTPError):
+            retry = str((cause.headers or {}).get("Retry-After", ""))
+            if retry.isdigit():
+                details["retry_after"] = min(86400, int(retry))
+        return details
 
     async def get_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
         self._price_foreground_waiters += 1
@@ -811,12 +857,14 @@ class Plugin:
                         self._aks_matches.pop(normalized, None)
                         return {"success": False, "error": "Az árgyorsítótár törölve lett.", "retry_after": 30}
                     if not entry.get("skipped"):
+                        self._price_last_error = ""
                         self._price_service_error = None
                         self._price_service_failures = 0
                         self._price_service_retry_at = 0.0
                 except (OSError, ValueError, TypeError, KeyError) as error:
                     decky.logger.debug("AllKeyShop lookup failed: %s", error)
                     details = self._aks_error_details(error)
+                    self._price_last_error = "Steam %s · %s" % (normalized, details["error"])
                     entry = {**details, "checked_at": time.time()}
                     if details["global_error"]:
                         self._price_service_failures += 1
@@ -824,7 +872,7 @@ class Plugin:
                         # Base 10 s, cap 300 s, with 50-100 % randomised jitter to
                         # prevent synchronised retry storms across instances.
                         raw = min(300, 10 * (2 ** min(5, self._price_service_failures - 1)))
-                        delay = raw // 2 + random.uniform(0, raw / 2)
+                        delay = max(raw // 2 + random.uniform(0, raw / 2), details.get("retry_after", 0))
                         self._price_service_retry_at = time.time() + delay
                         self._price_service_error = details
                         return {"success": False, **details, "retry_after": delay}

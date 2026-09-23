@@ -379,7 +379,7 @@ function PriceCacheStatus() {
                                         : !stats.price_wishlist_active ? "Előtöltés szünetel. Az áruház megnyitásakor indul."
                                             : stats.price_wishlist_current ? `Ellenőrzés: Steam ${stats.price_wishlist_current}`
                                                 : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 30 percnél régebbi adatok frissülnek."
-                                                    : "A következő játék ellenőrzésére vár." }), stats.price_disk_error && SP_JSX.jsx("div", { children: stats.price_disk_error }), stats.price_wishlist_error && SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_error] })] }) : "Árgyorsítótár betöltése…", error && SP_JSX.jsx("div", { children: error })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
+                                                    : "A következő játék ellenőrzésére vár." }), stats.price_disk_error && SP_JSX.jsx("div", { children: stats.price_disk_error }), stats.price_wishlist_error && SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_error] }), stats.price_last_error && SP_JSX.jsxs("div", { children: ["Legut\u00F3bbi \u00E1rlek\u00E9r\u00E9si hiba: ", stats.price_last_error] })] }) : "Árgyorsítótár betöltése…", error && SP_JSX.jsx("div", { children: error })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
                         setBusy(true);
                         try {
                             const value = await timed(clearPriceCache());
@@ -725,7 +725,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
         if (requestRevision !== revision || value.missing)
             return;
         if (value.global_error) {
-            const expires = Date.now() + Math.max(1, Math.min(300, value.retry_after ?? 15)) * 1000;
+            const expires = Date.now() + Math.max(1, Math.min(86400, value.retry_after ?? 15)) * 1000;
             serviceFailure = { value: { ...value, retry_at: expires }, expires };
             if (currentApp)
                 void send(buildPricePanelScript(currentApp, visiblePrice(currentApp) ?? value)).catch(() => { });
@@ -741,7 +741,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
         if (prices.size >= 500)
             prices.delete(prices.keys().next().value);
         const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-        const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(300, value.retry_after ?? 30)) * 1000);
+        const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(86400, value.retry_after ?? 30)) * 1000);
         if (!value.success)
             value = { ...value, retry_at: expires };
         prices.set(requestId, { value, expires });

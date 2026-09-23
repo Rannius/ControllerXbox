@@ -130,3 +130,14 @@ test('persistent cached price renders before a slow refresh and fresh cache avoi
  f.api.updatePriceView(url,f.send);await f.drain();
  assert.equal(f.requests.length,1);
 });
+
+test('server-requested cooldown is not shortened to the client five-minute limit',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/app/10/';
+ f.api.updatePriceView(url,f.send);await f.drain();
+ f.requests[0].resolve({success:false,error_code:'rate_limit',global_error:true,retry_after:600});await f.drain();
+ f.clock.now+=301000;f.api.updatePriceView(url,f.send);await f.drain();
+ assert.equal(f.requests.length,1);
+ f.clock.now+=300000;f.api.updatePriceView(url,f.send);await f.drain();
+ assert.equal(f.requests.length,2);
+ f.requests[1].resolve({success:true,offers:[]});await f.drain();
+});
