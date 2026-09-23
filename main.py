@@ -681,7 +681,7 @@ class Plugin:
                     except OSError as error:
                         decky.logger.debug("AllKeyShop discovered merchants could not be saved: %s", error)
             offers = self._aks_filter(entry["data"], self._price_preferences)
-            return {"success": True, "offers": offers[:3], "matched_offers": len(offers),
+            return {"success": True, "offers": offers[:1], "matched_offers": len(offers),
                     "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
                     "currency": "EUR", "preferred_only": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
 
