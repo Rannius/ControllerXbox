@@ -75,3 +75,7 @@ A játékoldal ársora az első látható vásárlási csempéhez tartozó burko
 ## 1.0.66 – Kontrolleres áruházi ármező
 
 A GamepadMode játékoldalon az AllKeyShop sor a bal felső játékbemutató kártyán lévő Steam-ár alatt jelenik meg. A hagyományos webes vásárlási blokkra épülő korábbi felismerés önmagában nem kezelte ezt a nézetet. A kontrolleres áruház valódi Dressmaker-oldalával végzett böngészős elhelyezési próba sikeres.
+
+## 1.0.67 – AllKeyShop kapcsolati hibák
+
+Közös szolgáltatási hiba esetén nem várakoztatja végig egyenként az összes csempét: azonnal közös hibát mutat, majd 1–5 perces szünet után próbálkozik újra, ha az áruház nyitva marad. A hibatípus az ársorban és a lenyitott részletekben látható. A külső szolgáltatás elérhetetlenségét ez a módosítás nem oldja meg.

@@ -398,7 +398,7 @@ function buildPricePanelScript(appId, result) {
     panel.addEventListener('click', event => event.stopPropagation());
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
-    summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: hiba' : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
+    summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
     summary.title = 'AllKeyShop ár és ajánlatok – megnyitás';
     summary.style.cssText = 'cursor:pointer;white-space:normal;overflow-wrap:anywhere;box-sizing:border-box;list-style:none;border:1px solid #67c1f5;border-radius:5px;background:#162634;padding:2px 8px;font-weight:700;min-height:24px';
     panel.appendChild(summary);
@@ -408,7 +408,7 @@ function buildPricePanelScript(appId, result) {
     const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
     line('AllKeyShop · Steam-kulcs / Gift', true);
     if (!data) line('Árak betöltése…');
-    else if (!data.success) line(data.error || 'Az ár most nem érhető el.');
+    else if (!data.success) { line(data.error || 'Az ár most nem érhető el.'); if (data.global_error) line('A többi árlekérés is szünetel. Automatikus újrapróbálkozás 1–5 perc múlva, amíg az áruház nyitva van.'); }
     else {
       line(data.preferred_only ? 'Legalacsonyabb ár a kiválasztott boltokból' : 'Legalacsonyabb megfelelő ajánlat');
       if (!data.offers?.length) line('Nincs megfelelő Steam-kulcs vagy Gift az aktuális szűrőkkel.');
@@ -456,7 +456,7 @@ function buildTilePricesScript(url, values) {
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
       row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
-      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: nem elérhető' : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
+      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
       row.title = row.textContent;
       host.appendChild(row);
     }
@@ -464,11 +464,18 @@ function buildTilePricesScript(url, values) {
 }
 const prices = new Map();
 let fetching = false;
+let serviceFailure;
 let revision = 0;
 let currentApp = "";
 let tileUrl = "";
 let tileIds = [];
-function resetPriceView() { prices.clear(); revision++; currentApp = ""; tileIds = []; tileUrl = ""; }
+function visiblePrice(id) {
+    const cached = prices.get(id);
+    if (cached && cached.expires > Date.now())
+        return cached.value;
+    return serviceFailure && serviceFailure.expires > Date.now() ? serviceFailure.value : undefined;
+}
+function resetPriceView() { prices.clear(); serviceFailure = undefined; revision++; currentApp = ""; tileIds = []; tileUrl = ""; }
 function updatePriceView(url, send, visibleTileIds = []) {
     let id = "";
     try {
@@ -483,20 +490,29 @@ function updatePriceView(url, send, visibleTileIds = []) {
     const renderTiles = () => {
         const values = {};
         for (const tile of tileIds)
-            values[tile] = prices.get(tile)?.value ?? null;
+            values[tile] = visiblePrice(tile) ?? null;
         void send(buildTilePricesScript(tileUrl, values)).catch(() => { });
     };
     renderTiles();
     const cached = prices.get(id);
-    void send(buildPricePanelScript(id, cached?.value)).catch(() => { });
+    void send(buildPricePanelScript(id, visiblePrice(id))).catch(() => { });
     const requestId = id && (!cached || cached.expires <= Date.now()) ? id : tileIds.find(tile => !prices.has(tile) || prices.get(tile).expires <= Date.now());
-    if (!requestId || fetching)
+    if (!requestId || fetching || (serviceFailure && serviceFailure.expires > Date.now()))
         return;
     fetching = true;
     const requestRevision = revision;
-    void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error) })).then(value => {
+    void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 60 })).then(value => {
         if (requestRevision !== revision)
             return;
+        if (value.global_error) {
+            serviceFailure = { value, expires: Date.now() + Math.max(1, Math.min(300, value.retry_after ?? 60)) * 1000 };
+            if (currentApp)
+                void send(buildPricePanelScript(currentApp, visiblePrice(currentApp) ?? value)).catch(() => { });
+            if (tileIds.length)
+                renderTiles();
+            return;
+        }
+        serviceFailure = undefined;
         if (prices.size >= 100)
             prices.delete(prices.keys().next().value);
         prices.set(requestId, { value, expires: Date.now() + (value.success && !value.disabled ? 900000 : 60000) });

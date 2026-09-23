@@ -159,6 +159,9 @@ class Plugin:
         self._price_merchants_lock = asyncio.Lock()
         self._price_cache: Dict[str, Dict[str, Any]] = {}
         self._price_lock = asyncio.Lock()
+        self._price_service_error: Optional[Dict[str, Any]] = None
+        self._price_service_retry_at = 0.0
+        self._price_service_failures = 0
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._steam_backoff_until = 0.0
         self._steam_failures = 0
@@ -545,6 +548,33 @@ class Plugin:
             raise ValueError("Az AllKeyShop pénzneme nem ellenőrizhető.")
         return {"title": title, "url": url, "data": self._aks_parse(page), "checked_at": time.time()}
 
+    @staticmethod
+    def _aks_error_details(error: Exception) -> Dict[str, Any]:
+        code, message, shared = "lookup", "Az AllKeyShop válasza nem dolgozható fel.", False
+        if isinstance(error, urllib.error.HTTPError):
+            code, shared = ("rate_limit" if error.code == 429 else "http"), True
+            message = "Az AllKeyShop HTTP %s választ adott. A lekéréseket átmenetileg szüneteltetjük." % error.code
+        elif isinstance(error, (urllib.error.URLError, OSError)):
+            code, shared = "connection", True
+            message = "Nem sikerült kapcsolódni az AllKeyShophoz, vagy a kapcsolat túllépte az időkorlátot. Ez nem jelenti azt, hogy nincs ajánlat."
+        elif isinstance(error, ValueError):
+            # Keep our specific validation messages; do not expose raw response bodies.
+            safe_messages = ("A Steam-játék neve most nem kérdezhető le.",
+                             "Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.",
+                             "Az AllKeyShop ajánlatai most nem olvashatók.",
+                             "Megváltozott az AllKeyShop adatformátuma.",
+                             "Az AllKeyShop keresője nem válaszolt megfelelően.",
+                             "Az AllKeyShop pénzneme nem ellenőrizhető.")
+            if str(error) in safe_messages:
+                message = str(error)
+            if message == safe_messages[0]:
+                code, shared = "steam", True
+            elif message == safe_messages[1]:
+                code = "match"
+            else:
+                code, shared = "format", True
+        return {"error": message, "error_code": code, "global_error": shared}
+
     async def get_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
         normalized = str(app_id)
         if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
@@ -554,17 +584,30 @@ class Plugin:
         async with self._price_lock:
             entry = self._price_cache.get(normalized)
             if not entry or time.time() - entry["checked_at"] >= (60 if "error" in entry else 900):
+                if self._price_service_error and time.time() < self._price_service_retry_at:
+                    return {"success": False, **self._price_service_error,
+                            "retry_after": max(1, int(self._price_service_retry_at - time.time()))}
                 try:
                     entry = await self._run_blocking(self._fetch_aks_game, normalized)
+                    self._price_service_error = None
+                    self._price_service_failures = 0
+                    self._price_service_retry_at = 0.0
                 except (OSError, ValueError, TypeError, KeyError) as error:
                     decky.logger.debug("AllKeyShop lookup failed: %s", error)
-                    entry = {"error": "Az ár nem kérdezhető le vagy nem azonosítható biztosan. Később újrapróbáljuk.",
-                             "checked_at": time.time()}
+                    details = self._aks_error_details(error)
+                    entry = {**details, "checked_at": time.time()}
+                    if details["global_error"]:
+                        self._price_service_failures += 1
+                        delay = min(300, 60 * (2 ** min(3, self._price_service_failures - 1)))
+                        self._price_service_retry_at = time.time() + delay
+                        self._price_service_error = details
+                        return {"success": False, **details, "retry_after": delay}
                 if len(self._price_cache) >= 100:
                     self._price_cache.pop(next(iter(self._price_cache)))
                 self._price_cache[normalized] = entry
             if "error" in entry:
-                return {"success": False, "error": entry["error"]}
+                return {"success": False, "error": entry["error"], "error_code": entry.get("error_code", "lookup"),
+                        "global_error": False, "retry_after": max(1, int(60 - (time.time() - entry["checked_at"])))}
             async with self._price_merchants_lock:
                 discovered = {row["name"] for row in entry["data"]["merchants"].values()
                               if isinstance(row, dict) and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 80}

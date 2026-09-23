@@ -2,14 +2,15 @@ const {test}=require('node:test'), assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm'),ts=require('typescript');
 function fixture() {
  const requests=[],scripts=[],exports={};
+ const clock={now:Date.now()};class ClockDate extends Date {static now(){return clock.now;}}
  const dock={};vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/storeBadgeDock.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports:dock});
  const tiles={};vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/storePriceTiles.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports:tiles});
  const requireMock=name=>name==='./storePriceTiles'?tiles:name==='./storeBadgeDock'?dock:name==='@decky/api'?{callable:method=>id=>new Promise(resolve=>requests.push({method,id,resolve}))}:{};
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/AllKeyShop.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.React}}).outputText,
-  {exports,require:requireMock,setTimeout,clearTimeout,URL});
+  {exports,require:requireMock,setTimeout,clearTimeout,URL,Date:ClockDate});
  const send=async s=>{scripts.push(s);};
  const drain=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
- return {api:exports,requests,scripts,send,drain};
+ return {api:exports,requests,scripts,send,drain,clock};
 }
 test('price lookup only on opened Steam games, single flight, cached, navigation-safe',async()=>{
  const f=fixture();f.api.updatePriceView('https://store.steampowered.com/',f.send);assert.equal(f.requests.length,0);
@@ -37,4 +38,20 @@ test('tile prices require explicit visible IDs, share cache and stop when disabl
  f.requests[1].resolve({success:true,offers:[]});await f.drain();assert.equal(f.scripts.length,before);
  f.api.updatePriceView('https://store.steampowered.com/app/10/',f.send);assert.equal(f.requests.length,2);
  f.api.updatePriceView('https://example.com/',f.send,['30']);assert.equal(f.requests.length,2);
+});
+
+test('service failure reaches all waiting tiles, pauses requests and recovers after cooldown',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/',ids=['10','20','30'];
+ f.api.updatePriceView(url,f.send,ids);
+ f.requests[0].resolve({success:false,error:'Connection timed out',error_code:'connection',global_error:true,retry_after:60});await f.drain();
+ for(let i=0;i<3;i++)f.api.updatePriceView(url,f.send,ids);
+ assert.equal(f.requests.length,1);
+ const last=f.scripts.findLast(s=>s.includes('const values ='));
+ assert.match(last,/"10":\{"success":false/);assert.match(last,/"30":\{"success":false/);
+ f.api.updatePriceView('https://store.steampowered.com/app/20/',f.send,ids);
+ assert.match(f.scripts.at(-1),/"error_code":"connection"/);assert.equal(f.requests.length,1);
+ f.clock.now+=61000;f.api.updatePriceView(url,f.send,ids);assert.equal(f.requests.length,2);
+ f.requests[1].resolve({success:true,offers:[]});await f.drain();
+ f.api.updatePriceView(url,f.send,ids);assert.equal(f.requests.length,3);
+ f.requests[2].resolve({success:true,offers:[]});await f.drain();
 });

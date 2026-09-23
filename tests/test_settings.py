@@ -18,6 +18,32 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_aks_connection_failure_is_shared_and_recovers(self):
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=urllib.error.URLError(TimeoutError("timed out"))) as fetch:
+            first = await self.plugin.get_allkeyshop_price("10")
+            second = await self.plugin.get_allkeyshop_price("20")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertTrue(first["global_error"])
+        self.assertEqual(second["error_code"], "connection")
+        self.assertGreater(second["retry_after"], 0)
+        self.plugin._price_service_retry_at = 0
+        data = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+                "data": self.aks_fixture(), "checked_at": time.time()}
+        with patch.object(self.plugin, "_fetch_aks_game", return_value=data):
+            recovered = await self.plugin.get_allkeyshop_price("20")
+        self.assertTrue(recovered["success"])
+        self.assertIsNone(self.plugin._price_service_error)
+        self.assertEqual(self.plugin._price_service_failures, 0)
+
+    def test_aks_errors_distinguish_matching_http_and_format(self):
+        details = self.plugin._aks_error_details(ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz."))
+        self.assertFalse(details["global_error"])
+        self.assertEqual(details["error_code"], "match")
+        details = self.plugin._aks_error_details(urllib.error.HTTPError("https://www.allkeyshop.com/", 429, "slow down", {}, None))
+        self.assertEqual(details["error_code"], "rate_limit")
+        self.assertTrue(details["global_error"])
+        self.assertEqual(self.plugin._aks_error_details(ValueError("changed"))["error_code"], "format")
+
     async def test_store_sides_and_tile_opt_in_survive_restart(self):
         self.assertFalse((await self.plugin.get_settings())["show_store_tile_prices"])
         sides = {"price": "right", "controller": "left", "proton": "left"}
