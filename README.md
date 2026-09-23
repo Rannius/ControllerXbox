@@ -63,3 +63,7 @@ Wake refresh waits eight seconds for network reconnection and retries failures a
 A Beállításokban az áruházi játékoldal minden jelvénye külön balra/jobbra állítható. Alapból csak az AllKeyShop ár van balra, a többi ikon jobbra. A felismert alsó ProtonDB-jelvény is állítható.
 
 Az „Árak az áruházi csempék alatt” kapcsoló alapból kikapcsolt. Engedélyezve a látható, felismert webes áruházi csempék alatt ár és boltnév jelenik meg, a mentett boltszűréssel. A lekérések egymás után futnak, 15 perces közös gyorsítótárral; a játékoldal elsőbbséget kap. Az AllKeyShop árakat is engedélyezni kell. A natív Steam-csempékhez ez a funkció nem ad árat.
+
+## 1.0.64 – Ár a vásárlási blokk alatt
+
+Az AllKeyShop ársor a webes játékoldalon a Steam első felismert vásárlási blokkja alá került. Kiírja a Standard ajánlat árát és boltját, és helyben lenyitható. Az ár már nem lebeg a sarokban, bal/jobb kapcsolója megszűnt. A többi ikon oldala és az opcionális csempeárak változatlanul állíthatók.

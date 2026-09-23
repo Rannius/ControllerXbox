@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ButtonItem, PanelSectionRow, TextField, ToggleField } from "@decky/ui";
 import { callable } from "@decky/api";
-import { storeBadgeDockScript, storeBadgeDockCleanupScript } from "./storeBadgeDock";
+
 
 type Preferences = { success: boolean; enabled: boolean; allow_gifts: boolean; merchants: string[]; restrict_merchants: boolean; error?: string };
 export type PriceResult = { success: boolean; disabled?: boolean; error?: string; title?: string; url?: string;
@@ -121,28 +121,27 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     const id = 'deck-play-badges-price';
     const pageId = location.pathname.match(/^\\/app\\/(\\d+)/)?.[1];
     let panel = document.getElementById(id);
-    if (!appId) { ${storeBadgeDockCleanupScript} return; }
+    if (!appId) { panel?.remove(); return; }
     if (pageId !== appId) return;
     if (data?.disabled) { panel?.remove(); return; }
-    ${storeBadgeDockScript}
-    const side = window.__dpbSides?.price || 'left';
-    const host = docks[side];
+    const purchase = Array.from(document.querySelectorAll('.game_area_purchase_game')).find(node =>
+      !node.matches('.demo_above_purchase, .game_area_purchase_game_demo') &&
+      !node.querySelector('[name="bundleid"]') && node.querySelector('.game_purchase_price, .discount_final_price, .game_purchase_action'));
+    const anchor = purchase?.closest('.game_area_purchase_game_wrapper') || purchase;
+    if (!anchor) { panel?.remove(); return; }
     const key = appId + ':' + JSON.stringify(data);
-    if (panel?.dataset.state === key && panel.parentElement === host) return;
+    if (panel?.dataset.state === key && panel.previousElementSibling === anchor) return;
     const wasOpen = panel?.open === true;
     panel?.remove(); panel = document.createElement('details'); panel.id = id; panel.dataset.state = key; panel.open = wasOpen;
-    panel.style.cssText = 'order:2;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
+    panel.style.cssText = 'display:block;clear:both;position:relative;box-sizing:border-box;width:100%;margin:24px 0 16px;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
-    summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: hiba' : best ? 'AKS ' + best.price.toFixed(2) + ' €' : 'AKS: nincs ajánlat';
+    summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: hiba' : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
     summary.title = 'AllKeyShop ár és ajánlatok – megnyitás';
-    summary.style.cssText = 'cursor:pointer;white-space:nowrap;box-sizing:border-box;list-style:none;border:1px solid #67c1f5;border-radius:5px;background:#162634;padding:2px 8px;font-weight:700;min-height:24px';
+    summary.style.cssText = 'cursor:pointer;white-space:normal;overflow-wrap:anywhere;box-sizing:border-box;list-style:none;border:1px solid #67c1f5;border-radius:5px;background:#162634;padding:2px 8px;font-weight:700;min-height:24px';
     panel.appendChild(summary);
     const content = document.createElement('div');
-    content.style.cssText = 'position:absolute;bottom:calc(100% + 8px);left:0;box-sizing:border-box;width:340px;max-width:calc(100vw - 40px);max-height:60vh;overflow:auto;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;box-shadow:0 2px 12px #000';
-    content.style.left = side === 'left' ? '0' : 'auto';
-    content.style.right = side === 'right' ? '0' : 'auto';
-    content.style.maxWidth = 'calc(100vw - ' + (parseFloat(host.style[side]) + 20) + 'px)';
+    content.style.cssText = 'box-sizing:border-box;width:100%;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;margin-top:4px';
     panel.appendChild(content);
     const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
     line('AllKeyShop · Steam-kulcs / Gift', true);
@@ -164,7 +163,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
       }
     }
     panel.addEventListener('keydown', event => { if (event.key === 'Escape') { panel.open = false; summary.focus(); } });
-    host.appendChild(panel);
+    anchor.insertAdjacentElement('afterend', panel);
   })();`;
 }
 

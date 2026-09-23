@@ -207,48 +207,6 @@ function CatalogStatus() {
             })] });
 }
 
-// Two independent rows shared by the icon and price renderers.
-const storeBadgeDockScript = `
-  const docks = {};
-  for (const side of ['left', 'right']) {
-    const id = 'deck-play-badges-dock' + (side === 'right' ? '-right' : '');
-    let row = document.getElementById(id);
-    if (!row) { row = document.createElement('div'); row.id = id; document.body.appendChild(row); }
-    row.style.cssText = 'position:fixed;' + side + ':20px;bottom:20px;z-index:999999;display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:calc(50vw - 40px);pointer-events:none;justify-content:' + (side === 'right' ? 'flex-end' : 'flex-start');
-    docks[side] = row;
-  }
-  const protonMarkers = document.querySelectorAll('.protondb-decky-indicator-container,[data-pp-game-badge],a[href*="protondb.com/app/"]');
-  for (const marker of protonMarkers) {
-    let anchor = marker;
-    while (anchor && anchor !== document.body && getComputedStyle(anchor).position !== 'fixed') anchor = anchor.parentElement;
-    if (!anchor || anchor === document.body) continue;
-    let rect = anchor.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0 && rect.width < 250 && rect.top > innerHeight / 2) {
-      const side = window.__dpbSides?.proton || 'right';
-      const saved = window.__dpbProtonPositions = window.__dpbProtonPositions || new Map();
-      if (!saved.has(anchor)) saved.set(anchor, ['left', 'right'].map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
-      anchor.style.setProperty(side, '20px', 'important');
-      anchor.style.setProperty(side === 'left' ? 'right' : 'left', 'auto', 'important');
-      rect = anchor.getBoundingClientRect();
-      docks[side].style[side] = (rect.width + 28) + 'px';
-      docks[side].style.bottom = Math.max(8, innerHeight - rect.bottom) + 'px';
-      docks[side].style.maxWidth = Math.max(40, innerWidth / 2 - rect.width - 48) + 'px';
-      break;
-    }
-  }
-`;
-const storeBadgeDockCleanupScript = `
-  for (const [element, values] of window.__dpbProtonPositions || []) {
-    for (const [key, value, priority] of values) {
-      if (value) element.style.setProperty(key, value, priority); else element.style.removeProperty(key);
-    }
-  }
-  delete window.__dpbProtonPositions;
-  delete window.__dpbSides;
-  document.getElementById('deck-play-badges-dock')?.remove();
-  document.getElementById('deck-play-badges-dock-right')?.remove();
-`;
-
 const getPreferences = callable("get_price_preferences");
 const setPreferences = callable("set_price_preferences");
 const getMerchants = callable("get_price_merchants");
@@ -384,28 +342,27 @@ function buildPricePanelScript(appId, result) {
     const id = 'deck-play-badges-price';
     const pageId = location.pathname.match(/^\\/app\\/(\\d+)/)?.[1];
     let panel = document.getElementById(id);
-    if (!appId) { ${storeBadgeDockCleanupScript} return; }
+    if (!appId) { panel?.remove(); return; }
     if (pageId !== appId) return;
     if (data?.disabled) { panel?.remove(); return; }
-    ${storeBadgeDockScript}
-    const side = window.__dpbSides?.price || 'left';
-    const host = docks[side];
+    const purchase = Array.from(document.querySelectorAll('.game_area_purchase_game')).find(node =>
+      !node.matches('.demo_above_purchase, .game_area_purchase_game_demo') &&
+      !node.querySelector('[name="bundleid"]') && node.querySelector('.game_purchase_price, .discount_final_price, .game_purchase_action'));
+    const anchor = purchase?.closest('.game_area_purchase_game_wrapper') || purchase;
+    if (!anchor) { panel?.remove(); return; }
     const key = appId + ':' + JSON.stringify(data);
-    if (panel?.dataset.state === key && panel.parentElement === host) return;
+    if (panel?.dataset.state === key && panel.previousElementSibling === anchor) return;
     const wasOpen = panel?.open === true;
     panel?.remove(); panel = document.createElement('details'); panel.id = id; panel.dataset.state = key; panel.open = wasOpen;
-    panel.style.cssText = 'order:2;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
+    panel.style.cssText = 'display:block;clear:both;position:relative;box-sizing:border-box;width:100%;margin:24px 0 16px;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
-    summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: hiba' : best ? 'AKS ' + best.price.toFixed(2) + ' €' : 'AKS: nincs ajánlat';
+    summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: hiba' : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
     summary.title = 'AllKeyShop ár és ajánlatok – megnyitás';
-    summary.style.cssText = 'cursor:pointer;white-space:nowrap;box-sizing:border-box;list-style:none;border:1px solid #67c1f5;border-radius:5px;background:#162634;padding:2px 8px;font-weight:700;min-height:24px';
+    summary.style.cssText = 'cursor:pointer;white-space:normal;overflow-wrap:anywhere;box-sizing:border-box;list-style:none;border:1px solid #67c1f5;border-radius:5px;background:#162634;padding:2px 8px;font-weight:700;min-height:24px';
     panel.appendChild(summary);
     const content = document.createElement('div');
-    content.style.cssText = 'position:absolute;bottom:calc(100% + 8px);left:0;box-sizing:border-box;width:340px;max-width:calc(100vw - 40px);max-height:60vh;overflow:auto;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;box-shadow:0 2px 12px #000';
-    content.style.left = side === 'left' ? '0' : 'auto';
-    content.style.right = side === 'right' ? '0' : 'auto';
-    content.style.maxWidth = 'calc(100vw - ' + (parseFloat(host.style[side]) + 20) + 'px)';
+    content.style.cssText = 'box-sizing:border-box;width:100%;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;margin-top:4px';
     panel.appendChild(content);
     const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
     line('AllKeyShop · Steam-kulcs / Gift', true);
@@ -427,7 +384,7 @@ function buildPricePanelScript(appId, result) {
       }
     }
     panel.addEventListener('keydown', event => { if (event.key === 'Escape') { panel.open = false; summary.focus(); } });
-    host.appendChild(panel);
+    anchor.insertAdjacentElement('afterend', panel);
   })();`;
 }
 // Tile rows reserve their own space; remove our changes when disabled or recycled.
@@ -510,6 +467,48 @@ function updatePriceView(url, send, visibleTileIds = []) {
             renderTiles();
     }).finally(() => { fetching = false; });
 }
+
+// Two independent rows shared by the icon and price renderers.
+const storeBadgeDockScript = `
+  const docks = {};
+  for (const side of ['left', 'right']) {
+    const id = 'deck-play-badges-dock' + (side === 'right' ? '-right' : '');
+    let row = document.getElementById(id);
+    if (!row) { row = document.createElement('div'); row.id = id; document.body.appendChild(row); }
+    row.style.cssText = 'position:fixed;' + side + ':20px;bottom:20px;z-index:999999;display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:calc(50vw - 40px);pointer-events:none;justify-content:' + (side === 'right' ? 'flex-end' : 'flex-start');
+    docks[side] = row;
+  }
+  const protonMarkers = document.querySelectorAll('.protondb-decky-indicator-container,[data-pp-game-badge],a[href*="protondb.com/app/"]');
+  for (const marker of protonMarkers) {
+    let anchor = marker;
+    while (anchor && anchor !== document.body && getComputedStyle(anchor).position !== 'fixed') anchor = anchor.parentElement;
+    if (!anchor || anchor === document.body) continue;
+    let rect = anchor.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0 && rect.width < 250 && rect.top > innerHeight / 2) {
+      const side = window.__dpbSides?.proton || 'right';
+      const saved = window.__dpbProtonPositions = window.__dpbProtonPositions || new Map();
+      if (!saved.has(anchor)) saved.set(anchor, ['left', 'right'].map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
+      anchor.style.setProperty(side, '20px', 'important');
+      anchor.style.setProperty(side === 'left' ? 'right' : 'left', 'auto', 'important');
+      rect = anchor.getBoundingClientRect();
+      docks[side].style[side] = (rect.width + 28) + 'px';
+      docks[side].style.bottom = Math.max(8, innerHeight - rect.bottom) + 'px';
+      docks[side].style.maxWidth = Math.max(40, innerWidth / 2 - rect.width - 48) + 'px';
+      break;
+    }
+  }
+`;
+const storeBadgeDockCleanupScript = `
+  for (const [element, values] of window.__dpbProtonPositions || []) {
+    for (const [key, value, priority] of values) {
+      if (value) element.style.setProperty(key, value, priority); else element.style.removeProperty(key);
+    }
+  }
+  delete window.__dpbProtonPositions;
+  delete window.__dpbSides;
+  document.getElementById('deck-play-badges-dock')?.remove();
+  document.getElementById('deck-play-badges-dock-right')?.remove();
+`;
 
 const HUNGARIAN_COLLECTION_NAME = "🇭🇺 Magyar nyelvű játékok";
 // Steam's userCollections computed getter calls .values() before storage exists.
@@ -2819,7 +2818,7 @@ function Content() {
         return SP_JSX.jsx(DFL.PanelSection, { title: "Megb\u00EDzhat\u00F3 boltok", children: SP_JSX.jsx(AllKeyShopMerchants, { onBack: () => openPage("home") }) });
     if (page === "settings")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Magyar nyelv a Steam nyelvi list\u00E1ja vagy a Magyar Felirat kur\u00E1tor alapj\u00E1n. A teljes k\u00F6nyvt\u00E1rb\u00F3l magyar gy\u0171jtem\u00E9nyt k\u00E9sz\u00EDt. Kikapcsolva a gy\u0171jt\u00E9s sz\u00FCnetel, a gy\u0171jtem\u00E9ny megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(BadgeSizeSettings, { initial: { library_badge_percent: visibility.library_badge_percent ?? 100,
-                        store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "\u00C1ruh\u00E1zi j\u00E1t\u00E9koldal \u2013 jelv\u00E9nyek oldala" }) }), [['price', 'AllKeyShop ár'], ['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']].map(([key, label]) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: label + ' – bal oldalon', description: "Bekapcsolva balra, kikapcsolva jobbra. A csemp\u00E9ken l\u00E9v\u0151 ikonokat nem m\u00F3dos\u00EDtja.", checked: (visibility.store_badge_sides?.[key] ?? (key === 'price' ? 'left' : 'right')) === 'left', disabled: settingsWorking, onChange: async (checked) => {
+                        store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "\u00C1ruh\u00E1zi j\u00E1t\u00E9koldal \u2013 jelv\u00E9nyek oldala" }) }), [['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']].map(([key, label]) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: label + ' – bal oldalon', description: "Bekapcsolva balra, kikapcsolva jobbra. A csemp\u00E9ken l\u00E9v\u0151 ikonokat nem m\u00F3dos\u00EDtja.", checked: (visibility.store_badge_sides?.[key] ?? 'right') === 'left', disabled: settingsWorking, onChange: async (checked) => {
                             setSettingsWorking(true);
                             try {
                                 const response = await withBackendTimeout(setBadgeSides({ ...badgeVisibility.store_badge_sides, [key]: checked ? 'left' : 'right' }));

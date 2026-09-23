@@ -2220,10 +2220,10 @@ function Content() {
     <BadgeSizeSettings initial={{ library_badge_percent: visibility.library_badge_percent ?? 100,
       store_badge_percent: visibility.store_badge_percent ?? 100 }} save={saveSizes} />
     <PanelSectionRow><div style={{ fontWeight: 700 }}>Áruházi játékoldal – jelvények oldala</div></PanelSectionRow>
-    {([['price', 'AllKeyShop ár'], ['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']] as const).map(([key, label]) =>
+    {([['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']] as const).map(([key, label]) =>
       <PanelSectionRow key={key}><ToggleField label={label + ' – bal oldalon'}
         description="Bekapcsolva balra, kikapcsolva jobbra. A csempéken lévő ikonokat nem módosítja."
-        checked={(visibility.store_badge_sides?.[key] ?? (key === 'price' ? 'left' : 'right')) === 'left'} disabled={settingsWorking}
+        checked={(visibility.store_badge_sides?.[key] ?? 'right') === 'left'} disabled={settingsWorking}
         onChange={async checked => {
           setSettingsWorking(true);
           try {
