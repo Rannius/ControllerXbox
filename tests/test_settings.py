@@ -77,7 +77,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             second = await self.plugin.get_allkeyshop_price("20")
         self.assertEqual(fetch.call_count, 1)
         self.assertTrue(first["global_error"])
-        self.assertEqual(first["retry_after"], 60)
+        self.assertTrue(5 <= first["retry_after"] <= 10)
         self.assertEqual(second["error_code"], "connection")
         self.assertGreater(second["retry_after"], 0)
         self.plugin._price_service_retry_at = 0
@@ -89,12 +89,12 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.plugin._price_service_error)
         self.assertEqual(self.plugin._price_service_failures, 0)
 
-    async def test_aks_retry_delay_is_60_120_240_480_960_then_capped_at_1800_seconds(self):
+    async def test_aks_retry_delay_is_equal_jitter_capped_at_300_seconds(self):
         with patch.object(self.plugin, "_fetch_aks_game", side_effect=OSError("offline")):
-            for expected in (60, 120, 240, 480, 960, 1800, 1800):
+            for expected_raw in (10, 20, 40, 80, 160, 300, 300):
                 self.plugin._price_service_retry_at = 0
                 response = await self.plugin.get_allkeyshop_price("10")
-                self.assertEqual(response["retry_after"], expected)
+                self.assertTrue(expected_raw // 2 <= response["retry_after"] <= expected_raw)
 
     def test_aks_errors_distinguish_matching_http_and_format(self):
         details = self.plugin._aks_error_details(ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz."))

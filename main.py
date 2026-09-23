@@ -12,6 +12,7 @@ import functools
 import html
 import json
 import os
+import random
 import re
 import shutil
 import ssl
@@ -469,20 +470,31 @@ class Plugin:
                                                         "Accept-Encoding": "identity", "Accept": "text/html,application/json"})
         # Executed only in the blocking worker: one global AKS request at a time,
         # including search, offer pages and merchant-directory refreshes.
+        # Retry once on transient connection/timeout errors (not HTTP errors)
+        # to absorb brief network hiccups without escalating to a global pause.
         with self._aks_request_lock:
             wait = max(0.0, self._aks_next_request_at - time.monotonic())
             if wait:
                 time.sleep(wait)
-            try:
-                with self._open_request(request, timeout=30) as response:
-                    if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
-                        raise ValueError("Unexpected AllKeyShop redirect")
-                    body = response.read(4000001)
-                if len(body) > 4000000:
-                    raise ValueError("AllKeyShop page is too large")
-                return body.decode("utf-8")
-            finally:
-                self._aks_next_request_at = time.monotonic() + 5.0
+            last_error: Optional[Exception] = None
+            for attempt in range(2):
+                try:
+                    with self._open_request(request, timeout=30) as response:
+                        if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
+                            raise ValueError("Unexpected AllKeyShop redirect")
+                        body = response.read(4000001)
+                    if len(body) > 4000000:
+                        raise ValueError("AllKeyShop page is too large")
+                    return body.decode("utf-8")
+                except urllib.error.HTTPError:
+                    raise  # Never retry HTTP errors (429 rate limit, etc.)
+                except (urllib.error.URLError, OSError) as error:
+                    last_error = error
+                    if attempt == 0:
+                        time.sleep(3)
+                finally:
+                    self._aks_next_request_at = time.monotonic() + 5.0
+            raise last_error  # type: ignore[misc]
 
     @classmethod
     def _aks_search_match(cls, fragment: str, title: str) -> str:
@@ -545,13 +557,26 @@ class Plugin:
     def _fetch_aks_game(self, app_id: str) -> Dict[str, Any]:
         request = urllib.request.Request(STORE_URL.format(app_id=app_id),
                                          headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"})
-        try:
-            with self._open_request(request, timeout=10) as response:
-                payload = json.load(response)
-            item = payload.get(app_id, {})
-            metadata = item.get("data", {}) if item.get("success") else {}
-        except (OSError, ValueError, TypeError, AttributeError) as error:
-            raise ValueError("A Steam-játék neve most nem kérdezhető le.") from error
+        # Retry once on transient connection errors; do not retry HTTP or parse errors.
+        last_steam_error: Optional[Exception] = None
+        for attempt in range(2):
+            try:
+                with self._open_request(request, timeout=10) as response:
+                    payload = json.load(response)
+                item = payload.get(app_id, {})
+                metadata = item.get("data", {}) if item.get("success") else {}
+                last_steam_error = None
+                break
+            except urllib.error.HTTPError as error:
+                raise ValueError("A Steam-játék neve most nem kérdezhető le.") from error
+            except (OSError, urllib.error.URLError) as error:
+                last_steam_error = error
+                if attempt == 0:
+                    time.sleep(2)
+            except (ValueError, TypeError, AttributeError) as error:
+                raise ValueError("A Steam-játék neve most nem kérdezhető le.") from error
+        if last_steam_error is not None:
+            raise ValueError("A Steam-játék neve most nem kérdezhető le.") from last_steam_error
         if not isinstance(metadata, dict):
             raise ValueError("A Steam-játék neve most nem kérdezhető le.")
         title = str(metadata.get("name", "")).strip()[:200]
@@ -629,7 +654,11 @@ class Plugin:
                     entry = {**details, "checked_at": time.time()}
                     if details["global_error"]:
                         self._price_service_failures += 1
-                        delay = min(1800, 60 * (2 ** (self._price_service_failures - 1)))
+                        # Equal jitter exponential backoff (AWS/Google best practice).
+                        # Base 10 s, cap 300 s, with 50-100 % randomised jitter to
+                        # prevent synchronised retry storms across instances.
+                        raw = min(300, 10 * (2 ** (self._price_service_failures - 1)))
+                        delay = raw // 2 + random.uniform(0, raw / 2)
                         self._price_service_retry_at = time.time() + delay
                         self._price_service_error = details
                         return {"success": False, **details, "retry_after": delay}
