@@ -1611,6 +1611,7 @@ function disconnectStoreDebugger(): void {
         document.getElementById('deck-play-badges-price')?.remove();
         ${storeBadgeDockCleanupScript}
         ${tilePriceCleanupScript}
+        clearInterval(window.__dpbPriceCountdown); delete window.__dpbPriceCountdown;
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
         delete window.__controllerXboxWatchActions;

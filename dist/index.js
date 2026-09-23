@@ -366,6 +366,22 @@ function AllKeyShopMerchants({ onBack }) {
                         return next;
                     }) }) }, name.toLowerCase())), !busy && !visible.length && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: "Nincs megjelen\u00EDthet\u0151 bolt. Pr\u00F3b\u00E1ld friss\u00EDteni a list\u00E1t vagy m\u00F3dos\u00EDtsd a keres\u00E9st." }) })] });
 }
+// One lightweight timer per Store page; no network requests from the countdown.
+const priceCountdownScript = `
+  function updatePriceCountdown() {
+    const nodes = document.querySelectorAll('[data-dpb-retry-at]');
+    for (const node of nodes) {
+      const seconds = Math.max(0, Math.ceil((Number(node.dataset.dpbRetryAt) - Date.now()) / 1000));
+      node.textContent = node.dataset.dpbLabel + (seconds ? ' · újra: ' + seconds + ' mp' : ' · újrapróbálkozás…');
+      node.title = node.textContent;
+    }
+    if (!nodes.length && window.__dpbPriceCountdown) {
+      clearInterval(window.__dpbPriceCountdown); delete window.__dpbPriceCountdown;
+    }
+    return nodes.length;
+  }
+  if (updatePriceCountdown() && !window.__dpbPriceCountdown) window.__dpbPriceCountdown = setInterval(updatePriceCountdown, 1000);
+`;
 // Keep this renderer independent of Steam selectors except for its insertion
 // point. All third-party text is assigned through textContent, never HTML.
 function buildPricePanelScript(appId, result) {
@@ -399,6 +415,7 @@ function buildPricePanelScript(appId, result) {
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
     summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
+    if (data?.retry_at && !data.success) { summary.dataset.dpbRetryAt = String(data.retry_at); summary.dataset.dpbLabel = summary.textContent; }
     summary.title = 'AllKeyShop ár és ajánlatok – megnyitás';
     summary.style.cssText = 'cursor:pointer;white-space:normal;overflow-wrap:anywhere;box-sizing:border-box;list-style:none;border:1px solid #67c1f5;border-radius:5px;background:#162634;padding:2px 8px;font-weight:700;min-height:24px';
     panel.appendChild(summary);
@@ -408,7 +425,7 @@ function buildPricePanelScript(appId, result) {
     const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
     line('AllKeyShop · Steam-kulcs / Gift', true);
     if (!data) line('Árak betöltése…');
-    else if (!data.success) { line(data.error || 'Az ár most nem érhető el.'); if (data.global_error) line('A többi árlekérés is szünetel. Automatikus újrapróbálkozás 1–5 perc múlva, amíg az áruház nyitva van.'); }
+    else if (!data.success) { line(data.error || 'Az ár most nem érhető el.'); if (data.global_error) line('A többi árlekérés is szünetel. A következő próbáig hátralévő idő az ársorban látható. Az újrapróbálkozáshoz maradjon nyitva az áruház.'); }
     else {
       line(data.preferred_only ? 'Legalacsonyabb ár a kiválasztott boltokból' : 'Legalacsonyabb megfelelő ajánlat');
       if (!data.offers?.length) line('Nincs megfelelő Steam-kulcs vagy Gift az aktuális szűrőkkel.');
@@ -426,6 +443,7 @@ function buildPricePanelScript(appId, result) {
     }
     panel.addEventListener('keydown', event => { if (event.key === 'Escape') { panel.open = false; summary.focus(); } });
     anchor.insertAdjacentElement('afterend', panel);
+    ${priceCountdownScript}
   })();`;
 }
 // Tile rows reserve their own space; remove our changes when disabled or recycled.
@@ -457,9 +475,11 @@ function buildTilePricesScript(url, values) {
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
       row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
       row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
+      if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       row.title = row.textContent;
       host.appendChild(row);
     }
+    ${priceCountdownScript}
   })();`;
 }
 const prices = new Map();
@@ -501,11 +521,12 @@ function updatePriceView(url, send, visibleTileIds = []) {
         return;
     fetching = true;
     const requestRevision = revision;
-    void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 60 })).then(value => {
+    void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 15 })).then(value => {
         if (requestRevision !== revision)
             return;
         if (value.global_error) {
-            serviceFailure = { value, expires: Date.now() + Math.max(1, Math.min(300, value.retry_after ?? 60)) * 1000 };
+            const expires = Date.now() + Math.max(1, Math.min(60, value.retry_after ?? 15)) * 1000;
+            serviceFailure = { value: { ...value, retry_at: expires }, expires };
             if (currentApp)
                 void send(buildPricePanelScript(currentApp, visiblePrice(currentApp) ?? value)).catch(() => { });
             if (tileIds.length)
@@ -515,7 +536,10 @@ function updatePriceView(url, send, visibleTileIds = []) {
         serviceFailure = undefined;
         if (prices.size >= 100)
             prices.delete(prices.keys().next().value);
-        prices.set(requestId, { value, expires: Date.now() + (value.success && !value.disabled ? 900000 : 60000) });
+        const expires = Date.now() + (value.success && !value.disabled ? 900000 : Math.max(1, Math.min(60, value.retry_after ?? 30)) * 1000);
+        if (!value.success)
+            value = { ...value, retry_at: expires };
+        prices.set(requestId, { value, expires });
         if (currentApp === requestId)
             void send(buildPricePanelScript(requestId, value)).catch(() => { });
         if (tileIds.length)
@@ -2224,6 +2248,7 @@ function disconnectStoreDebugger() {
         document.getElementById('deck-play-badges-price')?.remove();
         ${storeBadgeDockCleanupScript}
         ${tilePriceCleanupScript}
+        clearInterval(window.__dpbPriceCountdown); delete window.__dpbPriceCountdown;
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
         delete window.__controllerXboxWatchActions;

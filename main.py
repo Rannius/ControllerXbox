@@ -583,7 +583,7 @@ class Plugin:
             return {"success": True, "disabled": True}
         async with self._price_lock:
             entry = self._price_cache.get(normalized)
-            if not entry or time.time() - entry["checked_at"] >= (60 if "error" in entry else 900):
+            if not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else 900):
                 if self._price_service_error and time.time() < self._price_service_retry_at:
                     return {"success": False, **self._price_service_error,
                             "retry_after": max(1, int(self._price_service_retry_at - time.time()))}
@@ -598,7 +598,7 @@ class Plugin:
                     entry = {**details, "checked_at": time.time()}
                     if details["global_error"]:
                         self._price_service_failures += 1
-                        delay = min(300, 60 * (2 ** min(3, self._price_service_failures - 1)))
+                        delay = min(60, 15 * (2 ** min(2, self._price_service_failures - 1)))
                         self._price_service_retry_at = time.time() + delay
                         self._price_service_error = details
                         return {"success": False, **details, "retry_after": delay}
@@ -607,7 +607,7 @@ class Plugin:
                 self._price_cache[normalized] = entry
             if "error" in entry:
                 return {"success": False, "error": entry["error"], "error_code": entry.get("error_code", "lookup"),
-                        "global_error": False, "retry_after": max(1, int(60 - (time.time() - entry["checked_at"])))}
+                        "global_error": False, "retry_after": max(1, int(30 - (time.time() - entry["checked_at"])))}
             async with self._price_merchants_lock:
                 discovered = {row["name"] for row in entry["data"]["merchants"].values()
                               if isinstance(row, dict) and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 80}

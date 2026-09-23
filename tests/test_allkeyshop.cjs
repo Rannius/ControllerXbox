@@ -43,15 +43,26 @@ test('tile prices require explicit visible IDs, share cache and stop when disabl
 test('service failure reaches all waiting tiles, pauses requests and recovers after cooldown',async()=>{
  const f=fixture(),url='https://store.steampowered.com/',ids=['10','20','30'];
  f.api.updatePriceView(url,f.send,ids);
- f.requests[0].resolve({success:false,error:'Connection timed out',error_code:'connection',global_error:true,retry_after:60});await f.drain();
+ f.requests[0].resolve({success:false,error:'Connection timed out',error_code:'connection',global_error:true,retry_after:15});await f.drain();
  for(let i=0;i<3;i++)f.api.updatePriceView(url,f.send,ids);
  assert.equal(f.requests.length,1);
  const last=f.scripts.findLast(s=>s.includes('const values ='));
  assert.match(last,/"10":\{"success":false/);assert.match(last,/"30":\{"success":false/);
  f.api.updatePriceView('https://store.steampowered.com/app/20/',f.send,ids);
  assert.match(f.scripts.at(-1),/"error_code":"connection"/);assert.equal(f.requests.length,1);
- f.clock.now+=61000;f.api.updatePriceView(url,f.send,ids);assert.equal(f.requests.length,2);
+ f.clock.now+=16000;f.api.updatePriceView(url,f.send,ids);assert.equal(f.requests.length,2);
  f.requests[1].resolve({success:true,offers:[]});await f.drain();
  f.api.updatePriceView(url,f.send,ids);assert.equal(f.requests.length,3);
  f.requests[2].resolve({success:true,offers:[]});await f.drain();
+});
+
+test('countdown uses a fixed deadline, one timer, and stops after removal',()=>{
+ const f=fixture();let now=1000,tick,started=0,cleared=0;
+ const node={dataset:{dpbRetryAt:'16000',dpbLabel:'AKS: kapcsolati hiba'}};let nodes=[node];
+ const context=vm.createContext({document:{querySelectorAll:()=>nodes},window:{},Date:{now:()=>now},setInterval:cb=>{tick=cb;started++;return 1},clearInterval:()=>cleared++});
+ vm.runInContext(f.api.priceCountdownScript,context);assert.match(node.textContent,/15 mp/);
+ now+=2000;tick();assert.match(node.textContent,/13 mp/);
+ vm.runInContext(f.api.priceCountdownScript,context);assert.equal(started,1);assert.match(node.textContent,/13 mp/);
+ now=16000;tick();assert.match(node.textContent,/újrapróbálkozás/);
+ nodes=[];tick();assert.equal(cleared,1);assert.equal(context.window.__dpbPriceCountdown,undefined);
 });

@@ -79,3 +79,7 @@ A GamepadMode játékoldalon az AllKeyShop sor a bal felső játékbemutató ká
 ## 1.0.67 – AllKeyShop kapcsolati hibák
 
 Közös szolgáltatási hiba esetén nem várakoztatja végig egyenként az összes csempét: azonnal közös hibát mutat, majd 1–5 perces szünet után próbálkozik újra, ha az áruház nyitva marad. A hibatípus az ársorban és a lenyitott részletekben látható. A külső szolgáltatás elérhetetlenségét ez a módosítás nem oldja meg.
+
+## 1.0.68 – Újrapróbálkozási visszaszámlálás
+
+Az AllKeyShop ársorok kiírják az újrapróbálkozásig hátralévő másodperceket. Kapcsolati hibánál a közös szünet 15, 30, majd legfeljebb 60 másodperc; a játékspecifikus hibánál 30 másodperc. A számláló nem indít hálózati forgalmat.

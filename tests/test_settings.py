@@ -24,6 +24,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             second = await self.plugin.get_allkeyshop_price("20")
         self.assertEqual(fetch.call_count, 1)
         self.assertTrue(first["global_error"])
+        self.assertEqual(first["retry_after"], 15)
         self.assertEqual(second["error_code"], "connection")
         self.assertGreater(second["retry_after"], 0)
         self.plugin._price_service_retry_at = 0
@@ -34,6 +35,13 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(recovered["success"])
         self.assertIsNone(self.plugin._price_service_error)
         self.assertEqual(self.plugin._price_service_failures, 0)
+
+    async def test_aks_retry_delay_is_15_30_then_capped_at_60_seconds(self):
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=OSError("offline")):
+            for expected in (15, 30, 60, 60):
+                self.plugin._price_service_retry_at = 0
+                response = await self.plugin.get_allkeyshop_price("10")
+                self.assertEqual(response["retry_after"], expected)
 
     def test_aks_errors_distinguish_matching_http_and_format(self):
         details = self.plugin._aks_error_details(ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz."))
