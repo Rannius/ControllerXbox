@@ -1,3 +1,4 @@
+import { storePriceTilesScript } from "./storePriceTiles";
 import { getHungarianBadgeHtml, HungarianSource } from "./hungarianBadge";
 import { CloudResumeRefresh } from "./cloudResumeRefresh";
 import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
@@ -1272,7 +1273,8 @@ function buildStoreScanScript(): string {
   return `
     (function() {
       const ids = new Set();
-      const tileIds = new Set();
+      ${storePriceTilesScript}
+      const tileIds = new Set(collectPriceTiles().map(item => item.id));
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       if (pageMatch) ids.add(pageMatch[1]);
       const nodes = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
@@ -1285,7 +1287,6 @@ function buildStoreScanScript(): string {
         const id = match ? (match[1] || match[0]) : '';
         if (id && Number(id) > 0) {
           ids.add(id);
-          if (node.matches('a[href*="/app/"]') && node.querySelector('img') && rect.width >= 90 && rect.width <= 700 && rect.height >= 60 && rect.height <= 900 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth && !node.closest('#global_header, #store_header')) tileIds.add(id);
         }
         if (ids.size >= 80) break;
       }

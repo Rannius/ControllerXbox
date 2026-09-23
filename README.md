@@ -67,3 +67,7 @@ Az „Árak az áruházi csempék alatt” kapcsoló alapból kikapcsolt. Enged�
 ## 1.0.64 – Ár a vásárlási blokk alatt
 
 Az AllKeyShop ársor a webes játékoldalon a Steam első felismert vásárlási blokkja alá került. Kiírja a Standard ajánlat árát és boltját, és helyben lenyitható. Az ár már nem lebeg a sarokban, bal/jobb kapcsolója megszűnt. A többi ikon oldala és az opcionális csempeárak változatlanul állíthatók.
+
+## 1.0.65 – Ársor és csempefelismerés javítása
+
+A játékoldal ársora az első látható vásárlási csempéhez tartozó burkolón belül marad. A csempeárak közös felismerése az alacsony listákat, nagy kiemelt elemeket, háttérképes és AppID-val jelölt csempéket is kezeli; a korábbi 40 elemes megjelenítési korlát megszűnt.

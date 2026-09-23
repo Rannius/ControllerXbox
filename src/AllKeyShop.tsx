@@ -1,3 +1,4 @@
+import { storePriceTilesScript } from "./storePriceTiles";
 import { useEffect, useState } from "react";
 import { ButtonItem, PanelSectionRow, TextField, ToggleField } from "@decky/ui";
 import { callable } from "@decky/api";
@@ -126,14 +127,14 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     if (data?.disabled) { panel?.remove(); return; }
     const purchase = Array.from(document.querySelectorAll('.game_area_purchase_game')).find(node =>
       !node.matches('.demo_above_purchase, .game_area_purchase_game_demo') &&
-      !node.querySelector('[name="bundleid"]') && node.querySelector('.game_purchase_price, .discount_final_price, .game_purchase_action'));
-    const anchor = purchase?.closest('.game_area_purchase_game_wrapper') || purchase;
+      !node.closest('[data-ds-bundleid]') && !node.querySelector('[name="bundleid"]') && node.getBoundingClientRect().height > 0 && node.querySelector('.game_purchase_price, .discount_final_price, .game_purchase_action'));
+    const anchor = purchase;
     if (!anchor) { panel?.remove(); return; }
     const key = appId + ':' + JSON.stringify(data);
     if (panel?.dataset.state === key && panel.previousElementSibling === anchor) return;
     const wasOpen = panel?.open === true;
     panel?.remove(); panel = document.createElement('details'); panel.id = id; panel.dataset.state = key; panel.open = wasOpen;
-    panel.style.cssText = 'display:block;clear:both;position:relative;box-sizing:border-box;width:100%;margin:24px 0 16px;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
+    panel.style.cssText = 'display:flow-root;clear:none;position:relative;box-sizing:border-box;width:100%;margin:24px 0 16px;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
     summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: hiba' : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
@@ -184,11 +185,9 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
     ${tilePriceCleanupScript}
     const values = ${JSON.stringify(values).replace(/</g, "\\u003c")};
     const saved = window.__dpbPriceTiles = new Map();
-    for (const host of document.querySelectorAll('a[href*="/app/"]')) {
-      const id = host.getAttribute('href')?.match(/\\/app\\/(\\d+)/)?.[1];
-      if (!id || !(id in values) || values[id]?.disabled || !host.querySelector('img') || host.closest('#global_header, #store_header')) continue;
-      const rect = host.getBoundingClientRect();
-      if (rect.width < 90 || rect.width > 700 || rect.height < 60 || rect.height > 900 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= innerWidth) continue;
+    ${storePriceTilesScript}
+    for (const {host, id} of collectPriceTiles()) {
+      if (!(id in values) || values[id]?.disabled) continue;
       saved.set(host, ['position', 'padding-bottom', 'box-sizing', 'overflow'].map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
       const oldPadding = parseFloat(getComputedStyle(host).paddingBottom) || 0;
       if (getComputedStyle(host).position === 'static') host.style.setProperty('position', 'relative');
@@ -217,7 +216,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   try { const parsed = new URL(url); if (parsed.hostname === "store.steampowered.com") id = parsed.pathname.match(/^\/app\/(\d+)/)?.[1] ?? ""; } catch { /* no game */ }
   currentApp = id;
   tileUrl = url;
-  tileIds = /^https:\/\/store\.steampowered\.com\//.test(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))).slice(0, 40) : [];
+  tileIds = /^https:\/\/store\.steampowered\.com\//.test(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
   const renderTiles = () => {
     const values: Record<string, PriceResult | null> = {};
     for (const tile of tileIds) values[tile] = prices.get(tile)?.value ?? null;

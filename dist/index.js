@@ -1,3 +1,36 @@
+// Shared detection for the request queue and rendering, including compact and featured cards.
+const storePriceTilesScript = `
+  function collectPriceTiles() {
+    const found = new Map();
+    const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,[data-ds-appid]';
+    for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid]')) {
+      if (node.closest('#global_header,#store_header,.game_area_purchase,.game_area_purchase_game,#deck-play-badges-price,.dpb-tile-price,[data-ds-bundleid],[data-ds-packageid]')) continue;
+      const link = node.matches('a[href*="/app/"]') ? node : node.querySelector('a[href*="/app/"]');
+      const href = link?.getAttribute('href') || '';
+      let linkedId = '';
+      if (href) {
+        try { const url = new URL(href, location.href); if (url.hostname !== 'store.steampowered.com') continue; linkedId = url.pathname.match(/^\\/app\\/(\\d+)/)?.[1] || ''; } catch { continue; }
+      }
+      const raw = node.getAttribute('data-ds-appid') || '';
+      const id = linkedId || (/^\\d+$/.test(raw) ? raw : '');
+      if (!id || Number(id) <= 0) continue;
+      let host = link || node;
+      let rect = host.getBoundingClientRect();
+      if (rect.width < 80 || rect.height < 30) {
+        host = host.parentElement?.closest(cardSelector) || host.parentElement;
+        if (!host || host === document.body) continue;
+        rect = host.getBoundingClientRect();
+      }
+      if (found.has(host) || rect.width < 80 || rect.height < 30 || rect.width > Math.max(2000, innerWidth) || rect.height > 1000) continue;
+      if (rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= innerWidth || getComputedStyle(host).visibility === 'hidden') continue;
+      const visual = host.querySelector('img,picture,video,[style*="background-image"]') || getComputedStyle(host).backgroundImage !== 'none';
+      if (!visual && !host.matches(cardSelector) && !host.querySelector('[class*="Capsule"],[class*="capsule"],.tab_item_name,.title')) continue;
+      found.set(host, { host, id });
+    }
+    return Array.from(found.values()).filter(item => !Array.from(found.keys()).some(other => other !== item.host && item.host.contains(other)));
+  }
+`;
+
 function getHungarianBadgeHtml(source = "steam") {
     return source === "curator"
         ? HUNGARIAN_BADGE_HTML.replace('aria-label="Hivatalos magyar nyelvi támogatás"', 'aria-label="Magyar nyelv a Magyar Felirat kurátor szerint"')
@@ -347,14 +380,14 @@ function buildPricePanelScript(appId, result) {
     if (data?.disabled) { panel?.remove(); return; }
     const purchase = Array.from(document.querySelectorAll('.game_area_purchase_game')).find(node =>
       !node.matches('.demo_above_purchase, .game_area_purchase_game_demo') &&
-      !node.querySelector('[name="bundleid"]') && node.querySelector('.game_purchase_price, .discount_final_price, .game_purchase_action'));
-    const anchor = purchase?.closest('.game_area_purchase_game_wrapper') || purchase;
+      !node.closest('[data-ds-bundleid]') && !node.querySelector('[name="bundleid"]') && node.getBoundingClientRect().height > 0 && node.querySelector('.game_purchase_price, .discount_final_price, .game_purchase_action'));
+    const anchor = purchase;
     if (!anchor) { panel?.remove(); return; }
     const key = appId + ':' + JSON.stringify(data);
     if (panel?.dataset.state === key && panel.previousElementSibling === anchor) return;
     const wasOpen = panel?.open === true;
     panel?.remove(); panel = document.createElement('details'); panel.id = id; panel.dataset.state = key; panel.open = wasOpen;
-    panel.style.cssText = 'display:block;clear:both;position:relative;box-sizing:border-box;width:100%;margin:24px 0 16px;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
+    panel.style.cssText = 'display:flow-root;clear:none;position:relative;box-sizing:border-box;width:100%;margin:24px 0 16px;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
     summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: hiba' : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
@@ -403,11 +436,9 @@ function buildTilePricesScript(url, values) {
     ${tilePriceCleanupScript}
     const values = ${JSON.stringify(values).replace(/</g, "\\u003c")};
     const saved = window.__dpbPriceTiles = new Map();
-    for (const host of document.querySelectorAll('a[href*="/app/"]')) {
-      const id = host.getAttribute('href')?.match(/\\/app\\/(\\d+)/)?.[1];
-      if (!id || !(id in values) || values[id]?.disabled || !host.querySelector('img') || host.closest('#global_header, #store_header')) continue;
-      const rect = host.getBoundingClientRect();
-      if (rect.width < 90 || rect.width > 700 || rect.height < 60 || rect.height > 900 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= innerWidth) continue;
+    ${storePriceTilesScript}
+    for (const {host, id} of collectPriceTiles()) {
+      if (!(id in values) || values[id]?.disabled) continue;
       saved.set(host, ['position', 'padding-bottom', 'box-sizing', 'overflow'].map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
       const oldPadding = parseFloat(getComputedStyle(host).paddingBottom) || 0;
       if (getComputedStyle(host).position === 'static') host.style.setProperty('position', 'relative');
@@ -440,7 +471,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
     catch { /* no game */ }
     currentApp = id;
     tileUrl = url;
-    tileIds = /^https:\/\/store\.steampowered\.com\//.test(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))).slice(0, 40) : [];
+    tileIds = /^https:\/\/store\.steampowered\.com\//.test(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
     const renderTiles = () => {
         const values = {};
         for (const tile of tileIds)
@@ -1822,7 +1853,8 @@ function buildStoreScanScript() {
     return `
     (function() {
       const ids = new Set();
-      const tileIds = new Set();
+      ${storePriceTilesScript}
+      const tileIds = new Set(collectPriceTiles().map(item => item.id));
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       if (pageMatch) ids.add(pageMatch[1]);
       const nodes = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
@@ -1835,7 +1867,6 @@ function buildStoreScanScript() {
         const id = match ? (match[1] || match[0]) : '';
         if (id && Number(id) > 0) {
           ids.add(id);
-          if (node.matches('a[href*="/app/"]') && node.querySelector('img') && rect.width >= 90 && rect.width <= 700 && rect.height >= 60 && rect.height <= 900 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth && !node.closest('#global_header, #store_header')) tileIds.add(id);
         }
         if (ids.size >= 80) break;
       }
