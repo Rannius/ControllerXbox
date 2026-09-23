@@ -35,17 +35,7 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>AllKeyShop árak</div></PanelSectionRow>
     {prefs && <>
       <PanelSectionRow><ToggleField label="Árak az áruházi játékoldalon" checked={prefs.enabled} disabled={busy}
-        onChange={async (enabled) => {
-          const updated = { ...prefs, enabled };
-          setPrefs(updated); setBusy(true); setMessage("");
-          try {
-            const current = await timed(getPreferences());
-            if (!current.success) throw new Error(current.error || "Betöltési hiba");
-            const value = await timed(setPreferences(enabled, updated.allow_gifts, current.merchants, current.restrict_merchants));
-            if (!value.success) throw new Error(value.error || "Mentési hiba");
-            setPrefs(value); resetPriceView(); setMessage(enabled ? "Árlekérés bekapcsolva." : "Árlekérés kikapcsolva.");
-          } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
-        }} /></PanelSectionRow>
+        onChange={enabled => setPrefs({ ...prefs, enabled })} /></PanelSectionRow>
       <PanelSectionRow><ToggleField label="Steam Gift is megengedett" checked={prefs.allow_gifts} disabled={busy}
         onChange={allow_gifts => setPrefs({ ...prefs, allow_gifts })} /></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" onClick={openMerchants}>Megbízható boltok kiválasztása</ButtonItem></PanelSectionRow>
@@ -247,8 +237,6 @@ const prices = new Map<string, { value: PriceResult; expires: number }>();
 let fetching = false;
 let serviceFailure: { value: PriceResult; expires: number } | undefined;
 let revision = 0;
-let fetchSerial = 0;
-let pendingRequestApp = "";
 let currentApp = "";
 let tileUrl = "";
 let tileIds: string[] = [];
@@ -259,7 +247,7 @@ function visiblePrice(id: string): PriceResult | undefined {
   if (cached) return cached.value;
   return serviceFailure && serviceFailure.expires > Date.now() ? serviceFailure.value : undefined;
 }
-export function resetPriceView(): void { prices.clear(); serviceFailure = undefined; revision++; fetchSerial++; pendingRequestApp = ""; fetching = false; currentApp = ""; tileIds = []; tileUrl = ""; visibleApps.clear(); refreshQueue.clear(); }
+export function resetPriceView(): void { prices.clear(); serviceFailure = undefined; revision++; currentApp = ""; tileIds = []; tileUrl = ""; visibleApps.clear(); refreshQueue.clear(); }
 export function updatePriceView(url: string, send: (script: string) => Promise<unknown>, visibleTileIds: string[] = []): void {
   let id = "";
   try { const parsed = new URL(url); if (parsed.hostname === "store.steampowered.com") id = parsed.pathname.match(/^\/app\/(\d+)/)?.[1] ?? ""; } catch { /* no game */ }
@@ -268,15 +256,9 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   tileUrl = url;
   tileIds = allowsStoreTilePrices(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
   const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
-  // Ha a folyamatban lévő kérés célpontja már nem látható, érvénytelenítsük a választ
-  if (fetching && pendingRequestApp && !nextVisible.has(pendingRequestApp)) {
-    fetchSerial++; fetching = false; pendingRequestApp = "";
-  }
   for (const app of nextVisible) {
     const entry = prices.get(app);
-    // A currentApp mindig bekerül; csempékre max. 4 elem sorban, hogy ne okozzunk rate-limitet
-    if ((!visibleApps.has(app) || (app === id && id !== previousApp)) && (!entry || entry.expires <= Date.now()))
-      if (app === id || refreshQueue.size < 4) refreshQueue.add(app);
+    if ((!visibleApps.has(app) || (app === id && id !== previousApp)) && (!entry || entry.expires <= Date.now())) refreshQueue.add(app);
   }
   for (const app of refreshQueue) if (!nextVisible.has(app)) refreshQueue.delete(app);
   visibleApps = nextVisible;
@@ -296,10 +278,9 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     pending[0] ?? tileIds.find(needsRequest);
   if (!requestId || fetching || (serviceFailure && serviceFailure.expires > Date.now())) return;
   fetching = true;
-  const mySerial = ++fetchSerial;
-  pendingRequestApp = requestId;
+  const requestRevision = revision;
   void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 15 } as PriceResult)).then(value => {
-    if (mySerial !== fetchSerial) return;
+    if (requestRevision !== revision) return;
     if (value.global_error) {
       const expires = Date.now() + Math.max(1, Math.min(60, value.retry_after ?? 15)) * 1000;
       serviceFailure = { value: { ...value, retry_at: expires }, expires };
@@ -316,5 +297,5 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     prices.set(requestId, { value, expires });
     if (currentApp === requestId) void send(buildPricePanelScript(requestId, value)).catch(() => {});
     if (tileIds.length) renderTiles();
-  }).finally(() => { fetching = false; pendingRequestApp = ""; });
+  }).finally(() => { fetching = false; });
 }
