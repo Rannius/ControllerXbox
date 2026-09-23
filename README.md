@@ -93,3 +93,7 @@ A Steam szerint meg nem jelent vagy ismeretlen megjelenési állapotú játékho
 ## 1.0.70 – Ingyenes játékok kihagyása
 
 A Steam által ingyenesként jelölt játékokhoz nem indul AllKeyShop-keresés vagy ajánlatlekérés, és nem jelenik meg AKS-ársor. A kihagyást 30 percig gyorsítótárazza. Az ingyenesség megállapításához a Steam adatait továbbra is ellenőrzi; a hiányzó ár önmagában nem jelent ingyenes játékot.
+
+## 1.0.71 – Főoldali árlekérések kikapcsolása
+
+Az áruház főoldalának csempéin nem jelennek meg AllKeyShop-árak, és ezekhez nem indul árlekérés akkor sem, ha a csempeárak be vannak kapcsolva. A megnyitott játék adatlapján megmarad az árösszehasonlítás. Más áruházi oldalakon továbbra is a külön csempeár-kapcsoló érvényes.

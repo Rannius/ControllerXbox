@@ -2236,7 +2236,7 @@ function Content() {
           finally { setSettingsWorking(false); }
         }} /></PanelSectionRow>)}
     <PanelSectionRow><ToggleField label="Árak az áruházi csempék alatt"
-      description="Külön engedélyezhető. Csak a látható webes áruházi csempékhez kér árat, egymás után. Az AllKeyShop áraknak is bekapcsolva kell lenniük."
+      description="Külön engedélyezhető, az áruház főoldalán nem aktív. Más áruházi oldalakon csak a látható csempékhez kér árat, egymás után. Az AllKeyShop áraknak is bekapcsolva kell lenniük."
       checked={visibility.show_store_tile_prices ?? false} disabled={settingsWorking}
       onChange={async enabled => {
         setSettingsWorking(true);

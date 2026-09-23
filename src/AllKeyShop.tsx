@@ -1,4 +1,4 @@
-import { storePriceTilesScript } from "./storePriceTiles";
+import { allowsStoreTilePrices, storePriceTilesScript } from "./storePriceTiles";
 import { useEffect, useState } from "react";
 import { ButtonItem, PanelSectionRow, TextField, ToggleField } from "@decky/ui";
 import { callable } from "@decky/api";
@@ -254,7 +254,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   const previousApp = currentApp;
   currentApp = id;
   tileUrl = url;
-  tileIds = /^https:\/\/store\.steampowered\.com\//.test(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
+  tileIds = allowsStoreTilePrices(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
   const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
   for (const app of nextVisible) {
     const entry = prices.get(app);

@@ -1,6 +1,17 @@
+function allowsStoreTilePrices(url) {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === "https:" && parsed.hostname === "store.steampowered.com"
+            && !/^\/(?:home\/?|index\.php)?$/.test(parsed.pathname);
+    }
+    catch {
+        return false;
+    }
+}
 // Shared detection for the request queue and rendering, including compact and featured cards.
 const storePriceTilesScript = `
   function collectPriceTiles() {
+    if (!(${allowsStoreTilePrices.toString()})(location.href)) return [];
     const found = new Map();
     const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,[data-ds-appid]';
     for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid]')) {
@@ -509,7 +520,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
     const previousApp = currentApp;
     currentApp = id;
     tileUrl = url;
-    tileIds = /^https:\/\/store\.steampowered\.com\//.test(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
+    tileIds = allowsStoreTilePrices(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
     const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
     for (const app of nextVisible) {
         const entry = prices.get(app);
@@ -2932,7 +2943,7 @@ function Content() {
                             finally {
                                 setSettingsWorking(false);
                             }
-                        } }) }, key)), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi csemp\u00E9k alatt", description: "K\u00FCl\u00F6n enged\u00E9lyezhet\u0151. Csak a l\u00E1that\u00F3 webes \u00E1ruh\u00E1zi csemp\u00E9khez k\u00E9r \u00E1rat, egym\u00E1s ut\u00E1n. Az AllKeyShop \u00E1raknak is bekapcsolva kell lenni\u00FCk.", checked: visibility.show_store_tile_prices ?? false, disabled: settingsWorking, onChange: async (enabled) => {
+                        } }) }, key)), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi csemp\u00E9k alatt", description: "K\u00FCl\u00F6n enged\u00E9lyezhet\u0151, az \u00E1ruh\u00E1z f\u0151oldal\u00E1n nem akt\u00EDv. M\u00E1s \u00E1ruh\u00E1zi oldalakon csak a l\u00E1that\u00F3 csemp\u00E9khez k\u00E9r \u00E1rat, egym\u00E1s ut\u00E1n. Az AllKeyShop \u00E1raknak is bekapcsolva kell lenni\u00FCk.", checked: visibility.show_store_tile_prices ?? false, disabled: settingsWorking, onChange: async (enabled) => {
                             setSettingsWorking(true);
                             try {
                                 const response = await withBackendTimeout(setTilePrices(enabled));

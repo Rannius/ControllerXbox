@@ -1,6 +1,15 @@
+export function allowsStoreTilePrices(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.hostname === "store.steampowered.com"
+      && !/^\/(?:home\/?|index\.php)?$/.test(parsed.pathname);
+  } catch { return false; }
+}
+
 // Shared detection for the request queue and rendering, including compact and featured cards.
 export const storePriceTilesScript = `
   function collectPriceTiles() {
+    if (!(${allowsStoreTilePrices.toString()})(location.href)) return [];
     const found = new Map();
     const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,[data-ds-appid]';
     for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid]')) {

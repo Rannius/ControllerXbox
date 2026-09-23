@@ -4,7 +4,7 @@ function fixture() {
  const requests=[],scripts=[],exports={};
  const clock={now:Date.now()};class ClockDate extends Date {static now(){return clock.now;}}
  const dock={};vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/storeBadgeDock.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports:dock});
- const tiles={};vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/storePriceTiles.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports:tiles});
+ const tiles={};vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/storePriceTiles.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports:tiles,URL});
  const requireMock=name=>name==='./storePriceTiles'?tiles:name==='./storeBadgeDock'?dock:name==='@decky/api'?{callable:method=>id=>new Promise(resolve=>requests.push({method,id,resolve}))}:{};
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/AllKeyShop.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.React}}).outputText,
   {exports,require:requireMock,setTimeout,clearTimeout,URL,Date:ClockDate});
@@ -28,7 +28,7 @@ test('price renderer serializes untrusted text and guards page identity',()=>{
 });
 
 test('tile prices require explicit visible IDs, share cache and stop when disabled',async()=>{
- const f=fixture(),url='https://store.steampowered.com/';
+ const f=fixture(),url='https://store.steampowered.com/search/';
  f.api.updatePriceView(url,f.send);assert.equal(f.requests.length,0);
  f.api.updatePriceView(url,f.send,['10','10','20']);assert.equal(f.requests.length,1);assert.equal(f.requests[0].id,'10');
  f.api.updatePriceView(url,f.send,['10','20']);assert.equal(f.requests.length,1);
@@ -41,7 +41,7 @@ test('tile prices require explicit visible IDs, share cache and stop when disabl
 });
 
 test('service failure reaches all waiting tiles, pauses requests and recovers after cooldown',async()=>{
- const f=fixture(),url='https://store.steampowered.com/',ids=['10','20','30'];
+ const f=fixture(),url='https://store.steampowered.com/search/',ids=['10','20','30'];
  f.api.updatePriceView(url,f.send,ids);
  f.requests[0].resolve({success:false,error:'Connection timed out',error_code:'connection',global_error:true,retry_after:15});await f.drain();
  for(let i=0;i<3;i++)f.api.updatePriceView(url,f.send,ids);
@@ -68,7 +68,7 @@ test('countdown uses a fixed deadline, one timer, and stops after removal',()=>{
 });
 
 test('new tiles precede expired cached tiles and open game has priority',async()=>{
- const f=fixture(),url='https://store.steampowered.com/';
+ const f=fixture(),url='https://store.steampowered.com/search/';
  f.api.updatePriceView(url,f.send,['10']);f.requests[0].resolve({success:true,checked_at:f.clock.now/1000,offers:[]});await f.drain();
  f.clock.now+=1200000;f.api.updatePriceView(url,f.send,['10']);assert.equal(f.requests.length,1);
  f.clock.now+=601000;f.api.updatePriceView(url,f.send,['10','20']);assert.equal(f.requests[1].id,'20');
@@ -78,10 +78,28 @@ test('new tiles precede expired cached tiles and open game has priority',async()
 });
 
 test('successful prices refresh only on reappearance after 30 minutes',async()=>{
- const f=fixture(),url='https://store.steampowered.com/';
+ const f=fixture(),url='https://store.steampowered.com/search/';
  f.api.updatePriceView(url,f.send,['10']);f.requests[0].resolve({success:true,checked_at:f.clock.now/1000,offers:[]});await f.drain();
  f.clock.now+=1801000;f.api.updatePriceView(url,f.send,['10']);assert.equal(f.requests.length,1);
  f.api.updatePriceView(url,f.send,[]);f.api.updatePriceView(url,f.send,['10']);assert.equal(f.requests.length,2);
  f.requests[1].resolve({success:true,checked_at:f.clock.now/1000,offers:[]});await f.drain();
  f.api.updatePriceView(url,f.send,[]);f.api.updatePriceView(url,f.send,['10']);assert.equal(f.requests.length,2);
+});
+
+test('store homepage never queues tile prices, including navigation from search',async()=>{
+ const f=fixture();
+ for(const path of ['/', '/?l=hungarian', '/home/', '/index.php']) {
+  f.api.updatePriceView('https://store.steampowered.com'+path,f.send,['10','20']);
+  assert.equal(f.requests.length,0);
+ }
+ f.api.updatePriceView('https://store.steampowered.com/search/',f.send,['10','20']);
+ assert.equal(f.requests.length,1);
+ f.api.updatePriceView('https://store.steampowered.com/',f.send,['10','20']);
+ f.requests[0].resolve({success:true,offers:[]});await f.drain();
+ f.api.updatePriceView('https://store.steampowered.com/',f.send,['10','20']);
+ assert.equal(f.requests.length,1);
+ assert.match(f.scripts.findLast(s=>s.includes('const values =')),/const values = \{\}/);
+ f.api.updatePriceView('https://store.steampowered.com/app/30/',f.send);
+ assert.equal(f.requests.length,2);assert.equal(f.requests[1].id,'30');
+ f.requests[1].resolve({success:true,offers:[]});await f.drain();
 });
