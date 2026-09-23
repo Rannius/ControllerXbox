@@ -71,3 +71,7 @@ Az AllKeyShop ársor a webes játékoldalon a Steam első felismert vásárlási
 ## 1.0.65 – Ársor és csempefelismerés javítása
 
 A játékoldal ársora az első látható vásárlási csempéhez tartozó burkolón belül marad. A csempeárak közös felismerése az alacsony listákat, nagy kiemelt elemeket, háttérképes és AppID-val jelölt csempéket is kezeli; a korábbi 40 elemes megjelenítési korlát megszűnt.
+
+## 1.0.66 – Kontrolleres áruházi ármező
+
+A GamepadMode játékoldalon az AllKeyShop sor a bal felső játékbemutató kártyán lévő Steam-ár alatt jelenik meg. A hagyományos webes vásárlási blokkra épülő korábbi felismerés önmagában nem kezelte ezt a nézetet. A kontrolleres áruház valódi Dressmaker-oldalával végzett böngészős elhelyezési próba sikeres.

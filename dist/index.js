@@ -378,16 +378,24 @@ function buildPricePanelScript(appId, result) {
     if (!appId) { panel?.remove(); return; }
     if (pageId !== appId) return;
     if (data?.disabled) { panel?.remove(); return; }
+    // Gamepad Store is a React page, with no legacy purchase markup.
+    const gamepadPrice = document.documentElement.classList.contains('GamepadMode')
+      ? Array.from(document.querySelectorAll('.StoreSalePriceWidgetContainer')).find(node =>
+          node.getBoundingClientRect().height > 0 && !node.closest('a[href], .CapsuleBottomBar')) : null;
+    const gamepadRow = gamepadPrice?.parentElement;
+    const gamepadAnchor = gamepadRow && getComputedStyle(gamepadRow.parentElement).flexDirection === 'column' ? gamepadRow : null;
     const purchase = Array.from(document.querySelectorAll('.game_area_purchase_game')).find(node =>
       !node.matches('.demo_above_purchase, .game_area_purchase_game_demo') &&
       !node.closest('[data-ds-bundleid]') && !node.querySelector('[name="bundleid"]') && node.getBoundingClientRect().height > 0 && node.querySelector('.game_purchase_price, .discount_final_price, .game_purchase_action'));
-    const anchor = purchase;
+    const anchor = gamepadAnchor || purchase;
     if (!anchor) { panel?.remove(); return; }
-    const key = appId + ':' + JSON.stringify(data);
+    const key = appId + ':' + Boolean(gamepadAnchor) + ':' + JSON.stringify(data);
     if (panel?.dataset.state === key && panel.previousElementSibling === anchor) return;
     const wasOpen = panel?.open === true;
     panel?.remove(); panel = document.createElement('details'); panel.id = id; panel.dataset.state = key; panel.open = wasOpen;
     panel.style.cssText = 'display:flow-root;clear:none;position:relative;box-sizing:border-box;width:100%;margin:24px 0 16px;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
+    if (gamepadAnchor) panel.style.cssText = 'display:block;flex:0 0 auto;box-sizing:border-box;max-width:100%;max-height:170px;overflow:auto;margin:6px 0 0;pointer-events:auto;color:#dce6ed;font:12px/1.4 Arial,sans-serif';
+    panel.addEventListener('click', event => event.stopPropagation());
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
     summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: hiba' : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
