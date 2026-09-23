@@ -51,6 +51,19 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(steam.call_count, 1)
             aks.assert_not_called()
 
+    async def test_free_game_never_queries_allkeyshop_and_is_cached(self):
+        body = {"10": {"success": True, "data": {"name": "Free game", "is_free": True,
+                "release_date": {"coming_soon": False}}}}
+        with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(body))) as steam, patch.object(self.plugin, "_aks_read") as aks:
+            response = await self.plugin.get_allkeyshop_price("10")
+            cached = await self.plugin.get_allkeyshop_price("10")
+        self.assertTrue(response["success"])
+        self.assertEqual(response["skipped"], "free")
+        self.assertEqual(response["offers"], [])
+        self.assertEqual(cached, response)
+        self.assertEqual(steam.call_count, 1)
+        aks.assert_not_called()
+
     def test_released_game_still_queries_allkeyshop(self):
         body = {"10": {"success": True, "data": {"name": "Released game", "release_date": {"coming_soon": False}}}}
         with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(body))), patch.object(self.plugin, "_aks_read", side_effect=OSError("test stop")) as aks:

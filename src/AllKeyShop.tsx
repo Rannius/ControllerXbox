@@ -5,7 +5,7 @@ import { callable } from "@decky/api";
 
 
 type Preferences = { success: boolean; enabled: boolean; allow_gifts: boolean; merchants: string[]; restrict_merchants: boolean; error?: string };
-export type PriceResult = { success: boolean; skipped?: "unreleased" | "release_unknown"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
+export type PriceResult = { success: boolean; skipped?: "unreleased" | "release_unknown" | "free"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
   checked_at?: number; currency?: string; preferred_only?: boolean; matched_offers?: number;
   offers?: { merchant: string; price: number; kind: string; edition: string; coupon: string }[] };
 const getPreferences = callable<[], Preferences>("get_price_preferences");

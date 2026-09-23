@@ -89,3 +89,7 @@ Az AllKeyShop ársorok kiírják az újrapróbálkozásig hátralévő másodper
 A megnyitott játék elsőbbséget kap, utána a látható, még le nem kért csempék, végül az újra megjelent, lejárt adatú játékok következnek. Az AllKeyShop-kérések között legalább 5 másodperc szünet van. A sikeres adatok 30 percig használhatók új kérés nélkül (500 játék, a futó plugin memóriájában). A lejárat önmagában nem frissít: a játék későbbi újbóli megjelenése vagy adatlapjának újbóli megnyitása indítja a frissítést. A kibővített nézet mutatja az utolsó ellenőrzés idejét.
 
 A Steam szerint meg nem jelent vagy ismeretlen megjelenési állapotú játékhoz nem indul AllKeyShop-kérés, a személyre szabott naptárban sem. Ehhez a Steam megjelenési adatát továbbra is lekéri.
+
+## 1.0.70 – Ingyenes játékok kihagyása
+
+A Steam által ingyenesként jelölt játékokhoz nem indul AllKeyShop-keresés vagy ajánlatlekérés, és nem jelenik meg AKS-ársor. A kihagyást 30 percig gyorsítótárazza. Az ingyenesség megállapításához a Steam adatait továbbra is ellenőrzi; a hiányzó ár önmagában nem jelent ingyenes játékot.

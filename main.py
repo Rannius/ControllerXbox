@@ -557,6 +557,8 @@ class Plugin:
         title = str(metadata.get("name", "")).strip()[:200]
         if not title:
             raise ValueError("A Steam-játék neve most nem kérdezhető le.")
+        if metadata.get("is_free") is True:
+            return {"title": title, "skipped": "free", "checked_at": time.time()}
         release = metadata.get("release_date")
         coming_soon = release.get("coming_soon") if isinstance(release, dict) else None
         # No AKS search or offer download until Steam confirms the game is released.
