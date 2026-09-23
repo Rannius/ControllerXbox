@@ -35,7 +35,17 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>AllKeyShop árak</div></PanelSectionRow>
     {prefs && <>
       <PanelSectionRow><ToggleField label="Árak az áruházi játékoldalon" checked={prefs.enabled} disabled={busy}
-        onChange={enabled => setPrefs({ ...prefs, enabled })} /></PanelSectionRow>
+        onChange={async (enabled) => {
+          const updated = { ...prefs, enabled };
+          setPrefs(updated); setBusy(true); setMessage("");
+          try {
+            const current = await timed(getPreferences());
+            if (!current.success) throw new Error(current.error || "Betöltési hiba");
+            const value = await timed(setPreferences(enabled, updated.allow_gifts, current.merchants, current.restrict_merchants));
+            if (!value.success) throw new Error(value.error || "Mentési hiba");
+            setPrefs(value); resetPriceView(); setMessage(enabled ? "Árlekérés bekapcsolva." : "Árlekérés kikapcsolva.");
+          } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+        }} /></PanelSectionRow>
       <PanelSectionRow><ToggleField label="Steam Gift is megengedett" checked={prefs.allow_gifts} disabled={busy}
         onChange={allow_gifts => setPrefs({ ...prefs, allow_gifts })} /></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" onClick={openMerchants}>Megbízható boltok kiválasztása</ButtonItem></PanelSectionRow>
@@ -258,7 +268,9 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
   for (const app of nextVisible) {
     const entry = prices.get(app);
-    if ((!visibleApps.has(app) || (app === id && id !== previousApp)) && (!entry || entry.expires <= Date.now())) refreshQueue.add(app);
+    // A currentApp mindig bekerül; csempékre max. 4 elem sorban, hogy ne okozzunk rate-limitet
+    if ((!visibleApps.has(app) || (app === id && id !== previousApp)) && (!entry || entry.expires <= Date.now()))
+      if (app === id || refreshQueue.size < 4) refreshQueue.add(app);
   }
   for (const app of refreshQueue) if (!nextVisible.has(app)) refreshQueue.delete(app);
   visibleApps = nextVisible;
