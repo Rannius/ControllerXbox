@@ -1,13 +1,15 @@
 import { useEffect, useState } from "react";
 import { ButtonItem, PanelSectionRow, TextField, ToggleField } from "@decky/ui";
 import { callable } from "@decky/api";
+import { storeBadgeDockScript, storeBadgeDockCleanupScript } from "./storeBadgeDock";
 
-type Preferences = { success: boolean; enabled: boolean; allow_gifts: boolean; merchants: string[]; error?: string };
+type Preferences = { success: boolean; enabled: boolean; allow_gifts: boolean; merchants: string[]; restrict_merchants: boolean; error?: string };
 export type PriceResult = { success: boolean; disabled?: boolean; error?: string; title?: string; url?: string;
   checked_at?: number; currency?: string; preferred_only?: boolean; matched_offers?: number;
   offers?: { merchant: string; price: number; kind: string; edition: string; coupon: string }[] };
 const getPreferences = callable<[], Preferences>("get_price_preferences");
-const setPreferences = callable<[boolean, boolean, string[]], Preferences>("set_price_preferences");
+const setPreferences = callable<[boolean, boolean, string[], boolean], Preferences>("set_price_preferences");
+const getMerchants = callable<[boolean], { success: boolean; merchants: string[]; error?: string }>("get_price_merchants");
 const getPrice = callable<[string], PriceResult>("get_allkeyshop_price");
 
 async function timed<T>(request: Promise<T>): Promise<T> {
@@ -17,15 +19,14 @@ async function timed<T>(request: Promise<T>): Promise<T> {
   })]); } finally { clearTimeout(timer!); }
 }
 
-export function AllKeyShopSettings() {
+export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void }) {
   const [prefs, setPrefs] = useState<Preferences>();
-  const [shops, setShops] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   useEffect(() => {
     let active = true;
     void timed(getPreferences()).then(value => {
-      if (active) { if (!value.success) throw new Error(value.error || "Betöltési hiba"); setPrefs(value); setShops(value.merchants.join(", ")); }
+      if (active) { if (!value.success) throw new Error(value.error || "Betöltési hiba"); setPrefs(value); }
     }).catch(error => { if (active) setMessage(String(error)); });
     return () => { active = false; };
   }, []);
@@ -36,18 +37,78 @@ export function AllKeyShopSettings() {
         onChange={enabled => setPrefs({ ...prefs, enabled })} /></PanelSectionRow>
       <PanelSectionRow><ToggleField label="Steam Gift is megengedett" checked={prefs.allow_gifts} disabled={busy}
         onChange={allow_gifts => setPrefs({ ...prefs, allow_gifts })} /></PanelSectionRow>
-      <PanelSectionRow><TextField label="Előnyben részesített boltok" description="Pontos boltnevek vesszővel elválasztva, pl. Eneba, GAMIVO. Üresen minden megfelelő bolt."
-        value={shops} disabled={busy} onChange={event => setShops(event.currentTarget.value)} /></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" onClick={openMerchants}>Megbízható boltok kiválasztása</ButtonItem></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={async () => {
         setBusy(true); setMessage("");
         try {
-          const value = await timed(setPreferences(prefs.enabled, prefs.allow_gifts, shops.split(",").map(s => s.trim()).filter(Boolean)));
+          const current = await timed(getPreferences());
+          if (!current.success) throw new Error(current.error || "Betöltési hiba");
+          const value = await timed(setPreferences(prefs.enabled, prefs.allow_gifts, current.merchants, current.restrict_merchants));
           if (!value.success) throw new Error(value.error || "Mentési hiba");
           setPrefs(value); resetPriceView(); setMessage("Árbeállítások mentve.");
         } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
       }}>{busy ? "Mentés…" : "Árbeállítások alkalmazása"}</ButtonItem></PanelSectionRow>
     </>}
     <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Csak a megnyitott játékhoz kér le árat; 15 percig tárolja."}</div></PanelSectionRow>
+  </>;
+}
+
+export function AllKeyShopMerchants({ onBack }: { onBack(): void }) {
+  const [names, setNames] = useState<string[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [query, setQuery] = useState("");
+  const [busy, setBusy] = useState(true);
+  const [ready, setReady] = useState(false);
+  const [message, setMessage] = useState("");
+  useEffect(() => {
+    let active = true;
+    void Promise.all([timed(getPreferences()), timed(getMerchants(false))]).then(([prefs, list]) => {
+      if (!active) return;
+      if (!prefs.success || !list.success) throw new Error("A boltlista nem tölthető be.");
+      setNames(list.merchants);
+      setSelected(new Set((prefs.restrict_merchants ? prefs.merchants : list.merchants).map(name => name.toLowerCase())));
+      setMessage(list.error || ""); setReady(true);
+    }).catch(error => { if (active) setMessage(String(error)); }).finally(() => { if (active) setBusy(false); });
+    return () => { active = false; };
+  }, []);
+  const visible = names.filter(name => name.toLowerCase().includes(query.trim().toLowerCase()));
+  return <>
+    <PanelSectionRow><ButtonItem layout="below" onClick={onBack}>← Vissza</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", lineHeight: 1.5 }}>
+      Te döntöd el, mely boltokban bízol. A mentés után kizárólag a bepipált boltok megfelelő Steam-kulcs/Gift ajánlatait mutatjuk. Ha egyet sem választasz, nem jelenik meg ajánlat. Az újonnan talált boltokat külön engedélyezheted.
+    </div></PanelSectionRow>
+    <PanelSectionRow><TextField label="Bolt keresése" value={query} onChange={event => setQuery(event.currentTarget.value)} /></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={async () => {
+      setBusy(true);
+      try {
+        const list = await timed(getMerchants(true));
+        if (!list.success) throw new Error(list.error || "Frissítési hiba");
+        setNames(list.merchants); setMessage(list.error || "Boltlista frissítve.");
+        if (!ready) {
+          const prefs = await timed(getPreferences());
+          if (!prefs.success) throw new Error("Beállításbetöltési hiba");
+          setSelected(new Set((prefs.restrict_merchants ? prefs.merchants : list.merchants).map(name => name.toLowerCase()))); setReady(true);
+        }
+      } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+    }}>Boltlista frissítése</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy || !ready} onClick={() => setSelected(new Set(names.map(name => name.toLowerCase())))}>Összes kijelölése</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy || !ready} onClick={() => setSelected(new Set())}>Kijelölések törlése</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" disabled={busy || !ready} onClick={async () => {
+      setBusy(true);
+      try {
+        const prefs = await timed(getPreferences());
+        if (!prefs.success) throw new Error("Beállításbetöltési hiba");
+        const saved = await timed(setPreferences(prefs.enabled, prefs.allow_gifts, names.filter(name => selected.has(name.toLowerCase())), true));
+        if (!saved.success) throw new Error(saved.error || "Mentési hiba");
+        resetPriceView(); setMessage("Kijelölések mentve. Az árak ezekből a boltokból számolódnak.");
+      } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
+    }}>Kijelölések mentése ({selected.size})</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div role="status">{busy ? "Boltlista feldolgozása…" : message || `${selected.size} kiválasztva · ${names.length} ismert bolt`}</div></PanelSectionRow>
+    {visible.map(name => <PanelSectionRow key={name.toLowerCase()}><ToggleField label={name}
+      checked={selected.has(name.toLowerCase())} disabled={busy || !ready} onChange={checked => setSelected(previous => {
+        const next = new Set(previous); if (checked) next.add(name.toLowerCase()); else next.delete(name.toLowerCase()); return next;
+      })} /></PanelSectionRow>)}
+    {!busy && !visible.length && <PanelSectionRow><div>Nincs megjeleníthető bolt. Próbáld frissíteni a listát vagy módosítsd a keresést.</div></PanelSectionRow>}
   </>;
 }
 
@@ -60,14 +121,27 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     const id = 'deck-play-badges-price';
     const pageId = location.pathname.match(/^\\/app\\/(\\d+)/)?.[1];
     let panel = document.getElementById(id);
-    if (!appId || pageId !== appId || data?.disabled) { panel?.remove(); return; }
-    const host = document.querySelector('.game_area_purchase');
-    if (!host) { panel?.remove(); return; }
+    if (!appId) { ${storeBadgeDockCleanupScript} return; }
+    if (pageId !== appId) return;
+    if (data?.disabled) { panel?.remove(); return; }
+    ${storeBadgeDockScript}
+    const host = dock;
     const key = appId + ':' + JSON.stringify(data);
     if (panel?.dataset.state === key && panel.parentElement === host) return;
-    panel?.remove(); panel = document.createElement('section'); panel.id = id; panel.dataset.state = key;
-    panel.style.cssText = 'box-sizing:border-box;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;margin:12px 0;color:#dce6ed;font:14px/1.5 Arial,sans-serif;overflow-wrap:anywhere;max-width:100%';
-    const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; panel.appendChild(node); };
+    const wasOpen = panel?.open === true;
+    panel?.remove(); panel = document.createElement('details'); panel.id = id; panel.dataset.state = key; panel.open = wasOpen;
+    panel.style.cssText = 'order:2;pointer-events:auto;color:#dce6ed;font:14px/1.5 Arial,sans-serif';
+    const summary = document.createElement('summary');
+    const best = data?.offers?.[0];
+    summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: hiba' : best ? 'AKS ' + best.price.toFixed(2) + ' €' : 'AKS: nincs ajánlat';
+    summary.title = 'AllKeyShop ár és ajánlatok – megnyitás';
+    summary.style.cssText = 'cursor:pointer;white-space:nowrap;box-sizing:border-box;list-style:none;border:1px solid #67c1f5;border-radius:5px;background:#162634;padding:2px 8px;font-weight:700;min-height:24px';
+    panel.appendChild(summary);
+    const content = document.createElement('div');
+    content.style.cssText = 'position:absolute;bottom:calc(100% + 8px);left:0;box-sizing:border-box;width:340px;max-width:calc(100vw - 40px);max-height:60vh;overflow:auto;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;box-shadow:0 2px 12px #000';
+    content.style.maxWidth = 'calc(100vw - ' + (parseFloat(dock.style.left) + 20) + 'px)';
+    panel.appendChild(content);
+    const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
     line('AllKeyShop · Steam-kulcs / Gift', true);
     if (!data) line('Árak betöltése…');
     else if (!data.success) line(data.error || 'Az ár most nem érhető el.');
@@ -83,10 +157,11 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
       if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
       if (/^https:\\/\\/www\\.allkeyshop\\.com\\/blog\\/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+\\/$/.test(data.url || '')) {
         const link = document.createElement('a'); link.href = data.url; link.textContent = 'AllKeyShop adatlap megnyitása (az ottani lista külön szűrhető)';
-        link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; panel.appendChild(link);
+        link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; content.appendChild(link);
       }
     }
-    host.prepend(panel);
+    panel.addEventListener('keydown', event => { if (event.key === 'Escape') { panel.open = false; summary.focus(); } });
+    host.appendChild(panel);
   })();`;
 }
 

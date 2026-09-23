@@ -3,7 +3,8 @@ import { CloudResumeRefresh } from "./cloudResumeRefresh";
 import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
 import { HungarianProgress, CuratorProgress } from "./HungarianProgress";
 import { CatalogStatus } from "./CatalogStatus";
-import { AllKeyShopSettings, resetPriceView, updatePriceView } from "./AllKeyShop";
+import { AllKeyShopSettings, AllKeyShopMerchants, resetPriceView, updatePriceView } from "./AllKeyShop";
+import { storeBadgeDockScript, storeBadgeDockCleanupScript } from "./storeBadgeDock";
 import { HungarianCollection, readyCollectionStore } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
@@ -138,7 +139,7 @@ type NotificationHistoryResponse = {
   unread_count?: number;
   error?: string;
 };
-type PluginPage = "home" | "watchlist" | "history" | "settings";
+type PluginPage = "home" | "watchlist" | "history" | "settings" | "shops";
 type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 type GfnState = "loading" | "available" | "not_available" | "unavailable";
 type BoosteroidState = "loading" | "available" | "maintenance" | "not_available" | "unavailable";
@@ -1364,17 +1365,18 @@ function buildStoreBadgeScript(
         style.id = 'controller-xbox-store-style';
         (document.head || document.documentElement).appendChild(style);
       }
-      style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:fixed;right:20px;bottom:20px;z-index:999999;max-width:calc((100vw - 40px) / ${.95 * scale});flex-wrap:wrap;justify-content:center;transform:scale(${.95 * scale});transform-origin:bottom right}.cxc-store-card-badges{position:absolute;left:4px;top:4px;width:calc((100% - 8px) / ${.72 * scale});flex-wrap:wrap;justify-content:center;z-index:9999;transform:scale(${.72 * scale});transform-origin:top left}.cxc-store-card-badges>span{flex-shrink:0}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}.cxc-watch{width:30px;height:24px;padding:0;border:0;border-radius:6px;background:rgba(24,31,40,.92);color:#fff;font:bold 18px/24px Arial,sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:auto;cursor:pointer}.cxc-watch.is-watched{background:#d9a400;color:#111}';
+      style.textContent = '.cxc-store-badges{display:flex;align-items:center;gap:3px;pointer-events:none}.cxc-store-detail{position:relative;order:1;flex-wrap:wrap;justify-content:flex-start;zoom:${.95 * scale};max-width:100%}.cxc-store-card-badges{position:absolute;left:4px;top:4px;width:calc((100% - 8px) / ${.72 * scale});flex-wrap:wrap;justify-content:center;z-index:9999;transform:scale(${.72 * scale});transform-origin:top left}.cxc-store-card-badges>span{flex-shrink:0}.cxc-controller,.cxc-gfn,.cxc-boosteroid{box-sizing:border-box;height:24px;display:inline-flex;align-items:center;justify-content:center;color:#fff;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:none}.cxc-controller{min-width:34px;padding:0 5px;border-radius:12px;background:#107cde}.cxc-symbol{min-width:24px;font:bold 17px/24px Arial,sans-serif}.cxc-gfn{min-width:34px;padding:0 5px;border-radius:5px;font:italic 900 10px/24px Arial,sans-serif;letter-spacing:-.3px}.cxc-boosteroid{width:34px;padding:0 3px;border-radius:5px;background:rgba(6,9,18,.9)}.cxc-watch{width:30px;height:24px;padding:0;border:0;border-radius:6px;background:rgba(24,31,40,.92);color:#fff;font:bold 18px/24px Arial,sans-serif;box-shadow:0 1px 5px rgba(0,0,0,.85);pointer-events:auto;cursor:pointer}.cxc-watch.is-watched{background:#d9a400;color:#111}';
 
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       const pageId = pageMatch ? pageMatch[1] : '';
       let detail = document.getElementById(detailId);
       if (pageId && states[pageId]) {
+        ${storeBadgeDockScript}
         if (!detail) {
           detail = document.createElement('div');
           detail.id = detailId;
           detail.className = 'cxc-store-badges cxc-store-detail';
-          document.body.appendChild(detail);
+          dock.appendChild(detail);
         }
         const isWatched = watchedAppIds.has(pageId);
         const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + states[pageId].hungarian + ':' + states[pageId].hungarianSource + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
@@ -1397,6 +1399,7 @@ function buildStoreBadgeScript(
       } else if (detail) {
         detail.remove();
       }
+      if (!pageId) { ${storeBadgeDockCleanupScript} }
 
       const candidates = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
       const usedHosts = new Set();
@@ -1587,6 +1590,7 @@ function disconnectStoreDebugger(): void {
       (function() {
         document.getElementById('controller-xbox-store-detail-badges')?.remove();
         document.getElementById('deck-play-badges-price')?.remove();
+        ${storeBadgeDockCleanupScript}
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
         delete window.__controllerXboxWatchActions;
@@ -2167,6 +2171,7 @@ function Content() {
       store_badge_percent: response.store_badge_percent ?? 100 });
   };
 
+  if (page === "shops") return <PanelSection title="Megbízható boltok"><AllKeyShopMerchants onBack={() => openPage("home")} /></PanelSection>;
   if (page === "settings") return <PanelSection title="Beállítások">
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ fontWeight: 700 }}>Jelvények</div></PanelSectionRow>
@@ -2191,7 +2196,7 @@ function Content() {
     /></PanelSectionRow>
     <BadgeSizeSettings initial={{ library_badge_percent: visibility.library_badge_percent ?? 100,
       store_badge_percent: visibility.store_badge_percent ?? 100 }} save={saveSizes} />
-    <AllKeyShopSettings />
+    <AllKeyShopSettings openMerchants={() => openPage("shops")} />
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Értesítések</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Új GeForce NOW-játékok"
@@ -2332,6 +2337,7 @@ function Content() {
       Előzmények{unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""}
     </ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>Beállítások</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("shops")}>Megbízható boltok (AllKeyShop)</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><HungarianProgress manager={hungarianCollection} loadCurator={loadCuratorProgress} /></PanelSectionRow>
     <PanelSectionRow><CatalogStatus /></PanelSectionRow>

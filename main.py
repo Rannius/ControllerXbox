@@ -154,6 +154,9 @@ class HungarianCuratorParser:
 class Plugin:
     def __init__(self) -> None:
         self._price_preferences = {"enabled": True, "allow_gifts": True, "merchants": []}
+        self._price_merchants: Set[str] = set()
+        self._price_merchants_checked_at = 0.0
+        self._price_merchants_lock = asyncio.Lock()
         self._price_cache: Dict[str, Dict[str, Any]] = {}
         self._price_lock = asyncio.Lock()
         self._cache: Dict[str, Dict[str, Any]] = {}
@@ -200,6 +203,7 @@ class Plugin:
         if not settings_directory:
             raise RuntimeError("Decky settings directory is unavailable")
         self._price_settings_path = Path(settings_directory) / "price-preferences.json"
+        self._price_merchants_path = Path(settings_directory) / "price-merchants.json"
         self._steam_state_path = Path(settings_directory) / "steam-scan-state.json"
         self._cache_path = Path(settings_directory) / "controller-support-cache.json"
         self._hungarian_curator_cache_path = Path(settings_directory) / "hungarian-curator-cache.json"
@@ -219,6 +223,7 @@ class Plugin:
 
     async def _main(self) -> None:
         await self._load_price_preferences()
+        await self._load_price_merchants()
         await self._load_cache()
         await self._load_steam_scan_state()
         await self._load_hungarian_curator_cache()
@@ -372,24 +377,77 @@ class Plugin:
             if (isinstance(value, dict) and type(value.get("enabled")) is bool
                     and type(value.get("allow_gifts")) is bool and isinstance(value.get("merchants"), list)
                     and all(isinstance(item, str) and len(item) <= 80 for item in value["merchants"])
-                    and len(value["merchants"]) <= 100):
+                    and len(value["merchants"]) <= 2000):
                 self._price_preferences = value
+                self._price_preferences["restrict_merchants"] = value.get("restrict_merchants", bool(value["merchants"])) is True
         except (OSError, ValueError, TypeError):
             pass
 
     async def get_price_preferences(self) -> Dict[str, Any]:
-        return {"success": True, **self._price_preferences}
+        return {"success": True, **self._price_preferences,
+                "restrict_merchants": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
 
-    async def set_price_preferences(self, enabled: Any, allow_gifts: Any, merchants: Any) -> Dict[str, Any]:
+    async def set_price_preferences(self, enabled: Any, allow_gifts: Any, merchants: Any, restrict_merchants: Any = None) -> Dict[str, Any]:
         if (type(enabled) is not bool or type(allow_gifts) is not bool or not isinstance(merchants, list)
-                or len(merchants) > 100 or any(not isinstance(item, str) or len(item) > 80 for item in merchants)):
+                or len(merchants) > 2000 or any(not isinstance(item, str) or len(item) > 80 for item in merchants)
+                or (restrict_merchants is not None and type(restrict_merchants) is not bool)):
             return {"success": False, "error": "Érvénytelen árfigyelési beállítás."}
         value = {"enabled": enabled, "allow_gifts": allow_gifts,
+                 "restrict_merchants": bool(merchants) if restrict_merchants is None else restrict_merchants,
                  "merchants": sorted(set(item.strip() for item in merchants if item.strip()))}
         await self._run_blocking(self._write_file_atomically, self._price_settings_path,
                                  "price-preferences-", json.dumps(value, ensure_ascii=False))
         self._price_preferences = value
         return await self.get_price_preferences()
+
+    async def _load_price_merchants(self) -> None:
+        try:
+            value = json.loads(await self._run_blocking(lambda: self._price_merchants_path.read_text(encoding="utf-8")))
+            names = value.get("names", [])
+            if isinstance(names, list):
+                self._price_merchants = {name for name in names[:2000] if isinstance(name, str) and 0 < len(name) <= 80}
+            checked = value.get("checked_at", 0)
+            if type(checked) in (int, float) and 0 <= checked <= time.time():
+                self._price_merchants_checked_at = checked
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+
+    async def _save_price_merchants(self) -> None:
+        await self._run_blocking(self._write_file_atomically, self._price_merchants_path, "price-merchants-",
+            json.dumps({"names": sorted(self._price_merchants), "checked_at": self._price_merchants_checked_at}, ensure_ascii=False))
+
+    @staticmethod
+    def _aks_merchant_names(page: str) -> Set[str]:
+        names: Set[str] = set()
+        for attrs in re.findall(r'<a\b([^>]+)>', page, re.S):
+            if not re.search(r'class="[^"]*\bmerchant-card\b[^"]*"', attrs):
+                continue
+            match = re.search(r'aria-label="([^"]+)"', attrs)
+            if match:
+                name = html.unescape(match.group(1)).strip()
+                if 0 < len(name) <= 80:
+                    names.add(name)
+        if not names:
+            raise ValueError("Az AllKeyShop boltlistája nem olvasható.")
+        return names
+
+    async def get_price_merchants(self, refresh: Any = False) -> Dict[str, Any]:
+        error = ""
+        async with self._price_merchants_lock:
+            if refresh is True or time.time() - self._price_merchants_checked_at >= 86400:
+                try:
+                    page = await self._run_blocking(self._aks_read, "https://www.allkeyshop.com/blog/cdkey-store-reviews-aggregated/")
+                    self._price_merchants.update(self._aks_merchant_names(page))
+                    self._price_merchants_checked_at = time.time()
+                    await self._save_price_merchants()
+                except (OSError, ValueError) as exc:
+                    decky.logger.debug("AllKeyShop merchant list failed: %s", exc)
+                    error = "A boltlista frissítése sikertelen; a már ismert boltok megmaradtak."
+            names = {name.casefold(): name for name in self._price_merchants}
+            for name in self._price_preferences["merchants"]:
+                names.setdefault(name.casefold(), name)
+            return {"success": True, "merchants": sorted(names.values(), key=str.casefold),
+                    "checked_at": self._price_merchants_checked_at, "error": error}
 
     @staticmethod
     def _aks_title(value: str) -> str:
@@ -442,6 +500,7 @@ class Plugin:
         regions = {"STEAM GLOBAL": "Steam-kulcs · Global", "STEAM EU": "Steam-kulcs · EU",
                    "STEAM GIFT GLOBAL": "Steam Gift · Global", "STEAM GIFT EU": "Steam Gift · EU"}
         allowed = {value.casefold() for value in preferences["merchants"]}
+        restricted = preferences.get("restrict_merchants", bool(allowed))
         offers: List[Dict[str, Any]] = []
         for row in data["prices"]:
             if (not isinstance(row, dict) or row.get("account") is not False
@@ -456,7 +515,7 @@ class Plugin:
             region_name = region.get("filter_name")
             name = merchant.get("name")
             if (region_name not in regions or edition.get("name") != "Standard" or not isinstance(name, str)
-                    or not name or (allowed and name.casefold() not in allowed)
+                    or not name or (restricted and name.casefold() not in allowed)
                     or ("GIFT" in region_name and not preferences["allow_gifts"])):
                 continue
             price = row.get("priceCard")
@@ -504,10 +563,19 @@ class Plugin:
                 self._price_cache[normalized] = entry
             if "error" in entry:
                 return {"success": False, "error": entry["error"]}
+            async with self._price_merchants_lock:
+                discovered = {row["name"] for row in entry["data"]["merchants"].values()
+                              if isinstance(row, dict) and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 80}
+                if discovered - self._price_merchants:
+                    self._price_merchants.update(discovered)
+                    try:
+                        await self._save_price_merchants()
+                    except OSError as error:
+                        decky.logger.debug("AllKeyShop discovered merchants could not be saved: %s", error)
             offers = self._aks_filter(entry["data"], self._price_preferences)
             return {"success": True, "offers": offers[:3], "matched_offers": len(offers),
                     "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
-                    "currency": "EUR", "preferred_only": bool(self._price_preferences["merchants"])}
+                    "currency": "EUR", "preferred_only": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
 
 
     async def _load_cache(self) -> None:

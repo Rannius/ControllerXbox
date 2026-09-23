@@ -18,6 +18,33 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_aks_merchant_directory_preserves_selection_and_offline_cache(self):
+        page = '<a class="merchant-card " href="/review/eneba" aria-label="Eneba"></a><a class="merchant-card is-official" aria-label="A &amp; B"></a><a aria-label="Not a store"></a>'
+        with patch.object(self.plugin, "_aks_read", return_value=page) as fetch:
+            directory = await self.plugin.get_price_merchants()
+            await self.plugin.get_price_merchants()
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(directory["merchants"], ["A & B", "Eneba"])
+        await self.plugin.set_price_preferences(True, True, ["Eneba"], True)
+        self.plugin._price_merchants.add("New store")
+        self.assertEqual(self.plugin._price_preferences["merchants"], ["Eneba"])
+        restarted = self.plugin_type()
+        await restarted._load_price_merchants()
+        self.assertIn("Eneba", restarted._price_merchants)
+        with patch.object(restarted, "_aks_read", side_effect=OSError("offline")):
+            offline = await restarted.get_price_merchants(True)
+        self.assertIn("Eneba", offline["merchants"])
+        self.assertTrue(offline["error"])
+
+    async def test_aks_empty_selection_is_none_and_survives_restart(self):
+        await self.plugin.set_price_preferences(True, True, [], True)
+        restarted = self.plugin_type()
+        await restarted._load_price_preferences()
+        self.assertTrue((await restarted.get_price_preferences())["restrict_merchants"])
+        self.assertEqual(restarted._aks_filter(self.aks_fixture(), restarted._price_preferences), [])
+        # Existing releases' empty list retains its original all-shops meaning.
+        self.assertEqual(len(restarted._aks_filter(self.aks_fixture(), {"merchants": [], "allow_gifts": True})), 1)
+
     @staticmethod
     def aks_fixture():
         return {"merchants": {"1": {"name": "Eneba"}, "2": {"name": "GAMIVO"}},

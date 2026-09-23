@@ -2,7 +2,8 @@ const {test}=require('node:test'), assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm'),ts=require('typescript');
 function fixture() {
  const requests=[],scripts=[],exports={};
- const requireMock=name=>name==='@decky/api'?{callable:method=>id=>new Promise(resolve=>requests.push({method,id,resolve}))}:{};
+ const dock={};vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/storeBadgeDock.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports:dock});
+ const requireMock=name=>name==='./storeBadgeDock'?dock:name==='@decky/api'?{callable:method=>id=>new Promise(resolve=>requests.push({method,id,resolve}))}:{};
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/AllKeyShop.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.React}}).outputText,
   {exports,require:requireMock,setTimeout,clearTimeout,URL});
  const send=async s=>{scripts.push(s);};
