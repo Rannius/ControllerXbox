@@ -97,3 +97,7 @@ A Steam által ingyenesként jelölt játékokhoz nem indul AllKeyShop-keresés 
 ## 1.0.71 – Főoldali árlekérések kikapcsolása
 
 Az áruház főoldalának csempéin nem jelennek meg AllKeyShop-árak, és ezekhez nem indul árlekérés akkor sem, ha a csempeárak be vannak kapcsolva. A megnyitott játék adatlapján megmarad az árösszehasonlítás. Más áruházi oldalakon továbbra is a külön csempeár-kapcsoló érvényes.
+
+## 1.0.72 – Csempeárak kapcsolójának eltávolítása
+
+Az áruházi csempeárak kapcsolója megszűnt. A csempék sem a főoldalon, sem más listákban nem indítanak AllKeyShop-árlekérést, a korábban elmentett bekapcsolt beállítástól függetlenül. Az árösszehasonlítás a megnyitott játék adatlapján továbbra is elérhető.

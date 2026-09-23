@@ -1,47 +1,3 @@
-function allowsStoreTilePrices(url) {
-    try {
-        const parsed = new URL(url);
-        return parsed.protocol === "https:" && parsed.hostname === "store.steampowered.com"
-            && !/^\/(?:home\/?|index\.php)?$/.test(parsed.pathname);
-    }
-    catch {
-        return false;
-    }
-}
-// Shared detection for the request queue and rendering, including compact and featured cards.
-const storePriceTilesScript = `
-  function collectPriceTiles() {
-    if (!(${allowsStoreTilePrices.toString()})(location.href)) return [];
-    const found = new Map();
-    const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,[data-ds-appid]';
-    for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid]')) {
-      if (node.closest('#global_header,#store_header,.game_area_purchase,.game_area_purchase_game,#deck-play-badges-price,.dpb-tile-price,[data-ds-bundleid],[data-ds-packageid]')) continue;
-      const link = node.matches('a[href*="/app/"]') ? node : node.querySelector('a[href*="/app/"]');
-      const href = link?.getAttribute('href') || '';
-      let linkedId = '';
-      if (href) {
-        try { const url = new URL(href, location.href); if (url.hostname !== 'store.steampowered.com') continue; linkedId = url.pathname.match(/^\\/app\\/(\\d+)/)?.[1] || ''; } catch { continue; }
-      }
-      const raw = node.getAttribute('data-ds-appid') || '';
-      const id = linkedId || (/^\\d+$/.test(raw) ? raw : '');
-      if (!id || Number(id) <= 0) continue;
-      let host = link || node;
-      let rect = host.getBoundingClientRect();
-      if (rect.width < 80 || rect.height < 30) {
-        host = host.parentElement?.closest(cardSelector) || host.parentElement;
-        if (!host || host === document.body) continue;
-        rect = host.getBoundingClientRect();
-      }
-      if (found.has(host) || rect.width < 80 || rect.height < 30 || rect.width > Math.max(2000, innerWidth) || rect.height > 1000) continue;
-      if (rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= innerWidth || getComputedStyle(host).visibility === 'hidden') continue;
-      const visual = host.querySelector('img,picture,video,[style*="background-image"]') || getComputedStyle(host).backgroundImage !== 'none';
-      if (!visual && !host.matches(cardSelector) && !host.querySelector('[class*="Capsule"],[class*="capsule"],.tab_item_name,.title')) continue;
-      found.set(host, { host, id });
-    }
-    return Array.from(found.values()).filter(item => !Array.from(found.keys()).some(other => other !== item.host && item.host.contains(other)));
-  }
-`;
-
 function getHungarianBadgeHtml(source = "steam") {
     return source === "curator"
         ? HUNGARIAN_BADGE_HTML.replace('aria-label="Hivatalos magyar nyelvi támogatás"', 'aria-label="Magyar nyelv a Magyar Felirat kurátor szerint"')
@@ -250,6 +206,50 @@ function CatalogStatus() {
                 return SP_JSX.jsxs("div", { style: { marginBottom: "6px" }, children: [SP_JSX.jsxs("strong", { children: [name, ": ", provider.stale ? "korábbi / még nem ellenőrzött adatok" : "naprakész"] }), SP_JSX.jsxs("div", { children: ["Utols\u00F3 sikeres friss\u00EDt\u00E9s: ", provider.checked_at ? new Date(provider.checked_at * 1000).toLocaleString("hu-HU") : "még nem történt"] }), SP_JSX.jsxs("div", { children: [provider.entries, " j\u00E1t\u00E9k", provider.pending_removals > 0 ? ` · ${provider.pending_removals} eltűnés megerősítésre vár` : ""] }), provider.error && SP_JSX.jsx("div", { children: "Friss\u00EDt\u00E9si hiba; az utols\u00F3 j\u00F3 katal\u00F3gus marad \u00E9rv\u00E9nyben." })] }, key);
             })] });
 }
+
+function allowsStoreTilePrices(url) {
+    try {
+        const parsed = new URL(url);
+        return parsed.protocol === "https:" && parsed.hostname === "store.steampowered.com"
+            && !/^\/(?:home\/?|index\.php)?$/.test(parsed.pathname);
+    }
+    catch {
+        return false;
+    }
+}
+// Shared detection for the request queue and rendering, including compact and featured cards.
+const storePriceTilesScript = `
+  function collectPriceTiles() {
+    if (!(${allowsStoreTilePrices.toString()})(location.href)) return [];
+    const found = new Map();
+    const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,[data-ds-appid]';
+    for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid]')) {
+      if (node.closest('#global_header,#store_header,.game_area_purchase,.game_area_purchase_game,#deck-play-badges-price,.dpb-tile-price,[data-ds-bundleid],[data-ds-packageid]')) continue;
+      const link = node.matches('a[href*="/app/"]') ? node : node.querySelector('a[href*="/app/"]');
+      const href = link?.getAttribute('href') || '';
+      let linkedId = '';
+      if (href) {
+        try { const url = new URL(href, location.href); if (url.hostname !== 'store.steampowered.com') continue; linkedId = url.pathname.match(/^\\/app\\/(\\d+)/)?.[1] || ''; } catch { continue; }
+      }
+      const raw = node.getAttribute('data-ds-appid') || '';
+      const id = linkedId || (/^\\d+$/.test(raw) ? raw : '');
+      if (!id || Number(id) <= 0) continue;
+      let host = link || node;
+      let rect = host.getBoundingClientRect();
+      if (rect.width < 80 || rect.height < 30) {
+        host = host.parentElement?.closest(cardSelector) || host.parentElement;
+        if (!host || host === document.body) continue;
+        rect = host.getBoundingClientRect();
+      }
+      if (found.has(host) || rect.width < 80 || rect.height < 30 || rect.width > Math.max(2000, innerWidth) || rect.height > 1000) continue;
+      if (rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= innerWidth || getComputedStyle(host).visibility === 'hidden') continue;
+      const visual = host.querySelector('img,picture,video,[style*="background-image"]') || getComputedStyle(host).backgroundImage !== 'none';
+      if (!visual && !host.matches(cardSelector) && !host.querySelector('[class*="Capsule"],[class*="capsule"],.tab_item_name,.title')) continue;
+      found.set(host, { host, id });
+    }
+    return Array.from(found.values()).filter(item => !Array.from(found.keys()).some(other => other !== item.host && item.host.contains(other)));
+  }
+`;
 
 const getPreferences = callable("get_price_preferences");
 const setPreferences = callable("set_price_preferences");
@@ -901,7 +901,6 @@ const getUpdateNotification = callable("get_update_notification");
 const acknowledgeUpdateNotification = callable("acknowledge_update_notification");
 const applyUpdate = callable("apply_update");
 const restartPluginLoader = callable("restart_plugin_loader");
-const setTilePrices = callable("set_store_tile_prices");
 const setBadgeSides = callable("set_badge_sides");
 const setBadgeSizes = callable("set_badge_sizes");
 const getCuratorProgress = callable("get_hungarian_curator_progress");
@@ -1097,7 +1096,6 @@ async function loadBadgeVisibility() {
                 library_badge_percent: response.library_badge_percent ?? 100,
                 store_badge_percent: response.store_badge_percent ?? 100,
                 store_badge_sides: response.store_badge_sides,
-                show_store_tile_prices: response.show_store_tile_prices ?? false,
             });
             applyNotificationPreferences({
                 notify_gfn_additions: response.notify_gfn_additions ?? true,
@@ -1932,8 +1930,8 @@ function buildStoreScanScript() {
     return `
     (function() {
       const ids = new Set();
-      ${storePriceTilesScript}
-      const tileIds = new Set(collectPriceTiles().map(item => item.id));
+
+
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       if (pageMatch) ids.add(pageMatch[1]);
       const nodes = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
@@ -1952,7 +1950,7 @@ function buildStoreScanScript() {
       const watchActions = Array.isArray(window.__controllerXboxWatchActions)
         ? window.__controllerXboxWatchActions.splice(0, 20).map(String)
         : [];
-      return { url: location.href, appIds: Array.from(ids), tileIds: Array.from(tileIds), watchActions };
+      return { url: location.href, appIds: Array.from(ids), watchActions };
     })();
   `;
 }
@@ -2163,7 +2161,7 @@ async function scanStorePage() {
         return;
     try {
         const result = await sendStoreRuntime(buildStoreScanScript(), true);
-        updatePriceView(result?.url ?? "", sendStoreRuntime, badgeVisibility.show_store_tile_prices ? result?.tileIds ?? [] : []);
+        updatePriceView(result?.url ?? "", sendStoreRuntime);
         const nextIds = new Set((Array.isArray(result?.appIds) ? result.appIds : [])
             .map((value) => String(value))
             .filter((value) => /^\d+$/.test(value) && Number(value) > 0));
@@ -2647,7 +2645,6 @@ function Content() {
                     library_badge_percent: detail.library_badge_percent ?? current.library_badge_percent,
                     store_badge_percent: detail.store_badge_percent ?? current.store_badge_percent,
                     store_badge_sides: detail.store_badge_sides ?? current.store_badge_sides,
-                    show_store_tile_prices: detail.show_store_tile_prices ?? current.show_store_tile_prices,
                 }));
             }
             if (typeof detail.notify_gfn_additions === "boolean" ||
@@ -2694,7 +2691,6 @@ function Content() {
                 library_badge_percent: response.library_badge_percent ?? 100,
                 store_badge_percent: response.store_badge_percent ?? 100,
                 store_badge_sides: response.store_badge_sides,
-                show_store_tile_prices: response.show_store_tile_prices ?? false,
             });
         }
         catch (error) {
@@ -2943,22 +2939,7 @@ function Content() {
                             finally {
                                 setSettingsWorking(false);
                             }
-                        } }) }, key)), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi csemp\u00E9k alatt", description: "K\u00FCl\u00F6n enged\u00E9lyezhet\u0151, az \u00E1ruh\u00E1z f\u0151oldal\u00E1n nem akt\u00EDv. M\u00E1s \u00E1ruh\u00E1zi oldalakon csak a l\u00E1that\u00F3 csemp\u00E9khez k\u00E9r \u00E1rat, egym\u00E1s ut\u00E1n. Az AllKeyShop \u00E1raknak is bekapcsolva kell lenni\u00FCk.", checked: visibility.show_store_tile_prices ?? false, disabled: settingsWorking, onChange: async (enabled) => {
-                            setSettingsWorking(true);
-                            try {
-                                const response = await withBackendTimeout(setTilePrices(enabled));
-                                if (!response.success)
-                                    throw new Error(response.error || 'Mentési hiba');
-                                applyBadgeVisibility({ ...badgeVisibility, show_store_tile_prices: response.show_store_tile_prices });
-                                scheduleStoreScan(0);
-                            }
-                            catch (error) {
-                                toaster.toast({ title: 'Beállítási hiba', body: errorMessage(error) });
-                            }
-                            finally {
-                                setSettingsWorking(false);
-                            }
-                        } }) }), SP_JSX.jsx(AllKeyShopSettings, { openMerchants: () => openPage("shops") }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
+                        } }) }, key)), SP_JSX.jsx(AllKeyShopSettings, { openMerchants: () => openPage("shops") }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
     const refreshWatchedClouds = async () => {
         setCloudRefreshing(true);
         setCloudRefreshStatus("A GFN és Boosteroid katalógusának letöltése…");

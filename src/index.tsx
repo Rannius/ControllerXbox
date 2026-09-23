@@ -1,4 +1,3 @@
-import { storePriceTilesScript } from "./storePriceTiles";
 import { getHungarianBadgeHtml, HungarianSource } from "./hungarianBadge";
 import { CloudResumeRefresh } from "./cloudResumeRefresh";
 import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
@@ -83,7 +82,6 @@ type UpdateNotificationResponse = {
   error?: string;
 };
 type BadgeVisibility = {
-  show_store_tile_prices?: boolean;
   store_badge_sides?: Record<string, "left" | "right">;
   library_badge_percent?: number;
   store_badge_percent?: number;
@@ -199,7 +197,6 @@ const acknowledgeUpdateNotification = callable<
 >("acknowledge_update_notification");
 const applyUpdate = callable<[expectedVersion: string], UpdateApplyResponse>("apply_update");
 const restartPluginLoader = callable<[], { success: boolean }>("restart_plugin_loader");
-const setTilePrices = callable<[enabled: boolean], SettingsResponse>("set_store_tile_prices");
 const setBadgeSides = callable<[sides: Record<string, "left" | "right">], SettingsResponse>("set_badge_sides");
 const setBadgeSizes = callable<[library: number, store: number], SettingsResponse>("set_badge_sizes");
 const getCuratorProgress = callable<[], CuratorProgress>("get_hungarian_curator_progress");
@@ -408,7 +405,6 @@ async function loadBadgeVisibility(): Promise<void> {
         library_badge_percent: response.library_badge_percent ?? 100,
         store_badge_percent: response.store_badge_percent ?? 100,
         store_badge_sides: response.store_badge_sides,
-        show_store_tile_prices: response.show_store_tile_prices ?? false,
       });
       applyNotificationPreferences({
         notify_gfn_additions: response.notify_gfn_additions ?? true,
@@ -1273,8 +1269,8 @@ function buildStoreScanScript(): string {
   return `
     (function() {
       const ids = new Set();
-      ${storePriceTilesScript}
-      const tileIds = new Set(collectPriceTiles().map(item => item.id));
+
+
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       if (pageMatch) ids.add(pageMatch[1]);
       const nodes = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
@@ -1293,7 +1289,7 @@ function buildStoreScanScript(): string {
       const watchActions = Array.isArray(window.__controllerXboxWatchActions)
         ? window.__controllerXboxWatchActions.splice(0, 20).map(String)
         : [];
-      return { url: location.href, appIds: Array.from(ids), tileIds: Array.from(tileIds), watchActions };
+      return { url: location.href, appIds: Array.from(ids), watchActions };
     })();
   `;
 }
@@ -1508,7 +1504,7 @@ async function scanStorePage(): Promise<void> {
   if (!storeMounted || !storeWebSocketReady) return;
   try {
     const result = await sendStoreRuntime(buildStoreScanScript(), true) as StorePageScan | undefined;
-    updatePriceView(result?.url ?? "", sendStoreRuntime, badgeVisibility.show_store_tile_prices ? result?.tileIds ?? [] : []);
+    updatePriceView(result?.url ?? "", sendStoreRuntime);
     const nextIds = new Set(
       (Array.isArray(result?.appIds) ? result.appIds : [])
         .map((value) => String(value))
@@ -1915,7 +1911,6 @@ function Content() {
           library_badge_percent: detail.library_badge_percent ?? current.library_badge_percent,
           store_badge_percent: detail.store_badge_percent ?? current.store_badge_percent,
           store_badge_sides: detail.store_badge_sides ?? current.store_badge_sides,
-          show_store_tile_prices: detail.show_store_tile_prices ?? current.show_store_tile_prices,
         }));
       }
       if (
@@ -1967,7 +1962,6 @@ function Content() {
         library_badge_percent: response.library_badge_percent ?? 100,
         store_badge_percent: response.store_badge_percent ?? 100,
         store_badge_sides: response.store_badge_sides,
-        show_store_tile_prices: response.show_store_tile_prices ?? false,
       });
     } catch (error) {
       setVisibility(previous);
@@ -2235,19 +2229,6 @@ function Content() {
           } catch (error) { toaster.toast({ title: 'Beállítási hiba', body: errorMessage(error) }); }
           finally { setSettingsWorking(false); }
         }} /></PanelSectionRow>)}
-    <PanelSectionRow><ToggleField label="Árak az áruházi csempék alatt"
-      description="Külön engedélyezhető, az áruház főoldalán nem aktív. Más áruházi oldalakon csak a látható csempékhez kér árat, egymás után. Az AllKeyShop áraknak is bekapcsolva kell lenniük."
-      checked={visibility.show_store_tile_prices ?? false} disabled={settingsWorking}
-      onChange={async enabled => {
-        setSettingsWorking(true);
-        try {
-          const response = await withBackendTimeout(setTilePrices(enabled));
-          if (!response.success) throw new Error(response.error || 'Mentési hiba');
-          applyBadgeVisibility({ ...badgeVisibility, show_store_tile_prices: response.show_store_tile_prices });
-          scheduleStoreScan(0);
-        } catch (error) { toaster.toast({ title: 'Beállítási hiba', body: errorMessage(error) }); }
-        finally { setSettingsWorking(false); }
-      }} /></PanelSectionRow>
     <AllKeyShopSettings openMerchants={() => openPage("shops")} />
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Értesítések</div></PanelSectionRow>
     <PanelSectionRow><ToggleField
