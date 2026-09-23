@@ -294,7 +294,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 15 } as PriceResult)).then(value => {
     if (requestRevision !== revision) return;
     if (value.global_error) {
-      const expires = Date.now() + Math.max(1, Math.min(60, value.retry_after ?? 15)) * 1000;
+      const expires = Date.now() + Math.max(1, Math.min(300, value.retry_after ?? 15)) * 1000;
       serviceFailure = { value: { ...value, retry_at: expires }, expires };
       if (currentApp) void send(buildPricePanelScript(currentApp, visiblePrice(currentApp) ?? value)).catch(() => {});
       if (tileIds.length) renderTiles();
@@ -304,7 +304,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     refreshQueue.delete(requestId);
     if (prices.size >= 500) prices.delete(prices.keys().next().value!);
     const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-    const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(60, value.retry_after ?? 30)) * 1000);
+    const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(300, value.retry_after ?? 30)) * 1000);
     if (!value.success) value = { ...value, retry_at: expires };
     prices.set(requestId, { value, expires });
     if (currentApp === requestId) void send(buildPricePanelScript(requestId, value)).catch(() => {});

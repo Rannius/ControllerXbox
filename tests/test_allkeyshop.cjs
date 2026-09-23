@@ -103,3 +103,16 @@ test('store homepage never queues tile prices, including navigation from search'
  assert.equal(f.requests.length,2);assert.equal(f.requests[1].id,'30');
  f.requests[1].resolve({success:true,offers:[]});await f.drain();
 });
+
+test('backend cooldown above one minute is respected without premature retries',async()=>{
+ const f=fixture(), url='https://store.steampowered.com/app/10/';
+ f.api.updatePriceView(url,f.send);
+ f.requests[0].resolve({success:false,error_code:'connection',global_error:true,retry_after:240});await f.drain();
+ f.clock.now+=61000;f.api.updatePriceView(url,f.send);
+ assert.equal(f.requests.length,1);
+ const script=f.scripts.at(-1);
+ assert.ok(script.includes(String(f.clock.now+179000)));
+ f.clock.now+=180000;f.api.updatePriceView(url,f.send);
+ assert.equal(f.requests.length,2);
+ f.requests[1].resolve({success:true,offers:[]});await f.drain();
+});

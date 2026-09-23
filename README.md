@@ -105,3 +105,11 @@ Az áruházi csempeárak kapcsolója megszűnt. A csempék sem a főoldalon, sem
 ## 1.0.73 – Hosszabb árlekérési várakozás
 
 Az AllKeyShop hálózati kéréseinek időkorlátja 12-ről 30 másodpercre nőtt. A felület 60 helyett 120 másodpercet vár a teljes műveletre. A kérések közötti 5 másodperces szünet, a 30 perces gyorsítótár és a kizárólag a játék adatlapján történő árlekérés változatlan.
+
+## 1.0.80 – Kevesebb árlekérés, pontos várakozás
+
+A már azonosított AllKeyShop-adatlap címét a plugin legfeljebb 24 óráig megjegyzi a memóriában. Az ár 30 perc utáni, láthatósághoz kötött frissítése így új keresés nélkül történhet. A Steam ingyenességi és megjelenési állapotát továbbra is ellenőrzi. Megváltozott játéknév, lejárt cím vagy 404/410 válasz esetén a korábbi azonosítás nem marad érvényben.
+
+A hálózati hibát nem követi a folyamaton belül újabb rejtett kérés: az újrapróbálkozás a látható visszaszámláláshoz igazodik. A 30 másodperces AKS-időkorlát, 120 másodperces felületi várakozás és a kérések közötti 5 másodperc megmarad. A visszaszámláló most a backend legfeljebb 300 másodperces várakozását is helyesen kezeli.
+
+Az azonnal mentő kapcsoló és az egyetlen legolcsóbb megfelelő ajánlat megjelenítése megmaradt. Az első, még ismeretlen játék lekéréséhez továbbra is szükséges a Steam-adat, az AKS-keresés és az ajánlatoldal.

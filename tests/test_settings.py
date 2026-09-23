@@ -18,6 +18,47 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    def test_aks_timeout_does_not_hide_another_thirty_second_attempt(self):
+        with patch.object(self.plugin, "_open_request", side_effect=TimeoutError("slow")) as fetch, patch("time.sleep") as sleep:
+            with self.assertRaises(TimeoutError):
+                self.plugin._aks_read("https://www.allkeyshop.com/blog/")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch.call_args.kwargs["timeout"], 30)
+        sleep.assert_not_called()
+
+    def test_known_aks_page_skips_search_but_rechecks_free_status(self):
+        body = {"10": {"success": True, "data": {"name": "Example", "is_free": False,
+                "release_date": {"coming_soon": False}}}}
+        page_url = "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/"
+        search = json.dumps({"resultsGames": '<li data-platforms="pc"><h2 class="ls-results-row-game-title">Example</h2><a href="' + page_url + '">Example</a></li>'})
+        def response(url):
+            return search if "admin-ajax.php" in url else '"currency":"eur"'
+        with patch.object(self.plugin, "_open_request", side_effect=lambda *a, **kw: io.StringIO(json.dumps(body))) as steam, patch.object(self.plugin, "_aks_read", side_effect=response) as aks, patch.object(self.plugin, "_aks_parse", return_value=self.aks_fixture()):
+            first = self.plugin._fetch_aks_game("10")
+            self.assertEqual(aks.call_count, 2)
+            aks.reset_mock()
+            self.assertEqual(self.plugin._fetch_aks_game("10")["url"], first["url"])
+            aks.assert_called_once_with(page_url + "?currency=eur")
+            aks.reset_mock()
+            self.plugin._aks_matches["10"]["checked_at"] -= 86401
+            self.plugin._fetch_aks_game("10")
+            self.assertEqual(aks.call_count, 2)
+            aks.reset_mock()
+            body["10"]["data"]["is_free"] = True
+            self.assertEqual(self.plugin._fetch_aks_game("10")["skipped"], "free")
+            aks.assert_not_called()
+            self.assertEqual(steam.call_count, 4)
+
+    def test_missing_known_aks_page_is_forgotten(self):
+        url = "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/"
+        self.plugin._aks_matches["10"] = {"title": "Example", "url": url, "checked_at": time.time()}
+        body = {"10": {"success": True, "data": {"name": "Example", "release_date": {"coming_soon": False}}}}
+        with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(body))), patch.object(self.plugin, "_aks_read", side_effect=urllib.error.HTTPError(url, 404, "missing", {}, None)) as aks:
+            with self.assertRaises(urllib.error.HTTPError):
+                self.plugin._fetch_aks_game("10")
+        self.assertNotIn("10", self.plugin._aks_matches)
+        self.assertEqual(aks.call_count, 1)
+
     def test_aks_requests_have_a_shared_five_second_gap(self):
         class Response(io.BytesIO):
             def geturl(self):

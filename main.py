@@ -159,6 +159,7 @@ class Plugin:
         self._price_merchants_checked_at = 0.0
         self._price_merchants_lock = asyncio.Lock()
         self._price_cache: Dict[str, Dict[str, Any]] = {}
+        self._aks_matches: Dict[str, Dict[str, Any]] = {}
         self._price_lock = asyncio.Lock()
         self._aks_request_lock = threading.Lock()
         self._aks_next_request_at = 0.0
@@ -470,31 +471,20 @@ class Plugin:
                                                         "Accept-Encoding": "identity", "Accept": "text/html,application/json"})
         # Executed only in the blocking worker: one global AKS request at a time,
         # including search, offer pages and merchant-directory refreshes.
-        # Retry once on transient connection/timeout errors (not HTTP errors)
-        # to absorb brief network hiccups without escalating to a global pause.
         with self._aks_request_lock:
             wait = max(0.0, self._aks_next_request_at - time.monotonic())
             if wait:
                 time.sleep(wait)
-            last_error: Optional[Exception] = None
-            for attempt in range(2):
-                try:
-                    with self._open_request(request, timeout=30) as response:
-                        if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
-                            raise ValueError("Unexpected AllKeyShop redirect")
-                        body = response.read(4000001)
-                    if len(body) > 4000000:
-                        raise ValueError("AllKeyShop page is too large")
-                    return body.decode("utf-8")
-                except urllib.error.HTTPError:
-                    raise  # Never retry HTTP errors (429 rate limit, etc.)
-                except (urllib.error.URLError, OSError) as error:
-                    last_error = error
-                    if attempt == 0:
-                        time.sleep(3)
-                finally:
-                    self._aks_next_request_at = time.monotonic() + 5.0
-            raise last_error  # type: ignore[misc]
+            try:
+                with self._open_request(request, timeout=30) as response:
+                    if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
+                        raise ValueError("Unexpected AllKeyShop redirect")
+                    body = response.read(4000001)
+                if len(body) > 4000000:
+                    raise ValueError("AllKeyShop page is too large")
+                return body.decode("utf-8")
+            finally:
+                self._aks_next_request_at = time.monotonic() + 5.0
 
     @classmethod
     def _aks_search_match(cls, fragment: str, title: str) -> str:
@@ -557,26 +547,13 @@ class Plugin:
     def _fetch_aks_game(self, app_id: str) -> Dict[str, Any]:
         request = urllib.request.Request(STORE_URL.format(app_id=app_id),
                                          headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"})
-        # Retry once on transient connection errors; do not retry HTTP or parse errors.
-        last_steam_error: Optional[Exception] = None
-        for attempt in range(2):
-            try:
-                with self._open_request(request, timeout=10) as response:
-                    payload = json.load(response)
-                item = payload.get(app_id, {})
-                metadata = item.get("data", {}) if item.get("success") else {}
-                last_steam_error = None
-                break
-            except urllib.error.HTTPError as error:
-                raise ValueError("A Steam-játék neve most nem kérdezhető le.") from error
-            except (OSError, urllib.error.URLError) as error:
-                last_steam_error = error
-                if attempt == 0:
-                    time.sleep(2)
-            except (ValueError, TypeError, AttributeError) as error:
-                raise ValueError("A Steam-játék neve most nem kérdezhető le.") from error
-        if last_steam_error is not None:
-            raise ValueError("A Steam-játék neve most nem kérdezhető le.") from last_steam_error
+        try:
+            with self._open_request(request, timeout=10) as response:
+                payload = json.load(response)
+            item = payload.get(app_id, {})
+            metadata = item.get("data", {}) if item.get("success") else {}
+        except (OSError, ValueError, TypeError, AttributeError) as error:
+            raise ValueError("A Steam-játék neve most nem kérdezhető le.") from error
         if not isinstance(metadata, dict):
             raise ValueError("A Steam-játék neve most nem kérdezhető le.")
         title = str(metadata.get("name", "")).strip()[:200]
@@ -590,14 +567,30 @@ class Plugin:
         if coming_soon is not False:
             return {"title": title, "skipped": "unreleased" if coming_soon is True else "release_unknown",
                     "checked_at": time.time()}
-        query = urllib.parse.urlencode({"action": "quicksearch", "search_name": title, "currency": "eur",
-                                        "locale": "en", "platform": "pc", "activation_country": "HU"})
-        search = json.loads(self._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?" + query))
-        fragment = search.get("resultsGames", search.get("results", "")) if isinstance(search, dict) else ""
-        if not isinstance(fragment, str):
-            raise ValueError("Az AllKeyShop keresője nem válaszolt megfelelően.")
-        url = self._aks_search_match(fragment, title)
-        page = self._aks_read(url + "?currency=eur")
+        # Reuse a verified match, but always recheck Steam's free/release flags above.
+        match = self._aks_matches.get(app_id)
+        if match and (match["title"] != title or time.time() - match["checked_at"] >= 86400):
+            self._aks_matches.pop(app_id, None)
+            match = None
+        if match:
+            url = match["url"]
+        else:
+            query = urllib.parse.urlencode({"action": "quicksearch", "search_name": title, "currency": "eur",
+                                            "locale": "en", "platform": "pc", "activation_country": "HU"})
+            search = json.loads(self._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?" + query))
+            fragment = search.get("resultsGames", search.get("results", "")) if isinstance(search, dict) else ""
+            if not isinstance(fragment, str):
+                raise ValueError("Az AllKeyShop keresője nem válaszolt megfelelően.")
+            url = self._aks_search_match(fragment, title)
+            if len(self._aks_matches) >= 500:
+                self._aks_matches.pop(next(iter(self._aks_matches)))
+            self._aks_matches[app_id] = {"title": title, "url": url, "checked_at": time.time()}
+        try:
+            page = self._aks_read(url + "?currency=eur")
+        except urllib.error.HTTPError as error:
+            if error.code in (404, 410):
+                self._aks_matches.pop(app_id, None)
+            raise
         currency = re.search(r'"currency"\s*:\s*"([a-zA-Z]+)"', page)
         if not currency or currency.group(1).lower() != "eur":
             raise ValueError("Az AllKeyShop pénzneme nem ellenőrizhető.")
@@ -657,7 +650,7 @@ class Plugin:
                         # Equal jitter exponential backoff (AWS/Google best practice).
                         # Base 10 s, cap 300 s, with 50-100 % randomised jitter to
                         # prevent synchronised retry storms across instances.
-                        raw = min(300, 10 * (2 ** (self._price_service_failures - 1)))
+                        raw = min(300, 10 * (2 ** min(5, self._price_service_failures - 1)))
                         delay = raw // 2 + random.uniform(0, raw / 2)
                         self._price_service_retry_at = time.time() + delay
                         self._price_service_error = details

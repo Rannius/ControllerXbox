@@ -282,7 +282,29 @@ function AllKeyShopSettings({ openMerchants }) {
             setMessage(String(error)); });
         return () => { active = false; };
     }, []);
-    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "AllKeyShop \u00E1rak" }) }), prefs && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi j\u00E1t\u00E9koldalon", checked: prefs.enabled, disabled: busy, onChange: enabled => setPrefs({ ...prefs, enabled }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Steam Gift is megengedett", checked: prefs.allow_gifts, disabled: busy, onChange: allow_gifts => setPrefs({ ...prefs, allow_gifts }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: openMerchants, children: "Megb\u00EDzhat\u00F3 boltok kiv\u00E1laszt\u00E1sa" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "AllKeyShop \u00E1rak" }) }), prefs && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi j\u00E1t\u00E9koldalon", checked: prefs.enabled, disabled: busy, onChange: async (enabled) => {
+                                const updated = { ...prefs, enabled };
+                                setPrefs(updated);
+                                setBusy(true);
+                                setMessage("");
+                                try {
+                                    const current = await timed(getPreferences());
+                                    if (!current.success)
+                                        throw new Error(current.error || "Betöltési hiba");
+                                    const value = await timed(setPreferences(enabled, updated.allow_gifts, current.merchants, current.restrict_merchants));
+                                    if (!value.success)
+                                        throw new Error(value.error || "Mentési hiba");
+                                    setPrefs(value);
+                                    resetPriceView();
+                                    setMessage(enabled ? "Árlekérés bekapcsolva." : "Árlekérés kikapcsolva.");
+                                }
+                                catch (error) {
+                                    setMessage(String(error));
+                                }
+                                finally {
+                                    setBusy(false);
+                                }
+                            } }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Steam Gift is megengedett", checked: prefs.allow_gifts, disabled: busy, onChange: allow_gifts => setPrefs({ ...prefs, allow_gifts }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: openMerchants, children: "Megb\u00EDzhat\u00F3 boltok kiv\u00E1laszt\u00E1sa" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
                                 setBusy(true);
                                 setMessage("");
                                 try {
@@ -524,8 +546,10 @@ function updatePriceView(url, send, visibleTileIds = []) {
     const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
     for (const app of nextVisible) {
         const entry = prices.get(app);
+        // A currentApp mindig bekerül; csempékre max. 4 elem sorban, hogy ne okozzunk rate-limitet
         if ((!visibleApps.has(app) || (app === id && id !== previousApp)) && (!entry || entry.expires <= Date.now()))
-            refreshQueue.add(app);
+            if (app === id || refreshQueue.size < 4)
+                refreshQueue.add(app);
     }
     for (const app of refreshQueue)
         if (!nextVisible.has(app))
@@ -554,7 +578,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
         if (requestRevision !== revision)
             return;
         if (value.global_error) {
-            const expires = Date.now() + Math.max(1, Math.min(60, value.retry_after ?? 15)) * 1000;
+            const expires = Date.now() + Math.max(1, Math.min(300, value.retry_after ?? 15)) * 1000;
             serviceFailure = { value: { ...value, retry_at: expires }, expires };
             if (currentApp)
                 void send(buildPricePanelScript(currentApp, visiblePrice(currentApp) ?? value)).catch(() => { });
@@ -567,7 +591,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
         if (prices.size >= 500)
             prices.delete(prices.keys().next().value);
         const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-        const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(60, value.retry_after ?? 30)) * 1000);
+        const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(300, value.retry_after ?? 30)) * 1000);
         if (!value.success)
             value = { ...value, retry_at: expires };
         prices.set(requestId, { value, expires });
