@@ -207,14 +207,16 @@ function CatalogStatus() {
             })] });
 }
 
-// Shared by the icon and price renderers; neither owns the other's children.
+// Two independent rows shared by the icon and price renderers.
 const storeBadgeDockScript = `
-  let dock = document.getElementById('deck-play-badges-dock');
-  if (!dock) {
-    dock = document.createElement('div'); dock.id = 'deck-play-badges-dock';
-    document.body.appendChild(dock);
+  const docks = {};
+  for (const side of ['left', 'right']) {
+    const id = 'deck-play-badges-dock' + (side === 'right' ? '-right' : '');
+    let row = document.getElementById(id);
+    if (!row) { row = document.createElement('div'); row.id = id; document.body.appendChild(row); }
+    row.style.cssText = 'position:fixed;' + side + ':20px;bottom:20px;z-index:999999;display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:calc(50vw - 40px);pointer-events:none;justify-content:' + (side === 'right' ? 'flex-end' : 'flex-start');
+    docks[side] = row;
   }
-  dock.style.cssText = 'position:fixed;left:20px;bottom:20px;z-index:999999;display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:calc(100vw - 40px);pointer-events:none';
   const protonMarkers = document.querySelectorAll('.protondb-decky-indicator-container,[data-pp-game-badge],a[href*="protondb.com/app/"]');
   for (const marker of protonMarkers) {
     let anchor = marker;
@@ -222,16 +224,15 @@ const storeBadgeDockScript = `
     if (!anchor || anchor === document.body) continue;
     let rect = anchor.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0 && rect.width < 250 && rect.top > innerHeight / 2) {
-      if (rect.left >= innerWidth / 2) {
-        const saved = window.__dpbProtonPositions = window.__dpbProtonPositions || new Map();
-        if (!saved.has(anchor)) saved.set(anchor, ['left', 'right'].map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
-        anchor.style.setProperty('left', '20px', 'important');
-        anchor.style.setProperty('right', 'auto', 'important');
-        rect = anchor.getBoundingClientRect();
-      }
-      dock.style.left = (rect.right + 8) + 'px';
-      dock.style.bottom = Math.max(8, innerHeight - rect.bottom) + 'px';
-      dock.style.maxWidth = Math.max(120, innerWidth - rect.right - 28) + 'px';
+      const side = window.__dpbSides?.proton || 'right';
+      const saved = window.__dpbProtonPositions = window.__dpbProtonPositions || new Map();
+      if (!saved.has(anchor)) saved.set(anchor, ['left', 'right'].map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
+      anchor.style.setProperty(side, '20px', 'important');
+      anchor.style.setProperty(side === 'left' ? 'right' : 'left', 'auto', 'important');
+      rect = anchor.getBoundingClientRect();
+      docks[side].style[side] = (rect.width + 28) + 'px';
+      docks[side].style.bottom = Math.max(8, innerHeight - rect.bottom) + 'px';
+      docks[side].style.maxWidth = Math.max(40, innerWidth / 2 - rect.width - 48) + 'px';
       break;
     }
   }
@@ -243,7 +244,9 @@ const storeBadgeDockCleanupScript = `
     }
   }
   delete window.__dpbProtonPositions;
+  delete window.__dpbSides;
   document.getElementById('deck-play-badges-dock')?.remove();
+  document.getElementById('deck-play-badges-dock-right')?.remove();
 `;
 
 const getPreferences = callable("get_price_preferences");
@@ -297,7 +300,7 @@ function AllKeyShopSettings({ openMerchants }) {
                                 finally {
                                     setBusy(false);
                                 }
-                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Csak a megnyitott játékhoz kér le árat; 15 percig tárolja." }) })] });
+                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Alapból a megnyitott játékhoz, külön engedéllyel a látható áruházi csempékhez is kér árat; 15 percig tárolja." }) })] });
 }
 function AllKeyShopMerchants({ onBack }) {
     const [names, setNames] = SP_REACT.useState([]);
@@ -385,7 +388,8 @@ function buildPricePanelScript(appId, result) {
     if (pageId !== appId) return;
     if (data?.disabled) { panel?.remove(); return; }
     ${storeBadgeDockScript}
-    const host = dock;
+    const side = window.__dpbSides?.price || 'left';
+    const host = docks[side];
     const key = appId + ':' + JSON.stringify(data);
     if (panel?.dataset.state === key && panel.parentElement === host) return;
     const wasOpen = panel?.open === true;
@@ -399,7 +403,9 @@ function buildPricePanelScript(appId, result) {
     panel.appendChild(summary);
     const content = document.createElement('div');
     content.style.cssText = 'position:absolute;bottom:calc(100% + 8px);left:0;box-sizing:border-box;width:340px;max-width:calc(100vw - 40px);max-height:60vh;overflow:auto;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;box-shadow:0 2px 12px #000';
-    content.style.maxWidth = 'calc(100vw - ' + (parseFloat(dock.style.left) + 20) + 'px)';
+    content.style.left = side === 'left' ? '0' : 'auto';
+    content.style.right = side === 'right' ? '0' : 'auto';
+    content.style.maxWidth = 'calc(100vw - ' + (parseFloat(host.style[side]) + 20) + 'px)';
     panel.appendChild(content);
     const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
     line('AllKeyShop · Steam-kulcs / Gift', true);
@@ -424,12 +430,50 @@ function buildPricePanelScript(appId, result) {
     host.appendChild(panel);
   })();`;
 }
+// Tile rows reserve their own space; remove our changes when disabled or recycled.
+const tilePriceCleanupScript = `
+  for (const [host, original] of window.__dpbPriceTiles || []) {
+    host.querySelector(':scope > .dpb-tile-price')?.remove();
+    for (const [key, value, priority] of original) {
+      if (value) host.style.setProperty(key, value, priority); else host.style.removeProperty(key);
+    }
+  }
+  delete window.__dpbPriceTiles;
+`;
+function buildTilePricesScript(url, values) {
+    return `(() => {
+    if (location.href !== ${JSON.stringify(url).replace(/</g, "\\u003c")}) return;
+    ${tilePriceCleanupScript}
+    const values = ${JSON.stringify(values).replace(/</g, "\\u003c")};
+    const saved = window.__dpbPriceTiles = new Map();
+    for (const host of document.querySelectorAll('a[href*="/app/"]')) {
+      const id = host.getAttribute('href')?.match(/\\/app\\/(\\d+)/)?.[1];
+      if (!id || !(id in values) || values[id]?.disabled || !host.querySelector('img') || host.closest('#global_header, #store_header')) continue;
+      const rect = host.getBoundingClientRect();
+      if (rect.width < 90 || rect.width > 700 || rect.height < 60 || rect.height > 900 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= innerWidth) continue;
+      saved.set(host, ['position', 'padding-bottom', 'box-sizing', 'overflow'].map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
+      const oldPadding = parseFloat(getComputedStyle(host).paddingBottom) || 0;
+      if (getComputedStyle(host).position === 'static') host.style.setProperty('position', 'relative');
+      host.style.setProperty('padding-bottom', (oldPadding + 26) + 'px', 'important');
+      host.style.setProperty('box-sizing', 'content-box', 'important');
+      host.style.setProperty('overflow', 'visible', 'important');
+      const value = values[id], offer = value?.offers?.[0];
+      const row = document.createElement('span'); row.className = 'dpb-tile-price';
+      row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
+      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: nem elérhető' : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
+      row.title = row.textContent;
+      host.appendChild(row);
+    }
+  })();`;
+}
 const prices = new Map();
 let fetching = false;
 let revision = 0;
 let currentApp = "";
-function resetPriceView() { prices.clear(); revision++; currentApp = ""; }
-function updatePriceView(url, send) {
+let tileUrl = "";
+let tileIds = [];
+function resetPriceView() { prices.clear(); revision++; currentApp = ""; tileIds = []; tileUrl = ""; }
+function updatePriceView(url, send, visibleTileIds = []) {
     let id = "";
     try {
         const parsed = new URL(url);
@@ -438,20 +482,32 @@ function updatePriceView(url, send) {
     }
     catch { /* no game */ }
     currentApp = id;
+    tileUrl = url;
+    tileIds = /^https:\/\/store\.steampowered\.com\//.test(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))).slice(0, 40) : [];
+    const renderTiles = () => {
+        const values = {};
+        for (const tile of tileIds)
+            values[tile] = prices.get(tile)?.value ?? null;
+        void send(buildTilePricesScript(tileUrl, values)).catch(() => { });
+    };
+    renderTiles();
     const cached = prices.get(id);
     void send(buildPricePanelScript(id, cached?.value)).catch(() => { });
-    if (!id || fetching || (cached && cached.expires > Date.now()))
+    const requestId = id && (!cached || cached.expires <= Date.now()) ? id : tileIds.find(tile => !prices.has(tile) || prices.get(tile).expires <= Date.now());
+    if (!requestId || fetching)
         return;
     fetching = true;
     const requestRevision = revision;
-    void timed(getPrice(id)).catch(error => ({ success: false, error: String(error) })).then(value => {
+    void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error) })).then(value => {
         if (requestRevision !== revision)
             return;
         if (prices.size >= 100)
             prices.delete(prices.keys().next().value);
-        prices.set(id, { value, expires: Date.now() + (value.success && !value.disabled ? 900000 : 60000) });
-        if (currentApp === id)
-            void send(buildPricePanelScript(id, value)).catch(() => { });
+        prices.set(requestId, { value, expires: Date.now() + (value.success && !value.disabled ? 900000 : 60000) });
+        if (currentApp === requestId)
+            void send(buildPricePanelScript(requestId, value)).catch(() => { });
+        if (tileIds.length)
+            renderTiles();
     }).finally(() => { fetching = false; });
 }
 
@@ -736,6 +792,8 @@ const getUpdateNotification = callable("get_update_notification");
 const acknowledgeUpdateNotification = callable("acknowledge_update_notification");
 const applyUpdate = callable("apply_update");
 const restartPluginLoader = callable("restart_plugin_loader");
+const setTilePrices = callable("set_store_tile_prices");
+const setBadgeSides = callable("set_badge_sides");
 const setBadgeSizes = callable("set_badge_sizes");
 const getCuratorProgress = callable("get_hungarian_curator_progress");
 const loadCuratorProgress = () => withBackendTimeout(getCuratorProgress());
@@ -929,6 +987,8 @@ async function loadBadgeVisibility() {
                 show_hungarian_badges: response.show_hungarian_badges ?? true,
                 library_badge_percent: response.library_badge_percent ?? 100,
                 store_badge_percent: response.store_badge_percent ?? 100,
+                store_badge_sides: response.store_badge_sides,
+                show_store_tile_prices: response.show_store_tile_prices ?? false,
             });
             applyNotificationPreferences({
                 notify_gfn_additions: response.notify_gfn_additions ?? true,
@@ -1763,6 +1823,7 @@ function buildStoreScanScript() {
     return `
     (function() {
       const ids = new Set();
+      const tileIds = new Set();
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       if (pageMatch) ids.add(pageMatch[1]);
       const nodes = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
@@ -1773,13 +1834,16 @@ function buildStoreScanScript() {
         const href = node.getAttribute('href') || node.closest('a[href*="/app/"]')?.getAttribute('href') || '';
         const match = raw.match(/\\d+/) || href.match(/\\/app\\/(\\d+)/);
         const id = match ? (match[1] || match[0]) : '';
-        if (id && Number(id) > 0) ids.add(id);
+        if (id && Number(id) > 0) {
+          ids.add(id);
+          if (node.matches('a[href*="/app/"]') && node.querySelector('img') && rect.width >= 90 && rect.width <= 700 && rect.height >= 60 && rect.height <= 900 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth && !node.closest('#global_header, #store_header')) tileIds.add(id);
+        }
         if (ids.size >= 80) break;
       }
       const watchActions = Array.isArray(window.__controllerXboxWatchActions)
         ? window.__controllerXboxWatchActions.splice(0, 20).map(String)
         : [];
-      return { url: location.href, appIds: Array.from(ids), watchActions };
+      return { url: location.href, appIds: Array.from(ids), tileIds: Array.from(tileIds), watchActions };
     })();
   `;
 }
@@ -1791,6 +1855,7 @@ function buildStoreBadgeScript(states, visibility, watchedAppIds) {
     const boosteroidPath = "M13.3259 3.30744C9.865 6.72998 9.549 12.1026 12.3773 15.8818L9.46609 18.7608C8.90018 19.3204 8.90018 20.2281 9.46609 20.7883C10.032 21.3479 10.9498 21.3479 11.5163 20.7883L14.4276 17.9093C18.2491 20.7063 23.682 20.3938 27.143 16.9713C30.9524 13.2041 30.9524 7.07459 27.143 3.30801C23.3336-.45857 17.1347-.459144 13.3259 3.30744ZM25.0927 14.9438C22.7653 17.2453 19.1705 17.5469 16.5103 15.8497L17.6595 14.7133C18.2254 14.1536 18.2254 13.246 17.6595 12.6858C17.0936 12.1261 16.1757 12.1261 15.6092 12.6858L14.46 13.8222C12.7438 11.1915 13.0488 7.63651 15.3762 5.33493C18.0549 2.68588 22.414 2.68588 25.0927 5.33493C27.7715 7.98398 27.7715 12.2947 25.0927 14.9438ZM16.2841 21.6272C16.85 22.1868 16.85 23.0945 16.2841 23.6547L10.1416 29.7291C9.57567 30.2887 8.65782 30.2887 8.09134 29.7291C7.52544 29.1695 7.52544 28.2618 8.09134 27.7016L14.2345 21.6272C14.8004 21.0675 15.7182 21.0675 16.2841 21.6272ZM.424426 22.1472C-.141475 21.5876-.141475 20.6799.424426 20.1197L6.56758 14.0447C7.13348 13.4851 8.05133 13.4851 8.61782 14.0447C9.18372 14.6043 9.18372 15.512 8.61782 16.0722L2.47466 22.1472C1.90818 22.7074.990907 22.7074.424426 22.1472Z";
     return `
     (function() {
+      window.__dpbSides = ${JSON.stringify(visibility.store_badge_sides ?? {})};
       const states = ${serializedStates};
       const watchedAppIds = new Set(${serializedWatchedAppIds});
       const showGfn = ${visibility.show_gfn_badges ? "true" : "false"};
@@ -1862,35 +1927,41 @@ function buildStoreBadgeScript(states, visibility, watchedAppIds) {
 
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       const pageId = pageMatch ? pageMatch[1] : '';
-      let detail = document.getElementById(detailId);
-      if (pageId && states[pageId]) {
-        ${storeBadgeDockScript}
-        if (!detail) {
-          detail = document.createElement('div');
-          detail.id = detailId;
-          detail.className = 'cxc-store-badges cxc-store-detail';
-          dock.appendChild(detail);
+      ${storeBadgeDockScript}
+      for (const side of ['left', 'right']) {
+        const sideDetailId = side === 'left' ? detailId : detailId + '-right';
+        let detail = document.getElementById(sideDetailId);
+        if (pageId && states[pageId]) {
+          if (!detail) {
+            detail = document.createElement('div');
+            detail.id = sideDetailId;
+            detail.className = 'cxc-store-badges cxc-store-detail';
+            docks[side].appendChild(detail);
+          }
+          const isWatched = watchedAppIds.has(pageId);
+          const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + states[pageId].hungarian + ':' + states[pageId].hungarianSource + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched + ':' + JSON.stringify(window.__dpbSides);
+          if (detail.getAttribute('data-state-key') !== key) {
+            detail.innerHTML = badgesHtml(pageId, 'detail');
+            const watchButton = document.createElement('button');
+            watchButton.type = 'button';
+            watchButton.className = 'cxc-watch' + (isWatched ? ' is-watched' : '');
+            watchButton.textContent = isWatched ? '★' : '☆';
+            watchButton.title = isWatched ? 'Eltávolítás a figyelőlistáról' : 'Hozzáadás a figyelőlistához';
+            watchButton.addEventListener('click', function(event) {
+              event.preventDefault();
+              event.stopPropagation();
+              window.__controllerXboxWatchActions = window.__controllerXboxWatchActions || [];
+              window.__controllerXboxWatchActions.push(pageId);
+            });
+            detail.appendChild(watchButton);
+            const kinds = ['controller', ...(showGfn ? ['gfn'] : []), ...(showBoosteroid ? ['boosteroid'] : []), ...(showHungarian && states[pageId].hungarian === true ? ['hungarian'] : []), 'watch'];
+            Array.from(detail.children).forEach((child, i) => { if ((window.__dpbSides[kinds[i]] || 'right') !== side) child.remove(); });
+            detail.style.display = detail.childElementCount ? 'flex' : 'none';
+            detail.setAttribute('data-state-key', key);
+          }
+        } else if (detail) {
+          detail.remove();
         }
-        const isWatched = watchedAppIds.has(pageId);
-        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + states[pageId].hungarian + ':' + states[pageId].hungarianSource + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
-        if (detail.getAttribute('data-state-key') !== key) {
-          detail.innerHTML = badgesHtml(pageId, 'detail');
-          const watchButton = document.createElement('button');
-          watchButton.type = 'button';
-          watchButton.className = 'cxc-watch' + (isWatched ? ' is-watched' : '');
-          watchButton.textContent = isWatched ? '★' : '☆';
-          watchButton.title = isWatched ? 'Eltávolítás a figyelőlistáról' : 'Hozzáadás a figyelőlistához';
-          watchButton.addEventListener('click', function(event) {
-            event.preventDefault();
-            event.stopPropagation();
-            window.__controllerXboxWatchActions = window.__controllerXboxWatchActions || [];
-            window.__controllerXboxWatchActions.push(pageId);
-          });
-          detail.appendChild(watchButton);
-          detail.setAttribute('data-state-key', key);
-        }
-      } else if (detail) {
-        detail.remove();
       }
       if (!pageId) { ${storeBadgeDockCleanupScript} }
 
@@ -1983,7 +2054,7 @@ async function scanStorePage() {
         return;
     try {
         const result = await sendStoreRuntime(buildStoreScanScript(), true);
-        updatePriceView(result?.url ?? "", sendStoreRuntime);
+        updatePriceView(result?.url ?? "", sendStoreRuntime, badgeVisibility.show_store_tile_prices ? result?.tileIds ?? [] : []);
         const nextIds = new Set((Array.isArray(result?.appIds) ? result.appIds : [])
             .map((value) => String(value))
             .filter((value) => /^\d+$/.test(value) && Number(value) > 0));
@@ -2098,6 +2169,7 @@ function disconnectStoreDebugger() {
         document.getElementById('controller-xbox-store-detail-badges')?.remove();
         document.getElementById('deck-play-badges-price')?.remove();
         ${storeBadgeDockCleanupScript}
+        ${tilePriceCleanupScript}
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
         delete window.__controllerXboxWatchActions;
@@ -2464,6 +2536,8 @@ function Content() {
                     show_hungarian_badges: detail.show_hungarian_badges ?? current.show_hungarian_badges,
                     library_badge_percent: detail.library_badge_percent ?? current.library_badge_percent,
                     store_badge_percent: detail.store_badge_percent ?? current.store_badge_percent,
+                    store_badge_sides: detail.store_badge_sides ?? current.store_badge_sides,
+                    show_store_tile_prices: detail.show_store_tile_prices ?? current.show_store_tile_prices,
                 }));
             }
             if (typeof detail.notify_gfn_additions === "boolean" ||
@@ -2509,6 +2583,8 @@ function Content() {
                 show_hungarian_badges: response.show_hungarian_badges ?? true,
                 library_badge_percent: response.library_badge_percent ?? 100,
                 store_badge_percent: response.store_badge_percent ?? 100,
+                store_badge_sides: response.store_badge_sides,
+                show_store_tile_prices: response.show_store_tile_prices ?? false,
             });
         }
         catch (error) {
@@ -2743,7 +2819,36 @@ function Content() {
         return SP_JSX.jsx(DFL.PanelSection, { title: "Megb\u00EDzhat\u00F3 boltok", children: SP_JSX.jsx(AllKeyShopMerchants, { onBack: () => openPage("home") }) });
     if (page === "settings")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "Jelv\u00E9nyek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Magyar nyelv a Steam nyelvi list\u00E1ja vagy a Magyar Felirat kur\u00E1tor alapj\u00E1n. A teljes k\u00F6nyvt\u00E1rb\u00F3l magyar gy\u0171jtem\u00E9nyt k\u00E9sz\u00EDt. Kikapcsolva a gy\u0171jt\u00E9s sz\u00FCnetel, a gy\u0171jtem\u00E9ny megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(BadgeSizeSettings, { initial: { library_badge_percent: visibility.library_badge_percent ?? 100,
-                        store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes }), SP_JSX.jsx(AllKeyShopSettings, { openMerchants: () => openPage("shops") }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
+                        store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontWeight: 700 }, children: "\u00C1ruh\u00E1zi j\u00E1t\u00E9koldal \u2013 jelv\u00E9nyek oldala" }) }), [['price', 'AllKeyShop ár'], ['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']].map(([key, label]) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: label + ' – bal oldalon', description: "Bekapcsolva balra, kikapcsolva jobbra. A csemp\u00E9ken l\u00E9v\u0151 ikonokat nem m\u00F3dos\u00EDtja.", checked: (visibility.store_badge_sides?.[key] ?? (key === 'price' ? 'left' : 'right')) === 'left', disabled: settingsWorking, onChange: async (checked) => {
+                            setSettingsWorking(true);
+                            try {
+                                const response = await withBackendTimeout(setBadgeSides({ ...badgeVisibility.store_badge_sides, [key]: checked ? 'left' : 'right' }));
+                                if (!response.success)
+                                    throw new Error(response.error || 'Az oldal mentése sikertelen.');
+                                applyBadgeVisibility({ ...badgeVisibility, store_badge_sides: response.store_badge_sides });
+                            }
+                            catch (error) {
+                                toaster.toast({ title: 'Beállítási hiba', body: errorMessage(error) });
+                            }
+                            finally {
+                                setSettingsWorking(false);
+                            }
+                        } }) }, key)), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi csemp\u00E9k alatt", description: "K\u00FCl\u00F6n enged\u00E9lyezhet\u0151. Csak a l\u00E1that\u00F3 webes \u00E1ruh\u00E1zi csemp\u00E9khez k\u00E9r \u00E1rat, egym\u00E1s ut\u00E1n. Az AllKeyShop \u00E1raknak is bekapcsolva kell lenni\u00FCk.", checked: visibility.show_store_tile_prices ?? false, disabled: settingsWorking, onChange: async (enabled) => {
+                            setSettingsWorking(true);
+                            try {
+                                const response = await withBackendTimeout(setTilePrices(enabled));
+                                if (!response.success)
+                                    throw new Error(response.error || 'Mentési hiba');
+                                applyBadgeVisibility({ ...badgeVisibility, show_store_tile_prices: response.show_store_tile_prices });
+                                scheduleStoreScan(0);
+                            }
+                            catch (error) {
+                                toaster.toast({ title: 'Beállítási hiba', body: errorMessage(error) });
+                            }
+                            finally {
+                                setSettingsWorking(false);
+                            }
+                        } }) }), SP_JSX.jsx(AllKeyShopSettings, { openMerchants: () => openPage("shops") }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "\u00C9rtes\u00EDt\u00E9sek" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj GeForce NOW-j\u00E1t\u00E9kok", checked: notifications.notify_gfn_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_gfn_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00DAj Boosteroid-j\u00E1t\u00E9kok", checked: notifications.notify_boosteroid_additions, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_additions: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid-karbantart\u00E1s", checked: notifications.notify_boosteroid_maintenance, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_boosteroid_maintenance: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Pluginfriss\u00EDt\u00E9sek", checked: notifications.notify_plugin_updates, disabled: settingsWorking, onChange: (checked) => void updateNotifications({ ...notifications, notify_plugin_updates: checked }) }) })] });
     const refreshWatchedClouds = async () => {
         setCloudRefreshing(true);
         setCloudRefreshStatus("A GFN és Boosteroid katalógusának letöltése…");

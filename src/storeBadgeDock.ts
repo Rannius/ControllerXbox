@@ -1,11 +1,13 @@
-// Shared by the icon and price renderers; neither owns the other's children.
+// Two independent rows shared by the icon and price renderers.
 export const storeBadgeDockScript = `
-  let dock = document.getElementById('deck-play-badges-dock');
-  if (!dock) {
-    dock = document.createElement('div'); dock.id = 'deck-play-badges-dock';
-    document.body.appendChild(dock);
+  const docks = {};
+  for (const side of ['left', 'right']) {
+    const id = 'deck-play-badges-dock' + (side === 'right' ? '-right' : '');
+    let row = document.getElementById(id);
+    if (!row) { row = document.createElement('div'); row.id = id; document.body.appendChild(row); }
+    row.style.cssText = 'position:fixed;' + side + ':20px;bottom:20px;z-index:999999;display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:calc(50vw - 40px);pointer-events:none;justify-content:' + (side === 'right' ? 'flex-end' : 'flex-start');
+    docks[side] = row;
   }
-  dock.style.cssText = 'position:fixed;left:20px;bottom:20px;z-index:999999;display:flex;align-items:center;gap:8px;flex-wrap:wrap;max-width:calc(100vw - 40px);pointer-events:none';
   const protonMarkers = document.querySelectorAll('.protondb-decky-indicator-container,[data-pp-game-badge],a[href*="protondb.com/app/"]');
   for (const marker of protonMarkers) {
     let anchor = marker;
@@ -13,16 +15,15 @@ export const storeBadgeDockScript = `
     if (!anchor || anchor === document.body) continue;
     let rect = anchor.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0 && rect.width < 250 && rect.top > innerHeight / 2) {
-      if (rect.left >= innerWidth / 2) {
-        const saved = window.__dpbProtonPositions = window.__dpbProtonPositions || new Map();
-        if (!saved.has(anchor)) saved.set(anchor, ['left', 'right'].map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
-        anchor.style.setProperty('left', '20px', 'important');
-        anchor.style.setProperty('right', 'auto', 'important');
-        rect = anchor.getBoundingClientRect();
-      }
-      dock.style.left = (rect.right + 8) + 'px';
-      dock.style.bottom = Math.max(8, innerHeight - rect.bottom) + 'px';
-      dock.style.maxWidth = Math.max(120, innerWidth - rect.right - 28) + 'px';
+      const side = window.__dpbSides?.proton || 'right';
+      const saved = window.__dpbProtonPositions = window.__dpbProtonPositions || new Map();
+      if (!saved.has(anchor)) saved.set(anchor, ['left', 'right'].map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
+      anchor.style.setProperty(side, '20px', 'important');
+      anchor.style.setProperty(side === 'left' ? 'right' : 'left', 'auto', 'important');
+      rect = anchor.getBoundingClientRect();
+      docks[side].style[side] = (rect.width + 28) + 'px';
+      docks[side].style.bottom = Math.max(8, innerHeight - rect.bottom) + 'px';
+      docks[side].style.maxWidth = Math.max(40, innerWidth / 2 - rect.width - 48) + 'px';
       break;
     }
   }
@@ -35,5 +36,7 @@ export const storeBadgeDockCleanupScript = `
     }
   }
   delete window.__dpbProtonPositions;
+  delete window.__dpbSides;
   document.getElementById('deck-play-badges-dock')?.remove();
+  document.getElementById('deck-play-badges-dock-right')?.remove();
 `;

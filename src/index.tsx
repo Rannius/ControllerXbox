@@ -3,7 +3,7 @@ import { CloudResumeRefresh } from "./cloudResumeRefresh";
 import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
 import { HungarianProgress, CuratorProgress } from "./HungarianProgress";
 import { CatalogStatus } from "./CatalogStatus";
-import { AllKeyShopSettings, AllKeyShopMerchants, resetPriceView, updatePriceView } from "./AllKeyShop";
+import { AllKeyShopSettings, AllKeyShopMerchants, tilePriceCleanupScript, resetPriceView, updatePriceView } from "./AllKeyShop";
 import { storeBadgeDockScript, storeBadgeDockCleanupScript } from "./storeBadgeDock";
 import { HungarianCollection, readyCollectionStore } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
@@ -82,6 +82,8 @@ type UpdateNotificationResponse = {
   error?: string;
 };
 type BadgeVisibility = {
+  show_store_tile_prices?: boolean;
+  store_badge_sides?: Record<string, "left" | "right">;
   library_badge_percent?: number;
   store_badge_percent?: number;
   show_gfn_badges: boolean;
@@ -168,6 +170,7 @@ type StoreDebuggerTab = {
   webSocketDebuggerUrl: string;
 };
 type StorePageScan = {
+  tileIds?: string[];
   url?: string;
   appIds?: string[];
   watchActions?: string[];
@@ -195,6 +198,8 @@ const acknowledgeUpdateNotification = callable<
 >("acknowledge_update_notification");
 const applyUpdate = callable<[expectedVersion: string], UpdateApplyResponse>("apply_update");
 const restartPluginLoader = callable<[], { success: boolean }>("restart_plugin_loader");
+const setTilePrices = callable<[enabled: boolean], SettingsResponse>("set_store_tile_prices");
+const setBadgeSides = callable<[sides: Record<string, "left" | "right">], SettingsResponse>("set_badge_sides");
 const setBadgeSizes = callable<[library: number, store: number], SettingsResponse>("set_badge_sizes");
 const getCuratorProgress = callable<[], CuratorProgress>("get_hungarian_curator_progress");
 const loadCuratorProgress = () => withBackendTimeout(getCuratorProgress());
@@ -401,6 +406,8 @@ async function loadBadgeVisibility(): Promise<void> {
         show_hungarian_badges: response.show_hungarian_badges ?? true,
         library_badge_percent: response.library_badge_percent ?? 100,
         store_badge_percent: response.store_badge_percent ?? 100,
+        store_badge_sides: response.store_badge_sides,
+        show_store_tile_prices: response.show_store_tile_prices ?? false,
       });
       applyNotificationPreferences({
         notify_gfn_additions: response.notify_gfn_additions ?? true,
@@ -1265,6 +1272,7 @@ function buildStoreScanScript(): string {
   return `
     (function() {
       const ids = new Set();
+      const tileIds = new Set();
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       if (pageMatch) ids.add(pageMatch[1]);
       const nodes = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
@@ -1275,13 +1283,16 @@ function buildStoreScanScript(): string {
         const href = node.getAttribute('href') || node.closest('a[href*="/app/"]')?.getAttribute('href') || '';
         const match = raw.match(/\\d+/) || href.match(/\\/app\\/(\\d+)/);
         const id = match ? (match[1] || match[0]) : '';
-        if (id && Number(id) > 0) ids.add(id);
+        if (id && Number(id) > 0) {
+          ids.add(id);
+          if (node.matches('a[href*="/app/"]') && node.querySelector('img') && rect.width >= 90 && rect.width <= 700 && rect.height >= 60 && rect.height <= 900 && rect.bottom > 0 && rect.top < innerHeight && rect.right > 0 && rect.left < innerWidth && !node.closest('#global_header, #store_header')) tileIds.add(id);
+        }
         if (ids.size >= 80) break;
       }
       const watchActions = Array.isArray(window.__controllerXboxWatchActions)
         ? window.__controllerXboxWatchActions.splice(0, 20).map(String)
         : [];
-      return { url: location.href, appIds: Array.from(ids), watchActions };
+      return { url: location.href, appIds: Array.from(ids), tileIds: Array.from(tileIds), watchActions };
     })();
   `;
 }
@@ -1298,6 +1309,7 @@ function buildStoreBadgeScript(
   const boosteroidPath = "M13.3259 3.30744C9.865 6.72998 9.549 12.1026 12.3773 15.8818L9.46609 18.7608C8.90018 19.3204 8.90018 20.2281 9.46609 20.7883C10.032 21.3479 10.9498 21.3479 11.5163 20.7883L14.4276 17.9093C18.2491 20.7063 23.682 20.3938 27.143 16.9713C30.9524 13.2041 30.9524 7.07459 27.143 3.30801C23.3336-.45857 17.1347-.459144 13.3259 3.30744ZM25.0927 14.9438C22.7653 17.2453 19.1705 17.5469 16.5103 15.8497L17.6595 14.7133C18.2254 14.1536 18.2254 13.246 17.6595 12.6858C17.0936 12.1261 16.1757 12.1261 15.6092 12.6858L14.46 13.8222C12.7438 11.1915 13.0488 7.63651 15.3762 5.33493C18.0549 2.68588 22.414 2.68588 25.0927 5.33493C27.7715 7.98398 27.7715 12.2947 25.0927 14.9438ZM16.2841 21.6272C16.85 22.1868 16.85 23.0945 16.2841 23.6547L10.1416 29.7291C9.57567 30.2887 8.65782 30.2887 8.09134 29.7291C7.52544 29.1695 7.52544 28.2618 8.09134 27.7016L14.2345 21.6272C14.8004 21.0675 15.7182 21.0675 16.2841 21.6272ZM.424426 22.1472C-.141475 21.5876-.141475 20.6799.424426 20.1197L6.56758 14.0447C7.13348 13.4851 8.05133 13.4851 8.61782 14.0447C9.18372 14.6043 9.18372 15.512 8.61782 16.0722L2.47466 22.1472C1.90818 22.7074.990907 22.7074.424426 22.1472Z";
   return `
     (function() {
+      window.__dpbSides = ${JSON.stringify(visibility.store_badge_sides ?? {})};
       const states = ${serializedStates};
       const watchedAppIds = new Set(${serializedWatchedAppIds});
       const showGfn = ${visibility.show_gfn_badges ? "true" : "false"};
@@ -1369,35 +1381,41 @@ function buildStoreBadgeScript(
 
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       const pageId = pageMatch ? pageMatch[1] : '';
-      let detail = document.getElementById(detailId);
-      if (pageId && states[pageId]) {
-        ${storeBadgeDockScript}
-        if (!detail) {
-          detail = document.createElement('div');
-          detail.id = detailId;
-          detail.className = 'cxc-store-badges cxc-store-detail';
-          dock.appendChild(detail);
+      ${storeBadgeDockScript}
+      for (const side of ['left', 'right']) {
+        const sideDetailId = side === 'left' ? detailId : detailId + '-right';
+        let detail = document.getElementById(sideDetailId);
+        if (pageId && states[pageId]) {
+          if (!detail) {
+            detail = document.createElement('div');
+            detail.id = sideDetailId;
+            detail.className = 'cxc-store-badges cxc-store-detail';
+            docks[side].appendChild(detail);
+          }
+          const isWatched = watchedAppIds.has(pageId);
+          const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + states[pageId].hungarian + ':' + states[pageId].hungarianSource + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched + ':' + JSON.stringify(window.__dpbSides);
+          if (detail.getAttribute('data-state-key') !== key) {
+            detail.innerHTML = badgesHtml(pageId, 'detail');
+            const watchButton = document.createElement('button');
+            watchButton.type = 'button';
+            watchButton.className = 'cxc-watch' + (isWatched ? ' is-watched' : '');
+            watchButton.textContent = isWatched ? '★' : '☆';
+            watchButton.title = isWatched ? 'Eltávolítás a figyelőlistáról' : 'Hozzáadás a figyelőlistához';
+            watchButton.addEventListener('click', function(event) {
+              event.preventDefault();
+              event.stopPropagation();
+              window.__controllerXboxWatchActions = window.__controllerXboxWatchActions || [];
+              window.__controllerXboxWatchActions.push(pageId);
+            });
+            detail.appendChild(watchButton);
+            const kinds = ['controller', ...(showGfn ? ['gfn'] : []), ...(showBoosteroid ? ['boosteroid'] : []), ...(showHungarian && states[pageId].hungarian === true ? ['hungarian'] : []), 'watch'];
+            Array.from(detail.children).forEach((child, i) => { if ((window.__dpbSides[kinds[i]] || 'right') !== side) child.remove(); });
+            detail.style.display = detail.childElementCount ? 'flex' : 'none';
+            detail.setAttribute('data-state-key', key);
+          }
+        } else if (detail) {
+          detail.remove();
         }
-        const isWatched = watchedAppIds.has(pageId);
-        const key = pageId + ':' + states[pageId].controller + ':' + states[pageId].gfn + ':' + states[pageId].boosteroid + ':' + states[pageId].hungarian + ':' + states[pageId].hungarianSource + ':' + showHungarian + ':' + showGfn + ':' + showBoosteroid + ':' + isWatched;
-        if (detail.getAttribute('data-state-key') !== key) {
-          detail.innerHTML = badgesHtml(pageId, 'detail');
-          const watchButton = document.createElement('button');
-          watchButton.type = 'button';
-          watchButton.className = 'cxc-watch' + (isWatched ? ' is-watched' : '');
-          watchButton.textContent = isWatched ? '★' : '☆';
-          watchButton.title = isWatched ? 'Eltávolítás a figyelőlistáról' : 'Hozzáadás a figyelőlistához';
-          watchButton.addEventListener('click', function(event) {
-            event.preventDefault();
-            event.stopPropagation();
-            window.__controllerXboxWatchActions = window.__controllerXboxWatchActions || [];
-            window.__controllerXboxWatchActions.push(pageId);
-          });
-          detail.appendChild(watchButton);
-          detail.setAttribute('data-state-key', key);
-        }
-      } else if (detail) {
-        detail.remove();
       }
       if (!pageId) { ${storeBadgeDockCleanupScript} }
 
@@ -1489,7 +1507,7 @@ async function scanStorePage(): Promise<void> {
   if (!storeMounted || !storeWebSocketReady) return;
   try {
     const result = await sendStoreRuntime(buildStoreScanScript(), true) as StorePageScan | undefined;
-    updatePriceView(result?.url ?? "", sendStoreRuntime);
+    updatePriceView(result?.url ?? "", sendStoreRuntime, badgeVisibility.show_store_tile_prices ? result?.tileIds ?? [] : []);
     const nextIds = new Set(
       (Array.isArray(result?.appIds) ? result.appIds : [])
         .map((value) => String(value))
@@ -1591,6 +1609,7 @@ function disconnectStoreDebugger(): void {
         document.getElementById('controller-xbox-store-detail-badges')?.remove();
         document.getElementById('deck-play-badges-price')?.remove();
         ${storeBadgeDockCleanupScript}
+        ${tilePriceCleanupScript}
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
         delete window.__controllerXboxWatchActions;
@@ -1893,6 +1912,8 @@ function Content() {
           show_hungarian_badges: detail.show_hungarian_badges ?? current.show_hungarian_badges,
           library_badge_percent: detail.library_badge_percent ?? current.library_badge_percent,
           store_badge_percent: detail.store_badge_percent ?? current.store_badge_percent,
+          store_badge_sides: detail.store_badge_sides ?? current.store_badge_sides,
+          show_store_tile_prices: detail.show_store_tile_prices ?? current.show_store_tile_prices,
         }));
       }
       if (
@@ -1943,6 +1964,8 @@ function Content() {
         show_hungarian_badges: response.show_hungarian_badges ?? true,
         library_badge_percent: response.library_badge_percent ?? 100,
         store_badge_percent: response.store_badge_percent ?? 100,
+        store_badge_sides: response.store_badge_sides,
+        show_store_tile_prices: response.show_store_tile_prices ?? false,
       });
     } catch (error) {
       setVisibility(previous);
@@ -2196,6 +2219,33 @@ function Content() {
     /></PanelSectionRow>
     <BadgeSizeSettings initial={{ library_badge_percent: visibility.library_badge_percent ?? 100,
       store_badge_percent: visibility.store_badge_percent ?? 100 }} save={saveSizes} />
+    <PanelSectionRow><div style={{ fontWeight: 700 }}>Áruházi játékoldal – jelvények oldala</div></PanelSectionRow>
+    {([['price', 'AllKeyShop ár'], ['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']] as const).map(([key, label]) =>
+      <PanelSectionRow key={key}><ToggleField label={label + ' – bal oldalon'}
+        description="Bekapcsolva balra, kikapcsolva jobbra. A csempéken lévő ikonokat nem módosítja."
+        checked={(visibility.store_badge_sides?.[key] ?? (key === 'price' ? 'left' : 'right')) === 'left'} disabled={settingsWorking}
+        onChange={async checked => {
+          setSettingsWorking(true);
+          try {
+            const response = await withBackendTimeout(setBadgeSides({ ...badgeVisibility.store_badge_sides, [key]: checked ? 'left' : 'right' }));
+            if (!response.success) throw new Error(response.error || 'Az oldal mentése sikertelen.');
+            applyBadgeVisibility({ ...badgeVisibility, store_badge_sides: response.store_badge_sides });
+          } catch (error) { toaster.toast({ title: 'Beállítási hiba', body: errorMessage(error) }); }
+          finally { setSettingsWorking(false); }
+        }} /></PanelSectionRow>)}
+    <PanelSectionRow><ToggleField label="Árak az áruházi csempék alatt"
+      description="Külön engedélyezhető. Csak a látható webes áruházi csempékhez kér árat, egymás után. Az AllKeyShop áraknak is bekapcsolva kell lenniük."
+      checked={visibility.show_store_tile_prices ?? false} disabled={settingsWorking}
+      onChange={async enabled => {
+        setSettingsWorking(true);
+        try {
+          const response = await withBackendTimeout(setTilePrices(enabled));
+          if (!response.success) throw new Error(response.error || 'Mentési hiba');
+          applyBadgeVisibility({ ...badgeVisibility, show_store_tile_prices: response.show_store_tile_prices });
+          scheduleStoreScan(0);
+        } catch (error) { toaster.toast({ title: 'Beállítási hiba', body: errorMessage(error) }); }
+        finally { setSettingsWorking(false); }
+      }} /></PanelSectionRow>
     <AllKeyShopSettings openMerchants={() => openPage("shops")} />
     <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Értesítések</div></PanelSectionRow>
     <PanelSectionRow><ToggleField

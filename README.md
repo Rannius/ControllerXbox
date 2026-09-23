@@ -57,3 +57,9 @@ The Python backend targets Decky's Python 3.8 runtime. Do not use Python 3.9+ ty
 `plugin.json` sets `"api_version": 1` so the modern `@decky/api` frontend can call the Python backend. Its `root` flag lets the updater replace only the validated files inside its own plugin directory and restart Decky's plugin loader without asking for the user's sudo password.
 
 Wake refresh waits eight seconds for network reconnection and retries failures after 30 and 120 seconds. It listens to Steam resume notifications, with a timer-gap fallback, and combines duplicate wake signals. It refreshes data without reloading Steam or changing the running game.
+
+## 1.0.63 – Elhelyezés és csempeárak
+
+A Beállításokban az áruházi játékoldal minden jelvénye külön balra/jobbra állítható. Alapból csak az AllKeyShop ár van balra, a többi ikon jobbra. A felismert alsó ProtonDB-jelvény is állítható.
+
+Az „Árak az áruházi csempék alatt” kapcsoló alapból kikapcsolt. Engedélyezve a látható, felismert webes áruházi csempék alatt ár és boltnév jelenik meg, a mentett boltszűréssel. A lekérések egymás után futnak, 15 perces közös gyorsítótárral; a játékoldal elsőbbséget kap. Az AllKeyShop árakat is engedélyezni kell. A natív Steam-csempékhez ez a funkció nem ad árat.

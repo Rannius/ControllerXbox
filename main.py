@@ -188,6 +188,8 @@ class Plugin:
         self._settings: Dict[str, Any] = {
             "library_badge_percent": 100,
             "store_badge_percent": 100,
+            "store_badge_sides": {},
+            "show_store_tile_prices": False,
             "show_gfn_badges": True,
             "show_boosteroid_badges": True,
             "show_hungarian_badges": True,
@@ -792,6 +794,7 @@ class Plugin:
             parsed = json.loads(contents)
             if isinstance(parsed, dict) and parsed.get("schema_version") == SETTINGS_SCHEMA_VERSION:
                 for key in (
+                    "show_store_tile_prices",
                     "show_gfn_badges",
                     "show_boosteroid_badges",
                     "show_hungarian_badges",
@@ -802,6 +805,10 @@ class Plugin:
                 ):
                     if isinstance(parsed.get(key), bool):
                         self._settings[key] = parsed[key]
+                sides = parsed.get("store_badge_sides")
+                if isinstance(sides, dict):
+                    self._settings["store_badge_sides"] = {key: value for key, value in sides.items()
+                        if key in ("price", "controller", "gfn", "boosteroid", "hungarian", "watch", "proton") and value in ("left", "right")}
                 for key in ("library_badge_percent", "store_badge_percent"):
                     value = parsed.get(key)
                     if type(value) is int and 50 <= value <= 200:
@@ -824,6 +831,31 @@ class Plugin:
         )
 
     async def get_settings(self) -> Dict[str, Any]:
+        return {"success": True, **self._settings}
+
+    async def set_store_tile_prices(self, enabled: Any) -> Dict[str, Any]:
+        if not isinstance(enabled, bool):
+            return {"success": False, "error": "Érvénytelen kapcsolóérték."}
+        previous = self._settings.get("show_store_tile_prices", False)
+        self._settings["show_store_tile_prices"] = enabled
+        try:
+            await self._save_settings()
+        except Exception:
+            self._settings["show_store_tile_prices"] = previous
+            raise
+        return {"success": True, **self._settings}
+
+    async def set_badge_sides(self, sides: Any) -> Dict[str, Any]:
+        if not isinstance(sides, dict) or any(key not in ("price", "controller", "gfn", "boosteroid", "hungarian", "watch", "proton")
+                or value not in ("left", "right") for key, value in sides.items()):
+            return {"success": False, "error": "Érvénytelen jelvényoldal."}
+        previous = self._settings.get("store_badge_sides", {})
+        self._settings["store_badge_sides"] = dict(sides)
+        try:
+            await self._save_settings()
+        except Exception:
+            self._settings["store_badge_sides"] = previous
+            raise
         return {"success": True, **self._settings}
 
     async def set_badge_sizes(self, library_badge_percent: Any, store_badge_percent: Any) -> Dict[str, Any]:

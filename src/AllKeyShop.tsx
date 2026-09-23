@@ -49,7 +49,7 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
         } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
       }}>{busy ? "Mentés…" : "Árbeállítások alkalmazása"}</ButtonItem></PanelSectionRow>
     </>}
-    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Csak a megnyitott játékhoz kér le árat; 15 percig tárolja."}</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. Alapból a megnyitott játékhoz, külön engedéllyel a látható áruházi csempékhez is kér árat; 15 percig tárolja."}</div></PanelSectionRow>
   </>;
 }
 
@@ -125,7 +125,8 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     if (pageId !== appId) return;
     if (data?.disabled) { panel?.remove(); return; }
     ${storeBadgeDockScript}
-    const host = dock;
+    const side = window.__dpbSides?.price || 'left';
+    const host = docks[side];
     const key = appId + ':' + JSON.stringify(data);
     if (panel?.dataset.state === key && panel.parentElement === host) return;
     const wasOpen = panel?.open === true;
@@ -139,7 +140,9 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     panel.appendChild(summary);
     const content = document.createElement('div');
     content.style.cssText = 'position:absolute;bottom:calc(100% + 8px);left:0;box-sizing:border-box;width:340px;max-width:calc(100vw - 40px);max-height:60vh;overflow:auto;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;box-shadow:0 2px 12px #000';
-    content.style.maxWidth = 'calc(100vw - ' + (parseFloat(dock.style.left) + 20) + 'px)';
+    content.style.left = side === 'left' ? '0' : 'auto';
+    content.style.right = side === 'right' ? '0' : 'auto';
+    content.style.maxWidth = 'calc(100vw - ' + (parseFloat(host.style[side]) + 20) + 'px)';
     panel.appendChild(content);
     const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
     line('AllKeyShop · Steam-kulcs / Gift', true);
@@ -165,24 +168,74 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
   })();`;
 }
 
+// Tile rows reserve their own space; remove our changes when disabled or recycled.
+export const tilePriceCleanupScript = `
+  for (const [host, original] of window.__dpbPriceTiles || []) {
+    host.querySelector(':scope > .dpb-tile-price')?.remove();
+    for (const [key, value, priority] of original) {
+      if (value) host.style.setProperty(key, value, priority); else host.style.removeProperty(key);
+    }
+  }
+  delete window.__dpbPriceTiles;
+`;
+
+export function buildTilePricesScript(url: string, values: Record<string, PriceResult | null>): string {
+  return `(() => {
+    if (location.href !== ${JSON.stringify(url).replace(/</g, "\\u003c")}) return;
+    ${tilePriceCleanupScript}
+    const values = ${JSON.stringify(values).replace(/</g, "\\u003c")};
+    const saved = window.__dpbPriceTiles = new Map();
+    for (const host of document.querySelectorAll('a[href*="/app/"]')) {
+      const id = host.getAttribute('href')?.match(/\\/app\\/(\\d+)/)?.[1];
+      if (!id || !(id in values) || values[id]?.disabled || !host.querySelector('img') || host.closest('#global_header, #store_header')) continue;
+      const rect = host.getBoundingClientRect();
+      if (rect.width < 90 || rect.width > 700 || rect.height < 60 || rect.height > 900 || rect.bottom <= 0 || rect.top >= innerHeight || rect.right <= 0 || rect.left >= innerWidth) continue;
+      saved.set(host, ['position', 'padding-bottom', 'box-sizing', 'overflow'].map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
+      const oldPadding = parseFloat(getComputedStyle(host).paddingBottom) || 0;
+      if (getComputedStyle(host).position === 'static') host.style.setProperty('position', 'relative');
+      host.style.setProperty('padding-bottom', (oldPadding + 26) + 'px', 'important');
+      host.style.setProperty('box-sizing', 'content-box', 'important');
+      host.style.setProperty('overflow', 'visible', 'important');
+      const value = values[id], offer = value?.offers?.[0];
+      const row = document.createElement('span'); row.className = 'dpb-tile-price';
+      row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
+      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: nem elérhető' : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
+      row.title = row.textContent;
+      host.appendChild(row);
+    }
+  })();`;
+}
+
 const prices = new Map<string, { value: PriceResult; expires: number }>();
 let fetching = false;
 let revision = 0;
 let currentApp = "";
-export function resetPriceView(): void { prices.clear(); revision++; currentApp = ""; }
-export function updatePriceView(url: string, send: (script: string) => Promise<unknown>): void {
+let tileUrl = "";
+let tileIds: string[] = [];
+export function resetPriceView(): void { prices.clear(); revision++; currentApp = ""; tileIds = []; tileUrl = ""; }
+export function updatePriceView(url: string, send: (script: string) => Promise<unknown>, visibleTileIds: string[] = []): void {
   let id = "";
   try { const parsed = new URL(url); if (parsed.hostname === "store.steampowered.com") id = parsed.pathname.match(/^\/app\/(\d+)/)?.[1] ?? ""; } catch { /* no game */ }
   currentApp = id;
+  tileUrl = url;
+  tileIds = /^https:\/\/store\.steampowered\.com\//.test(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))).slice(0, 40) : [];
+  const renderTiles = () => {
+    const values: Record<string, PriceResult | null> = {};
+    for (const tile of tileIds) values[tile] = prices.get(tile)?.value ?? null;
+    void send(buildTilePricesScript(tileUrl, values)).catch(() => {});
+  };
+  renderTiles();
   const cached = prices.get(id);
   void send(buildPricePanelScript(id, cached?.value)).catch(() => {});
-  if (!id || fetching || (cached && cached.expires > Date.now())) return;
+  const requestId = id && (!cached || cached.expires <= Date.now()) ? id : tileIds.find(tile => !prices.has(tile) || prices.get(tile)!.expires <= Date.now());
+  if (!requestId || fetching) return;
   fetching = true;
   const requestRevision = revision;
-  void timed(getPrice(id)).catch(error => ({ success: false, error: String(error) } as PriceResult)).then(value => {
+  void timed(getPrice(requestId)).catch(error => ({ success: false, error: String(error) } as PriceResult)).then(value => {
     if (requestRevision !== revision) return;
     if (prices.size >= 100) prices.delete(prices.keys().next().value!);
-    prices.set(id, { value, expires: Date.now() + (value.success && !value.disabled ? 900000 : 60000) });
-    if (currentApp === id) void send(buildPricePanelScript(id, value)).catch(() => {});
+    prices.set(requestId, { value, expires: Date.now() + (value.success && !value.disabled ? 900000 : 60000) });
+    if (currentApp === requestId) void send(buildPricePanelScript(requestId, value)).catch(() => {});
+    if (tileIds.length) renderTiles();
   }).finally(() => { fetching = false; });
 }

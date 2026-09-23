@@ -18,6 +18,22 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_store_sides_and_tile_opt_in_survive_restart(self):
+        self.assertFalse((await self.plugin.get_settings())["show_store_tile_prices"])
+        sides = {"price": "right", "controller": "left", "proton": "left"}
+        self.assertTrue((await self.plugin.set_badge_sides(sides))["success"])
+        self.assertTrue((await self.plugin.set_store_tile_prices(True))["success"])
+        self.assertFalse((await self.plugin.set_badge_sides({"price": "top"}))["success"])
+        self.assertFalse((await self.plugin.set_store_tile_prices(1))["success"])
+        restarted = self.plugin_type()
+        await restarted._load_settings()
+        self.assertEqual((await restarted.get_settings())["store_badge_sides"], sides)
+        self.assertTrue((await restarted.get_settings())["show_store_tile_prices"])
+        with patch.object(self.plugin, "_save_settings", side_effect=OSError("disk")):
+            with self.assertRaises(OSError):
+                await self.plugin.set_badge_sides({})
+        self.assertEqual((await self.plugin.get_settings())["store_badge_sides"], sides)
+
     async def test_aks_merchant_directory_preserves_selection_and_offline_cache(self):
         page = '<a class="merchant-card " href="/review/eneba" aria-label="Eneba"></a><a class="merchant-card is-official" aria-label="A &amp; B"></a><a aria-label="Not a store"></a>'
         with patch.object(self.plugin, "_aks_read", return_value=page) as fetch:

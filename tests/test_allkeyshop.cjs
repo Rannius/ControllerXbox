@@ -24,3 +24,16 @@ test('price renderer serializes untrusted text and guards page identity',()=>{
  const f=fixture(),script=f.api.buildPricePanelScript('10',{success:true,offers:[{merchant:'</script><img onerror=alert(1)>',price:2,kind:'Steam Gift',edition:'Standard',coupon:''}]});
  assert.doesNotMatch(script,/<img/);assert.match(script,/textContent/);assert.match(script,/pageId !== appId/);assert.doesNotMatch(script,/innerHTML/);
 });
+
+test('tile prices require explicit visible IDs, share cache and stop when disabled',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/';
+ f.api.updatePriceView(url,f.send);assert.equal(f.requests.length,0);
+ f.api.updatePriceView(url,f.send,['10','10','20']);assert.equal(f.requests.length,1);assert.equal(f.requests[0].id,'10');
+ f.api.updatePriceView(url,f.send,['10','20']);assert.equal(f.requests.length,1);
+ f.requests[0].resolve({success:true,offers:[]});await f.drain();
+ f.api.updatePriceView(url,f.send,['10','20']);assert.equal(f.requests.length,2);assert.equal(f.requests[1].id,'20');
+ f.api.updatePriceView(url,f.send);const before=f.scripts.length;
+ f.requests[1].resolve({success:true,offers:[]});await f.drain();assert.equal(f.scripts.length,before);
+ f.api.updatePriceView('https://store.steampowered.com/app/10/',f.send);assert.equal(f.requests.length,2);
+ f.api.updatePriceView('https://example.com/',f.send,['30']);assert.equal(f.requests.length,2);
+});
