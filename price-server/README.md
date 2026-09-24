@@ -19,8 +19,8 @@ Ez a szerver **nem IP-forgató és nem tiltásmegkerülő szolgáltatás**. A Du
 Az Ubuntu termináljában:
 
 ```bash
-curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.90/DeckPriceServer-v1.0.90.tar.gz
-tar -xzf DeckPriceServer-v1.0.90.tar.gz
+curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.91/DeckPriceServer-v1.0.91.tar.gz
+tar -xzf DeckPriceServer-v1.0.91.tar.gz
 cd DeckPriceServer
 sudo bash install.sh sajat-szerver.duckdns.org
 ```

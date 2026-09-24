@@ -237,8 +237,18 @@ class PriceBroker:
                 if result.get("success"):
                     outcome = "skipped" if result.get("skipped") else "not_found" if result.get("not_found") else "completed"
                 if not result.get("success"):
-                    error_message = str(result.get("error", "Az árlekérés sikertelen."))[:500]
-                    error_code = str(result.get("error_code", "lookup"))[:40]
+                    # Status/history must never retain raw provider error text.
+                    reasons = {"steam": "A Steam nem adott azonosítható játékadatot.",
+                               "match": "Nincs egyértelmű névegyezés az AKS API katalógusában.",
+                               "connection": "Kapcsolati hiba vagy időtúllépés az árforrásnál.",
+                               "rate_limit": "A szolgáltató lekérési szünetet kér.",
+                               "format": "Az árforrás válaszának formátuma nem feldolgozható.",
+                               "http": "Az árforrás HTTP hibát adott.",
+                               "lookup": "Az árlekérés nem adott feldolgozható eredményt."}
+                    error_code = result.get("error_code")
+                    if not isinstance(error_code, str) or error_code not in reasons:
+                        error_code = "lookup"
+                    error_message = reasons[error_code]
                     if error_code == "match":
                         outcome = "not_found"
                     delay = max(1, result.get("retry_after", 30))
