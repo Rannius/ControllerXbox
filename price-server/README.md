@@ -19,8 +19,8 @@ Ez a szerver **nem IP-forgató és nem tiltásmegkerülő szolgáltatás**. A Du
 Az Ubuntu termináljában:
 
 ```bash
-curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.91/DeckPriceServer-v1.0.91.tar.gz
-tar -xzf DeckPriceServer-v1.0.91.tar.gz
+curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.92/DeckPriceServer-v1.0.92.tar.gz
+tar -xzf DeckPriceServer-v1.0.92.tar.gz
 cd DeckPriceServer
 sudo bash install.sh sajat-szerver.duckdns.org
 ```
@@ -134,3 +134,5 @@ Ehhez mindkét oldalt 1.0.88-ra kell frissíteni. A meglevő beállítások és 
 1.0.89-től a megnyitott játék cache nélküli szerverkérése legfeljebb 2,5 másodpercig megvárja a közös feldolgozás eredményét, és elkészüléskor azonnal visszaadja. Nincs kötelező plusz 3 másodperces visszakérdezés. Hosszabb feldolgozásnál 1 másodperces előtérbeli visszakérdezési időt ad; a háttérsor és az AKS-kérésköz változatlan.
 
 1.0.90: a Steam AppDetails válasz eltérő külső kulcsánál az egyértelmű belső `steam_appid` alapján azonosítjuk a játékot. A más AppID-hez tartozó adat továbbra is kizárt. Egy hiányzó játékadat nem szünetelteti a teljes AKS-sort. Az API-katalógusból hiányzó név és a többértelmű név külön jelzést, 24 órás tartós negatív cache-t kap; nem kapcsolati hibaként ismétlődik. A szerver státusza és az új Home Assistant kártyaminta tartalmazza a konkrét hibaokot; a már bemásolt kártyát az új mintára kell cserélni.
+
+1.0.92: az alapjáték-szűrés a Standard mellett az explicit Early Access kiadást is elfogadja. A WARDOGS friss ajánlatait korábban ez a túl szűk kiadásszűrés kizárta. Az EU-t is tartalmazó Steam EU/US besorolás engedélyezett, saját címkével. A Supporter/Deluxe/bundle, account és más platform változatlanul kizárt. A mentett API-áradatokra is azonnal az új szűrés érvényes; nem kell cache-t törölni.

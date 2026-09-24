@@ -438,8 +438,11 @@ class Plugin:
             return {"success": True, "skipped": entry["skipped"], "title": entry["title"],
                     "checked_at": entry["checked_at"], "offers": []}
         history = entry.get("source") == "aks_history"
-        offers = (self._aks_history_filter if history else self._aks_filter)(entry["data"], self._price_preferences)
+        filtering: Dict[str, int] = {}
+        offers = (self._aks_history_filter(entry["data"], self._price_preferences, filtering) if history
+                  else self._aks_filter(entry["data"], self._price_preferences))
         return {"success": True, "provider": "aks", "offers": offers[:1], "matched_offers": len(offers),
+                "filtering": filtering,
                 "not_found": entry.get("not_found") is True, "match_status": entry.get("match_status", ""),
                 "source": entry.get("source", "aks_page"), "source_updated_at": entry.get("source_updated_at", ""),
                 "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
@@ -1387,43 +1390,57 @@ class Plugin:
         return {"prices": prices, **{k: payload[k] for k in ("merchants", "regions", "editions")}}
 
     @classmethod
-    def _aks_history_filter(cls, data: Dict[str, Any], preferences: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _aks_history_filter(cls, data: Dict[str, Any], preferences: Dict[str, Any],
+                            filtering: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
         # Labels come from the API's region map, not from the merchant name.
         # Bare Steam is the unqualified/global group, not a per-country activation guarantee.
         regions = {"steam": "Steam-kulcs · Global (AKS: Steam)", "steam global": "Steam-kulcs · Global",
                    "steam eu": "Steam-kulcs · EU", "steam row": "Steam-kulcs · ROW",
+                   "steam eu/us": "Steam-kulcs · EU/US",
                    "steam gift": "Steam Gift · Global (AKS: Steam Gift)",
                    "steam gift global": "Steam Gift · Global", "steam gift eu": "Steam Gift · EU",
                    "steam gift row": "Steam Gift · ROW"}
         allowed = {name.casefold() for name in preferences["merchants"]}
         restricted = preferences.get("restrict_merchants", bool(allowed))
+        counts = {key: 0 for key in ("invalid", "region", "edition", "merchant", "gift", "price", "accepted")}
+        counts["total"] = len(data["prices"])
         offers = []
         for row in data["prices"]:
             if not isinstance(row, dict) or not cls._aks_observed_time(row.get("end")):
+                counts["invalid"] += 1
                 continue
             region = data["regions"].get(str(row.get("region")), {})
             edition = data["editions"].get(str(row.get("edition")), {})
             merchant = data["merchants"].get(str(row.get("merchant_id")), {})
             if not all(isinstance(item, dict) for item in (region, edition, merchant)):
+                counts["invalid"] += 1
                 continue
             region_name = " ".join(str(region.get("name", "")).casefold().split())
             name = merchant.get("name")
-            if (region_name not in regions or edition.get("name") not in ("Standard", "Standard Edition")
-                    or not isinstance(name, str) or not name or len(name) > 80
-                    or (restricted and name.casefold() not in allowed)
-                    or ("gift" in region_name and not preferences["allow_gifts"])):
+            reason = ("region" if region_name not in regions else
+                      "edition" if edition.get("name") not in ("Standard", "Standard Edition", "Early Access") else
+                      "invalid" if not isinstance(name, str) or not name or len(name) > 80 else
+                      "gift" if "gift" in region_name and not preferences["allow_gifts"] else
+                      "merchant" if restricted and name.casefold() not in allowed else "")
+            if reason:
+                counts[reason] += 1
                 continue
             candidates = [(row.get(field), kind) for field, kind in
                           (("last_price", "regular"), ("min_discount_price", "discount"))]
             candidates = [(price, kind) for price, kind in candidates
                           if type(price) in (int, float) and 0.02 < price < 100000]
             if not candidates:
+                counts["price"] += 1
                 continue
             price, kind = min(candidates, key=lambda item: (item[0], item[1] != "regular"))
             coupon = row.get("best_discount_code") if kind == "discount" else ""
-            offers.append({"merchant": name, "price": price, "kind": regions[region_name], "edition": "Standard",
+            offers.append({"merchant": name, "price": price, "kind": regions[region_name],
+                           "edition": "Early Access" if edition["name"] == "Early Access" else "Standard",
                            "coupon": coupon[:80] if isinstance(coupon, str) else "", "price_kind": kind,
                            "source_updated_at": row["end"]})
+        counts["accepted"] = len(offers)
+        if filtering is not None:
+            filtering.update(counts)
         return sorted(offers, key=lambda offer: (offer["price"], offer["merchant"]))
 
     def _fetch_aks_game(self, app_id: str) -> Dict[str, Any]:

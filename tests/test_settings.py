@@ -686,6 +686,32 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         await restarted._load_price_cache()
         self.assertTrue((await restarted.get_cached_allkeyshop_price("10"))["not_found"])
 
+    def test_wardogs_early_access_base_game_retains_merchant_gift_and_region_filters(self):
+        payload = self.history_fixture()
+        payload["editions"] = {"5": {"name": "Early Access"}, "supporter": {"name": "Supporter Edition"}}
+        payload["regions"]["28"] = {"name": "STEAM EU/US"}
+        row = {**payload["history"][1], "edition": "5", "min_discount_price": 33.09}
+        payload["history"] = [row,
+            {**row, "product_id": 101, "merchant_id": 2, "min_discount_price": 32.56, "region": "28"},
+            {**row, "product_id": 102, "edition": "supporter", "min_discount_price": 1},
+            {**row, "product_id": 103, "region": "gift", "min_discount_price": 30},
+            {**row, "product_id": 104, "region": "account", "min_discount_price": 2}]
+        data = self.plugin._aks_history_data(payload)
+        prefs = {"merchants": ["GAMIVO", "Kinguin"], "restrict_merchants": True, "allow_gifts": False}
+        offers = self.plugin._aks_history_filter(data, prefs)
+        self.assertEqual([o["price"] for o in offers], [32.56, 33.09])
+        self.assertEqual(offers[0]["edition"], "Early Access")
+        self.assertEqual(offers[0]["kind"], "Steam-kulcs · EU/US")
+        prefs["merchants"] = ["Kinguin"]
+        self.assertEqual(self.plugin._aks_history_filter(data, prefs)[0]["price"], 33.09)
+        prefs["allow_gifts"] = True
+        self.assertEqual(self.plugin._aks_history_filter(data, prefs)[0]["price"], 30)
+        prefs["merchants"] = []
+        counts = {}
+        self.assertEqual(self.plugin._aks_history_filter(data, prefs, counts), [])
+        self.assertEqual(counts, {"total": 5, "accepted": 0, "edition": 1, "region": 1,
+                                  "merchant": 3, "gift": 0, "price": 0, "invalid": 0})
+
     def price_metadata(self, app_id="10", title="Example"):
         return {"app_id": app_id, "title": title, "is_free": False, "coming_soon": False, "checked_at": time.time()}
 
