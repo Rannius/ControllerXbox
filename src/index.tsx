@@ -2396,7 +2396,7 @@ function Content() {
       ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
         + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
         + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
-        + " · AKS: " + String(stats.price_fresh_entries ?? 0) + "/" + String(stats.price_entries ?? 0)
+        + " · Ár: " + String(stats.price_fresh_entries ?? 0) + "/" + String(stats.price_entries ?? 0)
       : "Állapot betöltése..."}</div></PanelSectionRow>
     <PriceCacheStatus />
     {diagnosticLog !== "Nincs rögzített hiba." ?

@@ -4,12 +4,13 @@ import { ButtonItem, PanelSectionRow, TextField, ToggleField } from "@decky/ui";
 import { callable } from "@decky/api";
 
 
-type Preferences = { success: boolean; enabled: boolean; allow_gifts: boolean; merchants: string[]; restrict_merchants: boolean; error?: string };
-export type PriceResult = { success: boolean; missing?: boolean; stale?: boolean; skipped?: "unreleased" | "release_unknown" | "free"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
+type Preferences = { provider: "aks" | "gg"; gg_key_configured: boolean; success: boolean; enabled: boolean; allow_gifts: boolean; merchants: string[]; restrict_merchants: boolean; error?: string };
+export type PriceResult = { provider?: "aks" | "gg"; retail_price?: number | null; keyshop_price?: number | null; success: boolean; missing?: boolean; stale?: boolean; skipped?: "unreleased" | "release_unknown" | "free"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
   checked_at?: number; currency?: string; preferred_only?: boolean; matched_offers?: number;
   offers?: { merchant: string; price: number; kind: string; edition: string; coupon: string }[] };
 const getPreferences = callable<[], Preferences>("get_price_preferences");
 const setPreferences = callable<[boolean, boolean, string[], boolean], Preferences>("set_price_preferences");
+const setProvider = callable<[string, string | null], Preferences>("set_price_provider");
 const getMerchants = callable<[boolean], { success: boolean; merchants: string[]; error?: string }>("get_price_merchants");
 const getCachedPrice = callable<[string], PriceResult>("get_cached_allkeyshop_price");
 const getPrice = callable<[string], PriceResult>("get_allkeyshop_price");
@@ -22,6 +23,7 @@ async function timed<T>(request: Promise<T>): Promise<T> {
 }
 
 type PriceStats = {
+  price_provider: "aks" | "gg"; price_metadata_entries: number; price_match_entries: number;
   price_entries: number; price_fresh_entries: number; price_wishlist_total: number;
   price_wishlist_ready: number; price_wishlist_skipped: number; price_wishlist_current: string; price_wishlist_deferred: number;
   price_wishlist_active: boolean; price_retry_after: number; price_disk_error: string; price_wishlist_error: string; price_last_error: string;
@@ -46,7 +48,8 @@ export function PriceCacheStatus() {
   return <>
     <PanelSectionRow><div role="status" style={{ fontSize: "12px", lineHeight: 1.5 }}>
       {stats ? <>
-        <div>AKS árgyorsítótár: {stats.price_fresh_entries}/{stats.price_entries} friss · 30 perc · lemezre mentve</div>
+        <div>{stats.price_provider === "gg" ? "GG.deals" : "AKS"} árgyorsítótár: {stats.price_fresh_entries}/{stats.price_entries} friss · 30 perc · lemezre mentve</div>
+        <div>Steam-adatok: {stats.price_metadata_entries} · AKS-hivatkozások: {stats.price_match_entries}</div>
         <div>Kívánságlista: {stats.price_wishlist_ready}/{stats.price_wishlist_total} ellenőrizve
           {stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""}</div>
         {stats.price_wishlist_deferred > 0 && <div>{stats.price_wishlist_deferred} sikertelen ellenőrzés · újabb háttérpróba 30 perc után.</div>}
@@ -65,12 +68,13 @@ export function PriceCacheStatus() {
       setBusy(true);
       try { const value = await timed(clearPriceCache()); resetPriceView(); setStats(value); }
       catch (error) { setError(String(error)); } finally { setBusy(false); }
-    }}>AKS árgyorsítótár törlése</ButtonItem></PanelSectionRow>
+    }}>Árgyorsítótárak törlése</ButtonItem></PanelSectionRow>
   </>;
 }
 
 export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void }) {
   const [prefs, setPrefs] = useState<Preferences>();
+  const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   useEffect(() => {
@@ -81,8 +85,19 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
     return () => { active = false; };
   }, []);
   return <>
-    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>AllKeyShop árak</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Játékárak · AllKeyShop / GG.deals</div></PanelSectionRow>
     {prefs && <>
+      <PanelSectionRow><ToggleField label="Árforrás: GG.deals" description="Kikapcsolva: AllKeyShop. Váltás az Alkalmazás gombbal."
+        checked={prefs.provider === "gg"} disabled={busy} onChange={gg => setPrefs({ ...prefs, provider: gg ? "gg" : "aks" })} /></PanelSectionRow>
+      {prefs.provider === "gg" && <>
+        <PanelSectionRow><TextField label={prefs.gg_key_configured ? "GG.deals API-kulcs (mentve; üresen megtartja)" : "GG.deals API-kulcs"}
+          bIsPassword value={apiKey} disabled={busy} onChange={event => setApiKey(event.currentTarget.value)} /></PanelSectionRow>
+        <PanelSectionRow><div style={{ fontSize: "12px", lineHeight: 1.5 }}>
+          GG.deals összehasonlító minimumárak (EU/EUR). Az API nem ad boltonkénti ajánlatokat:
+          a boltszűrő, a Steam-kulcs/Gift és kiadásszűrő itt nem alkalmazható. A pontos terméket és aktiválhatóságot a GG.deals adatlapján ellenőrizd.
+          Az AllKeyShop-beállításaid megmaradnak.
+        </div></PanelSectionRow>
+      </>}
       <PanelSectionRow><ToggleField label="Árak az áruházi játékoldalon" checked={prefs.enabled} disabled={busy}
         onChange={async (enabled) => {
           const updated = { ...prefs, enabled };
@@ -95,21 +110,24 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
             setPrefs(value); resetPriceView(); setMessage(enabled ? "Árlekérés bekapcsolva." : "Árlekérés kikapcsolva.");
           } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
         }} /></PanelSectionRow>
-      <PanelSectionRow><ToggleField label="Steam Gift is megengedett" checked={prefs.allow_gifts} disabled={busy}
+      <PanelSectionRow><ToggleField label="Steam Gift is megengedett (AllKeyShop)" checked={prefs.allow_gifts} disabled={busy || prefs.provider === "gg"}
         onChange={allow_gifts => setPrefs({ ...prefs, allow_gifts })} /></PanelSectionRow>
-      <PanelSectionRow><ButtonItem layout="below" onClick={openMerchants}>Megbízható boltok kiválasztása</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={prefs.provider === "gg"} onClick={openMerchants}>Megbízható boltok kiválasztása (AllKeyShop)</ButtonItem></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={async () => {
         setBusy(true); setMessage("");
         try {
           const current = await timed(getPreferences());
           if (!current.success) throw new Error(current.error || "Betöltési hiba");
+          const provider = await timed(setProvider(prefs.provider, apiKey.trim() || null));
+          if (!provider.success) throw new Error(provider.error || "Árforrás mentési hiba");
+          setApiKey("");
           const value = await timed(setPreferences(prefs.enabled, prefs.allow_gifts, current.merchants, current.restrict_merchants));
           if (!value.success) throw new Error(value.error || "Mentési hiba");
           setPrefs(value); resetPriceView(); setMessage("Árbeállítások mentve.");
         } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
       }}>{busy ? "Mentés…" : "Árbeállítások alkalmazása"}</ButtonItem></PanelSectionRow>
     </>}
-    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Az AllKeyShop-kérések között legalább 5 másodperc szünet van."}</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás."}</div></PanelSectionRow>
   </>;
 }
 
@@ -221,18 +239,36 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     panel.addEventListener('click', event => event.stopPropagation());
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
-    summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
+    const gg = data?.provider === 'gg';
+    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
     if (data?.retry_at && !data.success) { summary.dataset.dpbRetryAt = String(data.retry_at); summary.dataset.dpbLabel = summary.textContent; }
-    summary.title = 'AllKeyShop ár és ajánlatok – megnyitás';
+    const ggRetailCheaper = data?.retail_price != null && (data?.keyshop_price == null || data.retail_price <= data.keyshop_price);
+    if (gg) summary.textContent = !data.success ? 'GG.deals: ' + (data.error_code === 'rate_limit' ? 'várakozás' : 'hiba')
+      : 'GG.deals · ' + (ggRetailCheaper ? 'Hivatalos boltok: ' + data.retail_price.toFixed(2) + ' €'
+      : data.keyshop_price != null ? 'Kulcsboltok: ' + data.keyshop_price.toFixed(2) + ' €' : 'nincs ár');
+    if (data?.retry_at && !data.success) summary.dataset.dpbLabel = summary.textContent;
+    summary.title = (gg ? 'GG.deals' : 'AllKeyShop') + ' ár és ajánlatok – megnyitás';
     summary.style.cssText = 'cursor:pointer;white-space:normal;overflow-wrap:anywhere;box-sizing:border-box;list-style:none;border:1px solid #67c1f5;border-radius:5px;background:#162634;padding:2px 8px;font-weight:700;min-height:24px';
     panel.appendChild(summary);
     const content = document.createElement('div');
     content.style.cssText = 'box-sizing:border-box;width:100%;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;margin-top:4px';
     panel.appendChild(content);
     const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
-    line('AllKeyShop · Steam-kulcs / Gift', true);
+    line(gg ? 'GG.deals · összehasonlító árak · EU/EUR' : 'AllKeyShop · Steam-kulcs / Gift', true);
     if (!data) line('Árak betöltése…');
     else if (!data.success) { line(data.error || 'Az ár most nem érhető el.'); if (data.global_error) line('A többi árlekérés is szünetel. A következő próbáig hátralévő idő az ársorban látható. Az újrapróbálkozáshoz maradjon nyitva az áruház.'); }
+    else if (gg) {
+      line('Kulcsboltok minimuma: ' + (data.keyshop_price != null ? data.keyshop_price.toFixed(2) + ' €' : 'nincs ár'));
+      line('Hivatalos boltok minimuma: ' + (data.retail_price != null ? data.retail_price.toFixed(2) + ' €' : 'nincs ár'));
+      line('Összesített ár: a kiválasztott boltokra, Steam-kulcs/Gift típusra és kiadásra nem szűrhető.');
+      line('A terméket, díjakat és magyarországi aktiválhatóságot az ajánlatnál ellenőrizd.');
+      if (data.stale) line('Korábban mentett ár · frissítés folyamatban vagy kapcsolatra vár.');
+      if (data.checked_at) line('Utoljára ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
+      if (/^https:\\/\\/gg\\.deals\\/(?:game\\/[a-z0-9-]+\\/)?$/.test(data.url || '')) {
+        const link = document.createElement('a'); link.href = data.url; link.textContent = 'Árak forrása: GG.deals – ajánlatok megnyitása';
+        link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; content.appendChild(link);
+      }
+    }
     else {
       line(data.preferred_only ? 'Legalacsonyabb ár a kiválasztott boltokból' : 'Legalacsonyabb megfelelő ajánlat');
       if (!data.offers?.length) line('Nincs megfelelő Steam-kulcs vagy Gift az aktuális szűrőkkel.');
@@ -286,6 +322,11 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
       row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
       row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
+      if (value?.provider === 'gg') {
+        const amount = value.keyshop_price ?? value.retail_price;
+        row.textContent = !value.success ? 'GG.deals: várakozás / hiba' : amount != null ? 'GG.deals · tájékoztató ár: ' + amount.toFixed(2) + ' €' : 'GG.deals: nincs ár';
+        if (row.dataset.dpbRetryAt) row.dataset.dpbLabel = row.textContent;
+      }
       row.title = row.textContent;
       host.appendChild(row);
     }
@@ -357,7 +398,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   })().catch(error => ({ success: false, error: String(error), error_code: "backend", global_error: true, retry_after: 15 } as PriceResult)).then(value => {
     if (requestRevision !== revision || value.missing) return;
     if (value.global_error) {
-      const expires = Date.now() + Math.max(1, Math.min(86400, value.retry_after ?? 15)) * 1000;
+      const expires = Date.now() + Math.max(1, (value.retry_after ?? 15)) * 1000;
       serviceFailure = { value: { ...value, retry_at: expires }, expires };
       if (currentApp) void send(buildPricePanelScript(currentApp, visiblePrice(currentApp) ?? value)).catch(() => {});
       if (tileIds.length) renderTiles();
@@ -370,7 +411,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     }
     if (prices.size >= 500) prices.delete(prices.keys().next().value!);
     const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-    const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(86400, value.retry_after ?? 30)) * 1000);
+    const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
     if (!value.success) value = { ...value, retry_at: expires };
     prices.set(requestId, { value, expires });
     if (currentApp === requestId) void send(buildPricePanelScript(requestId, value)).catch(() => {});

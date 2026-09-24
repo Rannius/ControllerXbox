@@ -332,6 +332,7 @@ const storePriceTilesScript = `
 
 const getPreferences = callable("get_price_preferences");
 const setPreferences = callable("set_price_preferences");
+const setProvider = callable("set_price_provider");
 const getMerchants = callable("get_price_merchants");
 const getCachedPrice = callable("get_cached_allkeyshop_price");
 const getPrice = callable("get_allkeyshop_price");
@@ -375,7 +376,7 @@ function PriceCacheStatus() {
         void poll();
         return () => { active = false; clearTimeout(timer); };
     }, []);
-    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { role: "status", style: { fontSize: "12px", lineHeight: 1.5 }, children: [stats ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { children: ["AKS \u00E1rgyors\u00EDt\u00F3t\u00E1r: ", stats.price_fresh_entries, "/", stats.price_entries, " friss \u00B7 30 perc \u00B7 lemezre mentve"] }), SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_ready, "/", stats.price_wishlist_total, " ellen\u0151rizve", stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""] }), stats.price_wishlist_deferred > 0 && SP_JSX.jsxs("div", { children: [stats.price_wishlist_deferred, " sikertelen ellen\u0151rz\u00E9s \u00B7 \u00FAjabb h\u00E1tt\u00E9rpr\u00F3ba 30 perc ut\u00E1n."] }), SP_JSX.jsx("div", { children: stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { role: "status", style: { fontSize: "12px", lineHeight: 1.5 }, children: [stats ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { children: [stats.price_provider === "gg" ? "GG.deals" : "AKS", " \u00E1rgyors\u00EDt\u00F3t\u00E1r: ", stats.price_fresh_entries, "/", stats.price_entries, " friss \u00B7 30 perc \u00B7 lemezre mentve"] }), SP_JSX.jsxs("div", { children: ["Steam-adatok: ", stats.price_metadata_entries, " \u00B7 AKS-hivatkoz\u00E1sok: ", stats.price_match_entries] }), SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_ready, "/", stats.price_wishlist_total, " ellen\u0151rizve", stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""] }), stats.price_wishlist_deferred > 0 && SP_JSX.jsxs("div", { children: [stats.price_wishlist_deferred, " sikertelen ellen\u0151rz\u00E9s \u00B7 \u00FAjabb h\u00E1tt\u00E9rpr\u00F3ba 30 perc ut\u00E1n."] }), SP_JSX.jsx("div", { children: stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
                                         : !stats.price_wishlist_active ? "Előtöltés szünetel. Az áruház megnyitásakor indul."
                                             : stats.price_wishlist_current ? `Ellenőrzés: Steam ${stats.price_wishlist_current}`
                                                 : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 30 percnél régebbi adatok frissülnek."
@@ -392,10 +393,11 @@ function PriceCacheStatus() {
                         finally {
                             setBusy(false);
                         }
-                    }, children: "AKS \u00E1rgyors\u00EDt\u00F3t\u00E1r t\u00F6rl\u00E9se" }) })] });
+                    }, children: "\u00C1rgyors\u00EDt\u00F3t\u00E1rak t\u00F6rl\u00E9se" }) })] });
 }
 function AllKeyShopSettings({ openMerchants }) {
     const [prefs, setPrefs] = SP_REACT.useState();
+    const [apiKey, setApiKey] = SP_REACT.useState("");
     const [busy, setBusy] = SP_REACT.useState(false);
     const [message, setMessage] = SP_REACT.useState("");
     SP_REACT.useEffect(() => {
@@ -410,7 +412,7 @@ function AllKeyShopSettings({ openMerchants }) {
             setMessage(String(error)); });
         return () => { active = false; };
     }, []);
-    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "AllKeyShop \u00E1rak" }) }), prefs && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi j\u00E1t\u00E9koldalon", checked: prefs.enabled, disabled: busy, onChange: async (enabled) => {
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "J\u00E1t\u00E9k\u00E1rak \u00B7 AllKeyShop / GG.deals" }) }), prefs && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rforr\u00E1s: GG.deals", description: "Kikapcsolva: AllKeyShop. V\u00E1lt\u00E1s az Alkalmaz\u00E1s gombbal.", checked: prefs.provider === "gg", disabled: busy, onChange: gg => setPrefs({ ...prefs, provider: gg ? "gg" : "aks" }) }) }), prefs.provider === "gg" && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: prefs.gg_key_configured ? "GG.deals API-kulcs (mentve; üresen megtartja)" : "GG.deals API-kulcs", bIsPassword: true, value: apiKey, disabled: busy, onChange: event => setApiKey(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", lineHeight: 1.5 }, children: "GG.deals \u00F6sszehasonl\u00EDt\u00F3 minimum\u00E1rak (EU/EUR). Az API nem ad boltonk\u00E9nti aj\u00E1nlatokat: a boltsz\u0171r\u0151, a Steam-kulcs/Gift \u00E9s kiad\u00E1ssz\u0171r\u0151 itt nem alkalmazhat\u00F3. A pontos term\u00E9ket \u00E9s aktiv\u00E1lhat\u00F3s\u00E1got a GG.deals adatlapj\u00E1n ellen\u0151rizd. Az AllKeyShop-be\u00E1ll\u00EDt\u00E1said megmaradnak." }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi j\u00E1t\u00E9koldalon", checked: prefs.enabled, disabled: busy, onChange: async (enabled) => {
                                 const updated = { ...prefs, enabled };
                                 setPrefs(updated);
                                 setBusy(true);
@@ -432,13 +434,17 @@ function AllKeyShopSettings({ openMerchants }) {
                                 finally {
                                     setBusy(false);
                                 }
-                            } }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Steam Gift is megengedett", checked: prefs.allow_gifts, disabled: busy, onChange: allow_gifts => setPrefs({ ...prefs, allow_gifts }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: openMerchants, children: "Megb\u00EDzhat\u00F3 boltok kiv\u00E1laszt\u00E1sa" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
+                            } }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Steam Gift is megengedett (AllKeyShop)", checked: prefs.allow_gifts, disabled: busy || prefs.provider === "gg", onChange: allow_gifts => setPrefs({ ...prefs, allow_gifts }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: prefs.provider === "gg", onClick: openMerchants, children: "Megb\u00EDzhat\u00F3 boltok kiv\u00E1laszt\u00E1sa (AllKeyShop)" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
                                 setBusy(true);
                                 setMessage("");
                                 try {
                                     const current = await timed(getPreferences());
                                     if (!current.success)
                                         throw new Error(current.error || "Betöltési hiba");
+                                    const provider = await timed(setProvider(prefs.provider, apiKey.trim() || null));
+                                    if (!provider.success)
+                                        throw new Error(provider.error || "Árforrás mentési hiba");
+                                    setApiKey("");
                                     const value = await timed(setPreferences(prefs.enabled, prefs.allow_gifts, current.merchants, current.restrict_merchants));
                                     if (!value.success)
                                         throw new Error(value.error || "Mentési hiba");
@@ -452,7 +458,7 @@ function AllKeyShopSettings({ openMerchants }) {
                                 finally {
                                     setBusy(false);
                                 }
-                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Az AllKeyShop-kérések között legalább 5 másodperc szünet van." }) })] });
+                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás." }) })] });
 }
 function AllKeyShopMerchants({ onBack }) {
     const [names, setNames] = SP_REACT.useState([]);
@@ -575,18 +581,36 @@ function buildPricePanelScript(appId, result) {
     panel.addEventListener('click', event => event.stopPropagation());
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
-    summary.textContent = !data ? 'AKS …' : !data.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
+    const gg = data?.provider === 'gg';
+    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
     if (data?.retry_at && !data.success) { summary.dataset.dpbRetryAt = String(data.retry_at); summary.dataset.dpbLabel = summary.textContent; }
-    summary.title = 'AllKeyShop ár és ajánlatok – megnyitás';
+    const ggRetailCheaper = data?.retail_price != null && (data?.keyshop_price == null || data.retail_price <= data.keyshop_price);
+    if (gg) summary.textContent = !data.success ? 'GG.deals: ' + (data.error_code === 'rate_limit' ? 'várakozás' : 'hiba')
+      : 'GG.deals · ' + (ggRetailCheaper ? 'Hivatalos boltok: ' + data.retail_price.toFixed(2) + ' €'
+      : data.keyshop_price != null ? 'Kulcsboltok: ' + data.keyshop_price.toFixed(2) + ' €' : 'nincs ár');
+    if (data?.retry_at && !data.success) summary.dataset.dpbLabel = summary.textContent;
+    summary.title = (gg ? 'GG.deals' : 'AllKeyShop') + ' ár és ajánlatok – megnyitás';
     summary.style.cssText = 'cursor:pointer;white-space:normal;overflow-wrap:anywhere;box-sizing:border-box;list-style:none;border:1px solid #67c1f5;border-radius:5px;background:#162634;padding:2px 8px;font-weight:700;min-height:24px';
     panel.appendChild(summary);
     const content = document.createElement('div');
     content.style.cssText = 'box-sizing:border-box;width:100%;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;margin-top:4px';
     panel.appendChild(content);
     const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
-    line('AllKeyShop · Steam-kulcs / Gift', true);
+    line(gg ? 'GG.deals · összehasonlító árak · EU/EUR' : 'AllKeyShop · Steam-kulcs / Gift', true);
     if (!data) line('Árak betöltése…');
     else if (!data.success) { line(data.error || 'Az ár most nem érhető el.'); if (data.global_error) line('A többi árlekérés is szünetel. A következő próbáig hátralévő idő az ársorban látható. Az újrapróbálkozáshoz maradjon nyitva az áruház.'); }
+    else if (gg) {
+      line('Kulcsboltok minimuma: ' + (data.keyshop_price != null ? data.keyshop_price.toFixed(2) + ' €' : 'nincs ár'));
+      line('Hivatalos boltok minimuma: ' + (data.retail_price != null ? data.retail_price.toFixed(2) + ' €' : 'nincs ár'));
+      line('Összesített ár: a kiválasztott boltokra, Steam-kulcs/Gift típusra és kiadásra nem szűrhető.');
+      line('A terméket, díjakat és magyarországi aktiválhatóságot az ajánlatnál ellenőrizd.');
+      if (data.stale) line('Korábban mentett ár · frissítés folyamatban vagy kapcsolatra vár.');
+      if (data.checked_at) line('Utoljára ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
+      if (/^https:\\/\\/gg\\.deals\\/(?:game\\/[a-z0-9-]+\\/)?$/.test(data.url || '')) {
+        const link = document.createElement('a'); link.href = data.url; link.textContent = 'Árak forrása: GG.deals – ajánlatok megnyitása';
+        link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; content.appendChild(link);
+      }
+    }
     else {
       line(data.preferred_only ? 'Legalacsonyabb ár a kiválasztott boltokból' : 'Legalacsonyabb megfelelő ajánlat');
       if (!data.offers?.length) line('Nincs megfelelő Steam-kulcs vagy Gift az aktuális szűrőkkel.');
@@ -638,6 +662,11 @@ function buildTilePricesScript(url, values) {
       row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
       row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
+      if (value?.provider === 'gg') {
+        const amount = value.keyshop_price ?? value.retail_price;
+        row.textContent = !value.success ? 'GG.deals: várakozás / hiba' : amount != null ? 'GG.deals · tájékoztató ár: ' + amount.toFixed(2) + ' €' : 'GG.deals: nincs ár';
+        if (row.dataset.dpbRetryAt) row.dataset.dpbLabel = row.textContent;
+      }
       row.title = row.textContent;
       host.appendChild(row);
     }
@@ -725,7 +754,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
         if (requestRevision !== revision || value.missing)
             return;
         if (value.global_error) {
-            const expires = Date.now() + Math.max(1, Math.min(86400, value.retry_after ?? 15)) * 1000;
+            const expires = Date.now() + Math.max(1, (value.retry_after ?? 15)) * 1000;
             serviceFailure = { value: { ...value, retry_at: expires }, expires };
             if (currentApp)
                 void send(buildPricePanelScript(currentApp, visiblePrice(currentApp) ?? value)).catch(() => { });
@@ -741,7 +770,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
         if (prices.size >= 500)
             prices.delete(prices.keys().next().value);
         const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-        const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, Math.min(86400, value.retry_after ?? 30)) * 1000);
+        const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
         if (!value.success)
             value = { ...value, retry_at: expires };
         prices.set(requestId, { value, expires });
@@ -3155,7 +3184,7 @@ function Content() {
                         ? "Cache: " + String(stats.fresh_entries) + "/" + String(stats.entries)
                             + " · GFN: " + String(stats.gfn_catalog_entries ?? 0)
                             + " · Boosteroid: " + String(stats.boosteroid_catalog_entries ?? 0)
-                            + " · AKS: " + String(stats.price_fresh_entries ?? 0) + "/" + String(stats.price_entries ?? 0)
+                            + " · Ár: " + String(stats.price_fresh_entries ?? 0) + "/" + String(stats.price_entries ?? 0)
                         : "Állapot betöltése..." }) }), SP_JSX.jsx(PriceCacheStatus, {}), diagnosticLog !== "Nincs rögzített hiba." ?
                 SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { whiteSpace: "pre-wrap", userSelect: "text" }, children: ["Hiba: ", diagnosticLog] }) }) : null, SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: backendCheck, children: "J\u00E1t\u00E9kok \u00FAjraellen\u0151rz\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: working, onClick: clearAndRefresh, children: "Cache t\u00F6rl\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "Pluginfriss\u00EDt\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { children: updateStatus }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: updateWorking, onClick: () => void refreshUpdateInfo(), children: "Friss\u00EDt\u00E9sek keres\u00E9se" }) }), updateInfo?.has_update && updateInfo.latest_version && !installedUpdate ?
                 SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", disabled: updateWorking, onClick: installAvailableUpdate, children: ["Friss\u00EDt\u00E9s telep\u00EDt\u00E9se: v", updateInfo.latest_version] }) }) : null, installedUpdate ?

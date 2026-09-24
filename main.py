@@ -8,6 +8,7 @@ are public and require no API key.
 
 import asyncio
 import concurrent.futures
+import email.utils
 import functools
 import html
 import json
@@ -37,6 +38,10 @@ except ImportError:
 
 
 CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
+PRICE_TTL_SECONDS = 1800
+PRICE_METADATA_TTL_SECONDS = 86400
+AKS_MATCH_TTL_SECONDS = 7 * 86400
+AKS_REQUEST_GAP_SECONDS = 1.5
 CACHE_SCHEMA_VERSION = 6
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
 HUNGARIAN_CURATOR_ID = "34235089"
@@ -159,7 +164,17 @@ class Plugin:
         self._price_merchants_checked_at = 0.0
         self._price_merchants_lock = asyncio.Lock()
         self._price_cache: Dict[str, Dict[str, Any]] = {}
+        self._gg_cache: Dict[str, Dict[str, Any]] = {}
+        self._gg_api_key = ""
+        self._gg_requests: List[float] = []
+        self._gg_retry_at = 0.0
+        self._gg_failures = 0
+        self._gg_last_error = ""
         self._aks_matches: Dict[str, Dict[str, Any]] = {}
+        self._price_metadata: Dict[str, Dict[str, Any]] = {}
+        self._price_tasks: Dict[str, asyncio.Task] = {}
+        self._price_save_task: Optional[asyncio.Task] = None
+        self._price_save_dirty = False
         self._price_lock = asyncio.Lock()
         self._price_disk_lock = asyncio.Lock()
         self._price_foreground_waiters = 0
@@ -177,6 +192,8 @@ class Plugin:
         self._price_last_error = ""
         self._aks_request_lock = threading.Lock()
         self._aks_next_request_at = 0.0
+        self._aks_http_failures = 0
+        self._aks_pause_until = 0.0
         self._price_service_error: Optional[Dict[str, Any]] = None
         self._price_service_retry_at = 0.0
         self._price_service_failures = 0
@@ -263,6 +280,9 @@ class Plugin:
         self._price_wishlist_lease = 0
         if self._price_wishlist_task:
             await self._price_wishlist_task
+        await asyncio.gather(*list(self._price_tasks.values()), return_exceptions=True)
+        if self._price_save_task:
+            await self._price_save_task
         await self._save_price_cache()
         self._steam_stopping = True
         await asyncio.gather(*list(self._steam_tasks.values()), return_exceptions=True)
@@ -406,7 +426,7 @@ class Plugin:
             return {"success": True, "skipped": entry["skipped"], "title": entry["title"],
                     "checked_at": entry["checked_at"], "offers": []}
         offers = self._aks_filter(entry["data"], self._price_preferences)
-        return {"success": True, "offers": offers[:1], "matched_offers": len(offers),
+        return {"success": True, "provider": "aks", "offers": offers[:1], "matched_offers": len(offers),
                 "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
                 "currency": "EUR", "preferred_only": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
 
@@ -435,41 +455,108 @@ class Plugin:
                 return
             self._price_cache = {key: value for key, value in list(payload["entries"].items())[-10000:]
                                  if key.isdigit() and 0 < int(key) < 10000000000 and self._valid_price_entry(value)}
-            for key, entry in self._price_cache.items():
-                if entry.get("url") and time.time() - entry["checked_at"] < 86400:
-                    self._aks_matches[key] = {name: entry[name] for name in ("title", "url", "checked_at")}
+            gg = payload.get("gg_entries", {})
+            if isinstance(gg, dict):
+                self._gg_cache = {k: v for k, v in list(gg.items())[-10000:]
+                                  if k.isdigit() and 0 < int(k) < 10000000000 and self._valid_gg_entry(v)}
+            limits = payload.get("gg_requests", [])
+            if isinstance(limits, list):
+                self._gg_requests = [v for v in limits[-1000:] if type(v) in (int, float) and 0 <= time.time() - v < 3600]
+            retry = payload.get("gg_retry_at", 0)
+            if type(retry) in (int, float) and retry > 0:
+                self._gg_retry_at = retry
+            now = time.time()
+            # Older cache files can seed matches, but never extend their original age.
+            candidates = payload.get("matches")
+            if "matches" not in payload:
+                candidates = {k: v for k, v in self._price_cache.items() if v.get("url")}
+            if not isinstance(candidates, dict):
+                candidates = {}
+            self._aks_matches = {k: {f: v[f] for f in ("title", "url", "checked_at")}
+                                 for k, v in list(candidates.items())[-10000:] if self._valid_aks_match(k, v, now)}
+            metadata = payload.get("metadata", {})
+            if isinstance(metadata, dict):
+                self._price_metadata = {k: v for k, v in list(metadata.items())[-10000:]
+                                        if self._valid_price_metadata(k, v, now)}
         except (OSError, ValueError, TypeError):
             decky.logger.debug("AllKeyShop cache unavailable; starting empty")
 
+    @staticmethod
+    def _valid_aks_match(key: Any, value: Any, now: float) -> bool:
+        return (isinstance(key, str) and key.isdigit() and 0 < int(key) < 10000000000
+                and isinstance(value, dict) and isinstance(value.get("title"), str) and bool(value["title"])
+                and type(value.get("checked_at")) in (int, float)
+                and 0 <= now - value["checked_at"] < AKS_MATCH_TTL_SECONDS
+                and isinstance(value.get("url"), str) and bool(re.fullmatch(
+                    r"https://www\.allkeyshop\.com/blog/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+/", value["url"]))
+                and "account" not in value["url"])
+
+    @staticmethod
+    def _valid_price_metadata(key: Any, value: Any, now: float) -> bool:
+        return (isinstance(key, str) and key.isdigit() and 0 < int(key) < 10000000000
+                and isinstance(value, dict) and value.get("app_id") == key
+                and isinstance(value.get("title"), str) and 0 < len(value["title"]) <= 200
+                and type(value.get("is_free")) is bool
+                and (value.get("coming_soon") is None or type(value["coming_soon"]) is bool)
+                and type(value.get("checked_at")) in (int, float)
+                and 0 <= now - value["checked_at"] < PRICE_METADATA_TTL_SECONDS)
+
     async def _save_price_cache(self) -> None:
         async with self._price_disk_lock:
-            entries = {key: value for key, value in self._price_cache.items() if self._valid_price_entry(value)}
-            entries = {key: ({**value, "data": {field: value["data"][field] for field in
-                        ("prices", "merchants", "regions", "editions")}} if "data" in value else value)
-                       for key, value in entries.items()}
-            try:
-                payload = json.dumps({"version": 1, "entries": entries}, ensure_ascii=False)
+            # Values are immutable snapshots. Encode/filter on the worker, not Steam's event loop.
+            entries, matches, metadata = self._price_cache.copy(), self._aks_matches.copy(), self._price_metadata.copy()
+            gg, requests, retry = self._gg_cache.copy(), self._gg_requests[:], self._gg_retry_at
+            def write() -> None:
+                valid = {key: value for key, value in entries.items() if self._valid_price_entry(value)}
+                valid = {key: ({**value, "data": {field: value["data"][field] for field in
+                         ("prices", "merchants", "regions", "editions")}} if "data" in value else value)
+                         for key, value in valid.items()}
+                now = time.time()
+                payload = json.dumps({"version": 1, "entries": valid,
+                    "gg_entries": {k: v for k, v in gg.items() if self._valid_gg_entry(v)},
+                    "gg_requests": requests, "gg_retry_at": retry,
+                    "matches": {k: v for k, v in matches.items() if self._valid_aks_match(k, v, now)},
+                    "metadata": {k: v for k, v in metadata.items() if self._valid_price_metadata(k, v, now)}}, ensure_ascii=False)
                 if len(payload.encode("utf-8")) > 64 * 1024 * 1024:
                     raise OSError("Price cache exceeds disk limit")
-                await self._run_blocking(self._write_file_atomically, self._price_cache_path, "aks-cache-", payload)
+                self._write_file_atomically(self._price_cache_path, "aks-cache-", payload)
+            try:
+                await self._run_blocking(write)
                 self._price_disk_error = ""
             except OSError:
                 self._price_disk_error = "Az árgyorsítótár lemezre mentése sikertelen."
                 decky.logger.warning(self._price_disk_error)
 
+    def _schedule_price_save(self) -> None:
+        self._price_save_dirty = True
+        if self._price_save_task is None or self._price_save_task.done():
+            self._price_save_task = asyncio.create_task(self._flush_price_saves())
+
+    async def _flush_price_saves(self) -> None:
+        while self._price_save_dirty:
+            await asyncio.sleep(0.25)
+            self._price_save_dirty = False
+            await self._save_price_cache()
+            try:
+                await self._save_price_merchants()
+            except OSError:
+                decky.logger.debug("Could not save discovered price merchants")
+
     async def get_cached_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
         # No network and no price lock: a slow background lookup must not delay display.
         if not self._price_preferences["enabled"]:
             return {"success": True, "disabled": True}
-        entry = self._price_cache.get(str(app_id))
+        entry = self._active_price_cache().get(str(app_id))
         if not entry or "error" in entry:
             return {"success": True, "missing": True}
-        return {**self._price_result(entry), "stale": time.time() - entry["checked_at"] >= 1800}
+        return {**self._active_price_result(entry), "stale": time.time() - entry["checked_at"] >= 1800}
 
     async def clear_price_cache(self) -> Dict[str, Any]:
         self._price_epoch += 1
         self._price_cache.clear()
+        self._gg_cache.clear()
         self._aks_matches.clear()
+        self._price_metadata.clear()
         self._price_wishlist_retry.clear()
         self._price_wishlist_attempts.clear()
         await self._save_price_cache()
@@ -477,18 +564,20 @@ class Plugin:
 
     def _price_stats(self) -> Dict[str, Any]:
         now = time.time()
-        valid = {key: value for key, value in self._price_cache.items() if "error" not in value}
+        valid = {key: value for key, value in self._active_price_cache().items() if "error" not in value}
         fresh = {key for key, value in valid.items() if now - value["checked_at"] < 1800}
         wishlist = set(self._price_wishlist)
-        return {"price_entries": len(valid), "price_fresh_entries": len(fresh),
+        return {"price_provider": self._price_preferences.get("provider", "aks"),
+                "price_metadata_entries": len(self._price_metadata), "price_match_entries": len(self._aks_matches),
+                "price_entries": len(valid), "price_fresh_entries": len(fresh),
                 "price_wishlist_total": len(wishlist), "price_wishlist_ready": len(wishlist & fresh),
                 "price_wishlist_skipped": sum(bool(valid[key].get("skipped")) for key in wishlist & fresh),
                 "price_wishlist_current": self._price_wishlist_current,
                 "price_wishlist_deferred": sum(self._price_wishlist_retry.get(key, 0) > now for key in wishlist - fresh),
                 "price_wishlist_active": self._price_preferences["enabled"] and time.monotonic() < self._price_wishlist_lease,
-                "price_retry_after": max(0, int(self._price_service_retry_at - now)),
+                "price_retry_after": max(0, int(self._active_price_retry_at() - now)),
                 "price_wishlist_error": self._price_wishlist_error,
-                "price_last_error": self._price_last_error,
+                "price_last_error": self._gg_last_error if self._price_preferences.get("provider") == "gg" else self._price_last_error,
                 "price_disk_error": self._price_disk_error}
 
     async def get_price_cache_stats(self) -> Dict[str, Any]:
@@ -513,14 +602,14 @@ class Plugin:
     async def _price_wishlist_step(self) -> bool:
         if (self._price_stopping or not self._price_preferences["enabled"] or self._price_foreground_waiters
                 or self._price_lock.locked() or time.monotonic() >= self._price_wishlist_lease
-                or time.time() < self._price_service_retry_at):
+                or time.time() < self._active_price_retry_at()):
             return False
         now = time.time()
         # Unknown games first, then oldest entries: large lists must not keep
         # refreshing their first items while the tail has never been checked.
         for app_id in sorted(self._price_wishlist, key=lambda key: max(
-                self._price_cache.get(key, {}).get("checked_at", 0), self._price_wishlist_attempts.get(key, 0))):
-            entry = self._price_cache.get(app_id)
+                self._active_price_cache().get(key, {}).get("checked_at", 0), self._price_wishlist_attempts.get(key, 0))):
+            entry = self._active_price_cache().get(app_id)
             if entry and "error" not in entry and now - entry["checked_at"] < 1800:
                 continue
             if self._price_wishlist_retry.get(app_id, 0) > now:
@@ -540,11 +629,13 @@ class Plugin:
     async def _price_wishlist_worker(self) -> None:
         while not self._price_stopping and time.monotonic() < self._price_wishlist_lease:
             try:
-                await self._price_wishlist_step()
+                progressed = await self._price_wishlist_step()
             except Exception as error:
+                progressed = False
                 decky.logger.warning("Wishlist price prefetch failed: %s", error)
                 self._price_service_retry_at = max(self._price_service_retry_at, time.time() + 60)
-            await asyncio.sleep(2)
+            # Only idle polling sleeps; successful work is paced by the HTTP gate.
+            await asyncio.sleep(0 if progressed else 2)
 
     async def _load_price_preferences(self) -> None:
         try:
@@ -553,13 +644,17 @@ class Plugin:
                     and type(value.get("allow_gifts")) is bool and isinstance(value.get("merchants"), list)
                     and all(isinstance(item, str) and len(item) <= 80 for item in value["merchants"])
                     and len(value["merchants"]) <= 2000):
+                secret = value.pop("gg_api_key", "")
+                self._gg_api_key = secret if isinstance(secret, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,200}", secret) else ""
+                value["provider"] = "gg" if value.get("provider") == "gg" else "aks"
                 self._price_preferences = value
                 self._price_preferences["restrict_merchants"] = value.get("restrict_merchants", bool(value["merchants"])) is True
         except (OSError, ValueError, TypeError):
             pass
 
     async def get_price_preferences(self) -> Dict[str, Any]:
-        return {"success": True, **self._price_preferences,
+        return {"success": True, **self._price_preferences, "gg_key_configured": bool(self._gg_api_key),
+                "provider": self._price_preferences.get("provider", "aks"),
                 "restrict_merchants": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
 
     async def set_price_preferences(self, enabled: Any, allow_gifts: Any, merchants: Any, restrict_merchants: Any = None) -> Dict[str, Any]:
@@ -567,13 +662,172 @@ class Plugin:
                 or len(merchants) > 2000 or any(not isinstance(item, str) or len(item) > 80 for item in merchants)
                 or (restrict_merchants is not None and type(restrict_merchants) is not bool)):
             return {"success": False, "error": "Érvénytelen árfigyelési beállítás."}
-        value = {"enabled": enabled, "allow_gifts": allow_gifts,
+        value = {"provider": self._price_preferences.get("provider", "aks"), "enabled": enabled, "allow_gifts": allow_gifts,
                  "restrict_merchants": bool(merchants) if restrict_merchants is None else restrict_merchants,
                  "merchants": sorted(set(item.strip() for item in merchants if item.strip()))}
         await self._run_blocking(self._write_file_atomically, self._price_settings_path,
-                                 "price-preferences-", json.dumps(value, ensure_ascii=False))
+                                 "price-preferences-", json.dumps({**value, "gg_api_key": self._gg_api_key}, ensure_ascii=False))
         self._price_preferences = value
         return await self.get_price_preferences()
+
+    async def set_price_provider(self, provider: Any, api_key: Any = None) -> Dict[str, Any]:
+        if provider not in ("aks", "gg") or (api_key is not None and (
+                not isinstance(api_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,200}", api_key))):
+            return {"success": False, "error": "Érvénytelen árforrás vagy API-kulcs."}
+        key = self._gg_api_key if api_key is None else api_key
+        if provider == "gg" and not key:
+            return {"success": False, "error": "Add meg a GG.deals API-kulcsot."}
+        value = {**self._price_preferences, "provider": provider}
+        await self._run_blocking(self._write_file_atomically, self._price_settings_path,
+            "price-preferences-", json.dumps({**value, "gg_api_key": key}, ensure_ascii=False))
+        # The secret is backend-only: never return it through get_preferences or prices.
+        self._gg_api_key = key
+        self._price_preferences = value
+        self._price_epoch += 1
+        self._price_wishlist_retry.clear()
+        self._price_wishlist_attempts.clear()
+        return await self.get_price_preferences()
+
+    def _active_price_cache(self) -> Dict[str, Dict[str, Any]]:
+        return self._gg_cache if self._price_preferences.get("provider") == "gg" else self._price_cache
+
+    def _active_price_result(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        return dict(entry) if self._price_preferences.get("provider") == "gg" else self._price_result(entry)
+
+    def _active_price_retry_at(self) -> float:
+        return self._gg_retry_at if self._price_preferences.get("provider") == "gg" else self._price_service_retry_at
+
+    @staticmethod
+    def _valid_gg_entry(entry: Any) -> bool:
+        if (not isinstance(entry, dict) or entry.get("success") is not True or entry.get("provider") != "gg"
+                or type(entry.get("checked_at")) not in (int, float) or not 0 < entry["checked_at"] <= time.time() + 60):
+            return False
+        if entry.get("skipped") in ("free", "unreleased", "release_unknown"):
+            return True
+        valid_url = isinstance(entry.get("url"), str) and bool(re.fullmatch(r"https://gg\.deals/game/[a-z0-9-]+/", entry["url"]))
+        if entry.get("not_found") is True and entry.get("url") == "https://gg.deals/":
+            valid_url = entry.get("retail_price") is None and entry.get("keyshop_price") is None
+        return (valid_url
+                and entry.get("currency") == "EUR" and isinstance(entry.get("title"), str)
+                and all(entry.get(k) is None or (type(entry[k]) in (int, float) and 0 <= entry[k] < 100000)
+                        for k in ("retail_price", "keyshop_price")))
+
+    def _fetch_gg_prices(self, ids: List[str]) -> Dict[str, Any]:
+        query = urllib.parse.urlencode({"key": self._gg_api_key, "ids": ",".join(ids), "region": "eu"})
+        request = urllib.request.Request("https://api.gg.deals/v1/prices/by-steam-app-id/?" + query,
+                                         headers={"User-Agent": "Deck Play Badges/1.0", "Accept": "application/json"})
+        # Do not include this URL (which contains the key) in logs or returned errors.
+        with self._open_verified_request(request, timeout=15) as response:
+            if urllib.parse.urlparse(response.geturl()).hostname != "api.gg.deals":
+                raise ValueError("Unexpected API redirect")
+            body = response.read(2000001)
+            if len(body) > 2000000:
+                raise ValueError("Oversized API response")
+            payload = json.loads(body)
+            headers = dict(response.headers)
+        if not isinstance(payload, dict) or payload.get("success") is not True or not isinstance(payload.get("data"), dict):
+            raise ValueError("Invalid API response")
+        return {"data": payload["data"], "headers": headers}
+
+    def _gg_result(self, app_id: str, item: Any) -> Dict[str, Any]:
+        if item is None:
+            return {"success": True, "provider": "gg", "title": self._price_metadata[app_id]["title"],
+                    "url": "https://gg.deals/", "not_found": True, "currency": "EUR", "retail_price": None, "keyshop_price": None,
+                    "checked_at": time.time()}
+        if not isinstance(item, dict) or not isinstance(item.get("prices"), dict):
+            raise ValueError("Invalid API item")
+        prices = item["prices"]
+        def price(key: str) -> Optional[float]:
+            value = prices.get(key)
+            if value is None:
+                return None
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+                raise ValueError("Invalid API price")
+            number = float(value)
+            if not 0 <= number < 100000:
+                raise ValueError("Invalid API price")
+            return number
+        result = {"success": True, "provider": "gg", "title": item.get("title"), "url": item.get("url"),
+                  "currency": prices.get("currency"), "retail_price": price("currentRetail"),
+                  "keyshop_price": price("currentKeyshops"), "checked_at": time.time()}
+        if not self._valid_gg_entry(result):
+            raise ValueError("Invalid API product")
+        return result
+
+    async def _lookup_gg_price(self, app_id: str, epoch: int) -> Dict[str, Any]:
+        async with self._price_lock:
+            if epoch != self._price_epoch or self._price_stopping or not self._price_preferences["enabled"]:
+                return {"success": True, "disabled": True, "provider": "gg"}
+            entry = self._gg_cache.get(app_id)
+            if entry and time.time() - entry["checked_at"] < PRICE_TTL_SECONDS:
+                return dict(entry)
+            if time.time() < self._gg_retry_at:
+                return {"success": False, "provider": "gg", "global_error": True, "error_code": "rate_limit",
+                        "error": self._gg_last_error or "GG.deals lekérési szünet.", "retry_after": self._gg_retry_at - time.time()}
+            try:
+                if not self._gg_api_key:
+                    raise ValueError("Missing key")
+                metadata = await self._run_blocking(self._fetch_price_metadata, app_id)
+                skipped = self._price_skip(metadata)
+                if skipped:
+                    result = {"success": True, "provider": "gg", "skipped": skipped,
+                              "title": metadata["title"], "checked_at": time.time()}
+                else:
+                    now = time.time()
+                    self._gg_requests = [stamp for stamp in self._gg_requests if now - stamp < 3600]
+                    minute = [stamp for stamp in self._gg_requests if now - stamp < 60]
+                    capacity = min(100 - len(minute), 1000 - len(self._gg_requests))
+                    if capacity <= 0:
+                        self._gg_retry_at = max(minute[0] + 60 if len(minute) >= 100 else 0,
+                                                self._gg_requests[0] + 3600 if len(self._gg_requests) >= 1000 else 0)
+                        return {"success": False, "provider": "gg", "global_error": True, "error_code": "rate_limit",
+                                "error": "GG.deals API-keret: a következő időablakra vár.", "retry_after": max(1, self._gg_retry_at - now)}
+                    ids = [app_id]
+                    # Include due wishlist items whose Steam eligibility is already known.
+                    if time.monotonic() < self._price_wishlist_lease:
+                        for key in self._price_wishlist:
+                            cached = self._gg_cache.get(key)
+                            meta = self._price_metadata.get(key)
+                            if (key != app_id and len(ids) < capacity and self._valid_price_metadata(key, meta, now)
+                                    and not self._price_skip(meta) and (not cached or now - cached["checked_at"] >= PRICE_TTL_SECONDS)):
+                                ids.append(key)
+                    self._gg_requests.extend([now] * len(ids))
+                    self._schedule_price_save()
+                    response = await self._run_blocking(self._fetch_gg_prices, ids)
+                    headers = {k.lower(): v for k, v in response["headers"].items()}
+                    if str(headers.get("x-ratelimit-remaining")) == "0":
+                        reset = str(headers.get("x-ratelimit-reset", ""))
+                        self._gg_retry_at = max(self._gg_retry_at, float(reset) if reset.isdigit() else now + 60)
+                    results = {key: self._gg_result(key, response["data"][key]) for key in ids}
+                    if epoch != self._price_epoch:
+                        return {"success": True, "disabled": True, "provider": "gg"}
+                    self._gg_cache.update(results)
+                    result = results[app_id]
+                if epoch != self._price_epoch:
+                    return {"success": True, "disabled": True, "provider": "gg"}
+                self._gg_cache[app_id] = result
+                while len(self._gg_cache) > 10000:
+                    self._gg_cache.pop(next(iter(self._gg_cache)))
+                self._gg_failures = 0
+                self._gg_last_error = ""
+                self._schedule_price_save()
+                return dict(result)
+            except (OSError, ValueError, TypeError, KeyError) as error:
+                code = "connection" if isinstance(error, OSError) else "format"
+                if isinstance(error, urllib.error.HTTPError):
+                    code = "rate_limit" if error.code == 429 else "http"
+                    message = "GG.deals HTTP %s." % error.code
+                    if error.code in (401, 403):
+                        message += " Ellenőrizd az API-kulcsot és a hozzáférést."
+                else:
+                    message = "GG.deals: kapcsolati hiba vagy időtúllépés." if code == "connection" else "A GG.deals vagy a Steam válasza nem ellenőrizhető."
+                self._gg_failures += 1
+                delay = max(min(300, 10 * 2 ** min(5, self._gg_failures - 1)), self._retry_after(getattr(error, "headers", None)))
+                self._gg_retry_at = max(self._gg_retry_at, time.time() + delay)
+                self._gg_last_error = message
+                self._schedule_price_save()
+                return {"success": False, "provider": "gg", "global_error": True,
+                        "error_code": code, "error": message, "retry_after": self._gg_retry_at - time.time()}
 
     async def _load_price_merchants(self) -> None:
         try:
@@ -629,6 +883,17 @@ class Plugin:
         value = html.unescape(re.sub(r"<[^>]*>", "", value)).replace("™", "").replace("®", "")
         return re.sub(r"[^\w]", "", unicodedata.normalize("NFKC", value).casefold())
 
+    @staticmethod
+    def _retry_after(headers: Any) -> float:
+        value = str((headers or {}).get("Retry-After", "")).strip()
+        if value.isdigit():
+            return float(value)
+        try:
+            stamp = email.utils.parsedate_to_datetime(value).timestamp()
+            return max(0.0, stamp - time.time())
+        except (ValueError, TypeError, OverflowError):
+            return 0.0
+
     def _aks_read(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
         if parsed.scheme != "https" or parsed.netloc != "www.allkeyshop.com":
@@ -638,6 +903,10 @@ class Plugin:
         # Executed only in the blocking worker: one global AKS request at a time,
         # including search, offer pages and merchant-directory refreshes.
         with self._aks_request_lock:
+            # Applies to *all* AKS paths, including the merchant directory.
+            remaining = self._aks_pause_until - time.monotonic()
+            if remaining > 0:
+                raise urllib.error.HTTPError(url, 429, "AKS cooldown", {"Retry-After": str(int(remaining) + 1)}, None)
             wait = max(0.0, self._aks_next_request_at - time.monotonic())
             if wait:
                 time.sleep(wait)
@@ -649,14 +918,23 @@ class Plugin:
                     body = response.read(4000001)
                 if len(body) > 4000000:
                     raise ValueError("AllKeyShop page is too large")
+                self._aks_http_failures = 0
                 return body.decode("utf-8")
             except (OSError, ValueError) as error:
+                if isinstance(error, urllib.error.HTTPError):
+                    pause = self._retry_after(error.headers)
+                    if error.code == 429:
+                        self._aks_http_failures += 1
+                        pause = max(pause, min(300, 10 * 2 ** min(5, self._aks_http_failures - 1)))
+                    if pause:
+                        self._aks_pause_until = max(self._aks_pause_until, time.monotonic() + pause)
+                        self._aks_next_request_at = max(self._aks_next_request_at, self._aks_pause_until)
                 error.price_stage = "AKS-kereső" if "admin-ajax.php" in parsed.path else (
                     "AKS-boltlista" if "cdkey-store-reviews" in parsed.path else "AKS-ajánlatoldal")
                 error.price_elapsed = round(time.monotonic() - started, 1)
                 raise
             finally:
-                self._aks_next_request_at = time.monotonic() + 5.0
+                self._aks_next_request_at = max(self._aks_next_request_at, time.monotonic() + AKS_REQUEST_GAP_SECONDS)
 
     @classmethod
     def _aks_search_match(cls, fragment: str, title: str) -> str:
@@ -716,7 +994,10 @@ class Plugin:
                            "coupon": coupon[:80] if isinstance(coupon, str) else ""})
         return sorted(offers, key=lambda offer: (offer["price"], offer["merchant"]))
 
-    def _fetch_aks_game(self, app_id: str) -> Dict[str, Any]:
+    def _fetch_price_metadata(self, app_id: str) -> Dict[str, Any]:
+        cached = self._price_metadata.get(app_id)
+        if self._valid_price_metadata(app_id, cached, time.time()):
+            return cached
         request = urllib.request.Request(STORE_URL.format(app_id=app_id),
                                          headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"})
         started = time.monotonic()
@@ -724,53 +1005,100 @@ class Plugin:
             with self._open_request(request, timeout=10) as response:
                 payload = json.load(response)
             item = payload.get(app_id, {})
-            metadata = item.get("data", {}) if item.get("success") else {}
+            data = item.get("data", {}) if item.get("success") else {}
+            title = str(data.get("name", "")).strip()[:200]
+            if not title:
+                raise ValueError("Missing Steam title")
+            release = data.get("release_date")
+            coming_soon = release.get("coming_soon") if isinstance(release, dict) else None
+            result = {"app_id": app_id, "title": title, "is_free": data.get("is_free") is True,
+                      "coming_soon": coming_soon if type(coming_soon) is bool else None, "checked_at": time.time()}
         except (OSError, ValueError, TypeError, AttributeError) as error:
             failure = ValueError("A Steam-játék neve most nem kérdezhető le.")
             failure.price_stage = "Steam-adatok"
             failure.price_elapsed = round(time.monotonic() - started, 1)
             raise failure from error
-        if not isinstance(metadata, dict):
-            raise ValueError("A Steam-játék neve most nem kérdezhető le.")
-        title = str(metadata.get("name", "")).strip()[:200]
-        if not title:
-            raise ValueError("A Steam-játék neve most nem kérdezhető le.")
-        if metadata.get("is_free") is True:
-            return {"title": title, "skipped": "free", "checked_at": time.time()}
-        release = metadata.get("release_date")
-        coming_soon = release.get("coming_soon") if isinstance(release, dict) else None
-        # No AKS search or offer download until Steam confirms the game is released.
-        if coming_soon is not False:
-            return {"title": title, "skipped": "unreleased" if coming_soon is True else "release_unknown",
-                    "checked_at": time.time()}
-        # Reuse a verified match, but always recheck Steam's free/release flags above.
+        if len(self._price_metadata) >= 10000:
+            self._price_metadata.pop(next(iter(self._price_metadata)))
+        self._price_metadata[app_id] = result
+        return result
+
+    @staticmethod
+    def _price_skip(metadata: Dict[str, Any]) -> str:
+        if metadata["is_free"]:
+            return "free"
+        if metadata["coming_soon"] is not False:
+            return "unreleased" if metadata["coming_soon"] is True else "release_unknown"
+        return ""
+
+    @classmethod
+    def _aks_page_matches(cls, page: str, title: str, app_id: str) -> bool:
+        heading = re.search(r"<h1\b[^>]*>(.*?)</h1>", page, re.S | re.I)
+        if not heading:
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
+        name = re.search(r'<[^>]+(?:data-)?itemprop=[\"\']name[\"\'][^>]*>(.*?)</[^>]+>', heading.group(1), re.S | re.I)
+        if not name:
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
+        if cls._aks_title(name.group(1)) != cls._aks_title(title):
+            return False
+        # When an explicit Steam product link exists, never accept a different AppID.
+        steam_ids = set(re.findall(r'https?://store\.steampowered\.com/app/(\+?\d+)', heading.group(1)))
+        return not steam_ids or steam_ids == {app_id}
+
+    def _fetch_aks_game(self, app_id: str) -> Dict[str, Any]:
+        metadata = self._fetch_price_metadata(app_id)
+        title = metadata["title"]
+        skipped = self._price_skip(metadata)
+        if skipped:
+            return {"title": title, "skipped": skipped, "checked_at": time.time()}
         match = self._aks_matches.get(app_id)
-        if match and (match["title"] != title or time.time() - match["checked_at"] >= 86400):
+        if not self._valid_aks_match(app_id, match, time.time()) or match["title"] != title:
             self._aks_matches.pop(app_id, None)
             match = None
-        if match:
-            url = match["url"]
-        else:
-            query = urllib.parse.urlencode({"action": "quicksearch", "search_name": title, "currency": "eur",
-                                            "locale": "en", "platform": "pc", "activation_country": "HU"})
-            search = json.loads(self._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?" + query))
-            fragment = search.get("resultsGames", search.get("results", "")) if isinstance(search, dict) else ""
-            if not isinstance(fragment, str):
-                raise ValueError("Az AllKeyShop keresője nem válaszolt megfelelően.")
-            url = self._aks_search_match(fragment, title)
-            if len(self._aks_matches) >= 500:
-                self._aks_matches.pop(next(iter(self._aks_matches)))
-            self._aks_matches[app_id] = {"title": title, "url": url, "checked_at": time.time()}
-        try:
-            page = self._aks_read(url + "?currency=eur")
-        except urllib.error.HTTPError as error:
-            if error.code in (404, 410):
+        # A broken cached link gets exactly one fresh search, never a retry loop.
+        for attempt in range(2):
+            reused = match is not None
+            if match:
+                url = match["url"]
+            else:
+                query = urllib.parse.urlencode({"action": "quicksearch", "search_name": title, "currency": "eur",
+                                                "locale": "en", "platform": "pc", "activation_country": "HU"})
+                search = json.loads(self._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?" + query))
+                fragment = search.get("resultsGames", search.get("results", "")) if isinstance(search, dict) else ""
+                if not isinstance(fragment, str):
+                    raise ValueError("Az AllKeyShop keresője nem válaszolt megfelelően.")
+                url = self._aks_search_match(fragment, title)
+                if len(self._aks_matches) >= 10000:
+                    self._aks_matches.pop(next(iter(self._aks_matches)))
+                self._aks_matches[app_id] = {"title": title, "url": url, "checked_at": time.time()}
+            try:
+                page = self._aks_read(url + "?currency=eur")
+                matches = self._aks_page_matches(page, title, app_id)
+            except urllib.error.HTTPError as error:
+                if error.code not in (404, 410):
+                    raise
                 self._aks_matches.pop(app_id, None)
-            raise
-        currency = re.search(r'"currency"\s*:\s*"([a-zA-Z]+)"', page)
-        if not currency or currency.group(1).lower() != "eur":
-            raise ValueError("Az AllKeyShop pénzneme nem ellenőrizhető.")
-        return {"title": title, "url": url, "data": self._aks_parse(page), "checked_at": time.time()}
+                match = None
+                if reused and attempt == 0:
+                    continue
+                raise
+            if not matches:
+                self._aks_matches.pop(app_id, None)
+                match = None
+                if reused and attempt == 0:
+                    continue
+                raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
+            currency = re.search(r'"currency"\s*:\s*"([a-zA-Z]+)"', page)
+            if not currency or currency.group(1).lower() != "eur":
+                raise ValueError("Az AllKeyShop pénzneme nem ellenőrizhető.")
+            data = self._aks_parse(page)
+            if len(self._aks_matches) >= 10000:
+                self._aks_matches.pop(next(iter(self._aks_matches)))
+            # Reusing a page must not indefinitely extend the search verification TTL.
+            self._aks_matches[app_id] = {"title": title, "url": url,
+                                        "checked_at": match["checked_at"] if match else time.time()}
+            return {"title": title, "url": url, "data": data, "checked_at": time.time()}
+        raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
 
     @staticmethod
     def _aks_error_details(error: Exception) -> Dict[str, Any]:
@@ -823,9 +1151,9 @@ class Plugin:
         message = stage + (" (%.1f mp)" % elapsed if isinstance(elapsed, (int, float)) else "") + ": " + message
         details = {"error": message, "error_code": code, "global_error": shared}
         if isinstance(cause, urllib.error.HTTPError):
-            retry = str((cause.headers or {}).get("Retry-After", ""))
-            if retry.isdigit():
-                details["retry_after"] = min(86400, int(retry))
+            retry = Plugin._retry_after(cause.headers)
+            if retry:
+                details["retry_after"] = retry
         return details
 
     async def get_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
@@ -839,10 +1167,34 @@ class Plugin:
         normalized = str(app_id)
         if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
             return {"success": False, "error": "Érvénytelen Steam AppID."}
+        if not self._price_preferences["enabled"] or self._price_stopping:
+            return {"success": True, "disabled": True}
+        entry = self._active_price_cache().get(normalized)
+        if entry and "error" not in entry and 0 <= time.time() - entry["checked_at"] < PRICE_TTL_SECONDS:
+            return self._active_price_result(entry)
+        task_key = str(self._price_epoch) + ":" + normalized
+        task = self._price_tasks.get(task_key)
+        if task is None:
+            task = asyncio.create_task(self._lookup_gg_price(normalized, self._price_epoch)
+                                       if self._price_preferences.get("provider") == "gg"
+                                       else self._lookup_allkeyshop_price(normalized, self._price_epoch))
+            self._price_tasks[task_key] = task
+            def completed(done: asyncio.Task) -> None:
+                if self._price_tasks.get(task_key) is done:
+                    self._price_tasks.pop(task_key, None)
+                if not done.cancelled():
+                    done.exception()
+            task.add_done_callback(completed)
+        return await asyncio.shield(task)
+
+    async def _lookup_allkeyshop_price(self, app_id: Any, request_epoch: int) -> Dict[str, Any]:
+        normalized = str(app_id)
+        if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
+            return {"success": False, "error": "Érvénytelen Steam AppID."}
         if not self._price_preferences["enabled"]:
             return {"success": True, "disabled": True}
         async with self._price_lock:
-            if not self._price_preferences["enabled"] or self._price_stopping:
+            if not self._price_preferences["enabled"] or self._price_stopping or request_epoch != self._price_epoch:
                 return {"success": True, "disabled": True}
             entry = self._price_cache.get(normalized)
             previous = entry
@@ -855,6 +1207,7 @@ class Plugin:
                     entry = await self._run_blocking(self._fetch_aks_game, normalized)
                     if epoch != self._price_epoch:
                         self._aks_matches.pop(normalized, None)
+                        self._price_metadata.pop(normalized, None)
                         return {"success": False, "error": "Az árgyorsítótár törölve lett.", "retry_after": 30}
                     if not entry.get("skipped"):
                         self._price_last_error = ""
@@ -862,6 +1215,11 @@ class Plugin:
                         self._price_service_failures = 0
                         self._price_service_retry_at = 0.0
                 except (OSError, ValueError, TypeError, KeyError) as error:
+                    if epoch != self._price_epoch:
+                        self._aks_matches.pop(normalized, None)
+                        self._price_metadata.pop(normalized, None)
+                        return {"success": True, "disabled": True}
+                    self._schedule_price_save()  # Persist metadata/match progress even when offers fail.
                     decky.logger.debug("AllKeyShop lookup failed: %s", error)
                     details = self._aks_error_details(error)
                     self._price_last_error = "Steam %s · %s" % (normalized, details["error"])
@@ -881,22 +1239,18 @@ class Plugin:
                         self._price_cache.pop(next(iter(self._price_cache)))
                     self._price_cache[normalized] = entry
                 if "error" not in entry:
-                    await self._save_price_cache()
+                    self._schedule_price_save()
             if "error" in entry:
                 return {"success": False, "error": entry["error"], "error_code": entry.get("error_code", "lookup"),
                         "global_error": False, "retry_after": max(1, int(30 - (time.time() - entry["checked_at"])))}
             if entry.get("skipped"):
                 return {"success": True, "skipped": entry["skipped"], "title": entry["title"],
                         "checked_at": entry["checked_at"], "offers": []}
-            async with self._price_merchants_lock:
-                discovered = {row["name"] for row in entry["data"]["merchants"].values()
-                              if isinstance(row, dict) and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 80}
-                if discovered - self._price_merchants:
-                    self._price_merchants.update(discovered)
-                    try:
-                        await self._save_price_merchants()
-                    except OSError as error:
-                        decky.logger.debug("AllKeyShop discovered merchants could not be saved: %s", error)
+            discovered = {row["name"] for row in entry["data"]["merchants"].values()
+                          if isinstance(row, dict) and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 80}
+            if discovered - self._price_merchants:
+                self._price_merchants.update(discovered)
+                self._schedule_price_save()
             return self._price_result(entry)
 
 
