@@ -95,7 +95,7 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
         release, started = asyncio.Event(), asyncio.Event()
         self.release_events.append(release)
         calls = []
-        self.engine._price_cache["10"] = self.entry(age=1801)
+        self.engine._price_cache["10"] = self.entry(age=86401)
         async def lookup(app_id):
             calls.append(app_id)
             started.set()
@@ -134,6 +134,19 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
         self.http.requests.extend([time.monotonic()] * 300)
         self.assertEqual((await self.request("/v1/status"))[0], 429)
 
+    async def test_day_old_cache_boundary_matches_monitor(self):
+        self.engine._price_cache["10"] = self.entry(age=23 * 3600)
+        self.engine._price_cache["20"] = self.entry(age=86401)
+        with patch.object(self.engine, "_get_allkeyshop_price") as lookup:
+            _, result = await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            self.assertFalse(result["pending"])
+            self.assertIsNotNone(result["entry"])
+            _, status = await self.request("/v1/status")
+            self.assertEqual(status["price_ttl_seconds"], 86400)
+            self.assertEqual(status["fresh"], 1)
+            self.assertEqual(status["stale"], 1)
+            lookup.assert_not_called()
+
     async def test_monitor_shows_running_waiting_results_and_cache_without_fetching(self):
         started, release = asyncio.Event(), asyncio.Event()
         self.release_events.append(release)
@@ -144,7 +157,7 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
             await release.wait()
             self.engine._price_cache[app_id] = self.entry()
             return {"success": True}
-        self.engine._price_cache["90"] = self.entry(age=1801)
+        self.engine._price_cache["90"] = self.entry(age=86401)
         with patch.object(self.engine, "_get_allkeyshop_price", side_effect=lookup):
             await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
             await asyncio.wait_for(started.wait(), 1)

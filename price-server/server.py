@@ -43,6 +43,7 @@ def load_engine(data_directory, gg_key=""):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     engine = module.Plugin()
+    engine.price_ttl_seconds = module.PRICE_TTL_SECONDS
     engine._gg_api_key = gg_key
     return engine
 
@@ -108,7 +109,7 @@ class PriceBroker:
         providers = {}
         for provider in ("aks", "gg"):
             entries = [entry for entry in self.cache(provider).values() if "error" not in entry]
-            fresh = sum(0 <= now - entry["checked_at"] < 1800 for entry in entries)
+            fresh = sum(0 <= now - entry["checked_at"] < self.engine.price_ttl_seconds for entry in entries)
             providers[provider] = {"stored": len(entries), "fresh": fresh, "stale": len(entries) - fresh,
                                    "skipped": sum(bool(entry.get("skipped")) for entry in entries),
                                    "retry_after": max(0, round(self.cooldown(provider) - now)),
@@ -137,7 +138,7 @@ class PriceBroker:
                 "state": state, "started_at": self.started_at, "updated_at": now,
                 "current": current, "waiting_count": len(waiting), "waiting": waiting,
                 "recent": list(reversed(self.recent)), "providers": providers,
-                "stored": stored, "fresh": fresh, "stale": stored - fresh,
+                "stored": stored, "fresh": fresh, "stale": stored - fresh, "price_ttl_seconds": self.engine.price_ttl_seconds,
                 "metadata_entries": len(self.engine._price_metadata), "match_entries": len(self.engine._aks_matches),
                 "completed": self.completed, "failed": self.failed, "cache_hits": self.cache_hits,
                 "observed_count": len(self.observed), "observed_evicted": self.observed_evicted,
@@ -158,7 +159,7 @@ class PriceBroker:
         entry = self.entry_copy(self.cache(provider).get(app_id))
         response = {"protocol": PROTOCOL, "provider": provider, "app_id": app_id, "entry": entry,
                     "pending": False, "retry_after": 3, "queue": len(self.pending)}
-        if entry and 0 <= now - entry["checked_at"] < 1800:
+        if entry and 0 <= now - entry["checked_at"] < self.engine.price_ttl_seconds:
             self.cache_hits += 1
             self.observe(key, "cached")
             return response

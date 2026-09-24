@@ -71,7 +71,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(cached["offers"])
             restarted._price_preferences.update({"restrict_merchants": True, "merchants": []})
             self.assertEqual((await restarted.get_cached_allkeyshop_price("10"))["offers"], [])
-            restarted._price_cache["10"]["checked_at"] -= 1801
+            restarted._price_cache["10"]["checked_at"] -= 86401
             self.assertTrue((await restarted.get_cached_allkeyshop_price("10"))["stale"])
             fetch.assert_not_called()
         self.assertEqual((await restarted.get_price_cache_stats())["price_entries"], 2)
@@ -95,7 +95,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.plugin._price_wishlist = ["10", "20", "30"]
         self.plugin._price_wishlist_lease = time.monotonic() + 90
         self.plugin._price_cache["10"] = {"title": "Free", "skipped": "free", "checked_at": time.time()}
-        self.plugin._price_cache["20"] = {"title": "Old", "skipped": "unreleased", "checked_at": time.time() - 1801}
+        self.plugin._price_cache["20"] = {"title": "Old", "skipped": "unreleased", "checked_at": time.time() - 86401}
         with patch.object(self.plugin, "_fetch_aks_game", return_value={"title": "Skipped", "skipped": "free", "checked_at": time.time()}) as fetch:
             self.plugin._price_foreground_waiters = 1
             self.assertFalse(await self.plugin._price_wishlist_step())
@@ -117,7 +117,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_wishlist_failure_pauses_and_preserves_previous_price(self):
         entry = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
-                 "data": self.aks_fixture(), "checked_at": time.time() - 1801}
+                 "data": self.aks_fixture(), "checked_at": time.time() - 86401}
         self.plugin._price_cache["10"] = entry
         self.plugin._price_wishlist = ["10"]
         self.plugin._price_wishlist_lease = time.monotonic() + 90
@@ -222,7 +222,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.plugin, "_fetch_aks_game", return_value={**data, "checked_at": time.time()}) as fetch:
             await self.plugin.get_allkeyshop_price("10")
             fetch.assert_not_called()
-            self.plugin._price_cache["10"]["checked_at"] = time.time() - 1801
+            self.plugin._price_cache["10"]["checked_at"] = time.time() - 86401
             await self.plugin.get_allkeyshop_price("10")
             self.assertEqual(fetch.call_count, 1)
 
@@ -602,6 +602,35 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
     def price_page(self, title="Example"):
         return '<h1><span data-itemprop="name">' + title + '</span></h1>"currency":"eur"; var gamePageTrans = ' + json.dumps(self.aks_fixture())
 
+    def test_trademark_search_cleans_query_and_keeps_exact_validation(self):
+        from urllib.parse import parse_qs, urlparse
+        url = "https://www.allkeyshop.com/blog/buy-solarpunk-cd-key-compare-prices/"
+        row = '<li data-platforms="pc"><h2 class="ls-results-row-game-title">Solarpunk</h2><a href="' + url + '">Solarpunk</a></li>'
+        self.plugin._price_metadata["10"] = self.price_metadata(title="Solarpunk™")
+        with patch.object(self.plugin, "_aks_read", side_effect=[json.dumps({"resultsGames": row}), self.price_page("Solarpunk")]) as fetch:
+            result = self.plugin._fetch_aks_game("10")
+        self.assertEqual(parse_qs(urlparse(fetch.call_args_list[0].args[0]).query)["search_name"], ["Solarpunk"])
+        self.assertEqual(result["title"], "Solarpunk™")
+        self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(self.plugin._aks_search_name(" LEGO®  Voyagers™ "), "LEGO Voyagers")
+        self.assertEqual(self.plugin._aks_search_name("Été™: A &amp; B – Deluxe"), "Été: A & B – Deluxe")
+        with self.assertRaises(ValueError):
+            self.plugin._aks_search_match(row.replace('>Solarpunk<', '>Solarpunk Deluxe<'), "Solarpunk™")
+        self.assertFalse(self.plugin._aks_page_matches('<h1><span itemprop="name">Solarpunk</span><a href="https://store.steampowered.com/app/20/">Steam</a></h1>', "Solarpunk™", "10"))
+
+    async def test_day_price_cache_serves_twenty_three_hours_then_refreshes(self):
+        self.plugin._price_cache["10"] = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+            "data": self.aks_fixture(), "checked_at": time.time() - 23 * 3600}
+        with patch.object(self.plugin, "_fetch_aks_game", return_value={"title": "Free", "skipped": "free", "checked_at": time.time()}) as fetch:
+            self.assertFalse((await self.plugin.get_cached_allkeyshop_price("10"))["stale"])
+            self.assertTrue((await self.plugin.get_allkeyshop_price("10"))["success"])
+            self.assertEqual(self.plugin._price_stats()["price_fresh_entries"], 1)
+            fetch.assert_not_called()
+            self.plugin._price_cache["10"]["checked_at"] = time.time() - 86401
+            self.assertTrue((await self.plugin.get_cached_allkeyshop_price("10"))["stale"])
+            self.assertTrue((await self.plugin.get_allkeyshop_price("10"))["success"])
+            fetch.assert_called_once()
+
     async def test_three_price_cache_layers_survive_restart_and_skip_known_http_steps(self):
         url = "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/"
         self.plugin._price_metadata["10"] = self.price_metadata()
@@ -622,7 +651,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalidated_match_is_not_resurrected_from_stale_price_after_restart(self):
         self.plugin._price_cache["10"] = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-old-cd-key-compare-prices/",
-            "data": self.aks_fixture(), "checked_at": time.time() - 1801}
+            "data": self.aks_fixture(), "checked_at": time.time() - 86401}
         self.plugin._aks_matches.clear()
         await self.plugin._save_price_cache()
         restarted = self.plugin_type()
@@ -817,7 +846,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
     async def test_server_offline_retains_stale_price_and_never_falls_back_to_provider(self):
         await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
         entry = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
-                 "data": self.aks_fixture(), "checked_at": time.time() - 1801}
+                 "data": self.aks_fixture(), "checked_at": time.time() - 86401}
         self.plugin._price_cache["10"] = entry
         with patch.object(self.plugin, "_price_server_request", side_effect=TimeoutError("sensitive URL")) as remote, patch.object(self.plugin, "_fetch_aks_game") as direct:
             self.assertTrue((await self.plugin.get_cached_allkeyshop_price("10"))["stale"])

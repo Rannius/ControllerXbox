@@ -38,7 +38,7 @@ except ImportError:
 
 
 CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
-PRICE_TTL_SECONDS = 1800
+PRICE_TTL_SECONDS = 24 * 60 * 60
 PRICE_METADATA_TTL_SECONDS = 86400
 AKS_MATCH_TTL_SECONDS = 7 * 86400
 AKS_REQUEST_GAP_SECONDS = 1.5
@@ -564,7 +564,7 @@ class Plugin:
         entry = self._active_price_cache().get(str(app_id))
         if not entry or "error" in entry:
             return {"success": True, "missing": True}
-        return {**self._active_price_result(entry), "stale": time.time() - entry["checked_at"] >= 1800}
+        return {**self._active_price_result(entry), "stale": time.time() - entry["checked_at"] >= PRICE_TTL_SECONDS}
 
     async def clear_price_cache(self) -> Dict[str, Any]:
         self._price_epoch += 1
@@ -580,7 +580,7 @@ class Plugin:
     def _price_stats(self) -> Dict[str, Any]:
         now = time.time()
         valid = {key: value for key, value in self._active_price_cache().items() if "error" not in value}
-        fresh = {key for key, value in valid.items() if now - value["checked_at"] < 1800}
+        fresh = {key for key, value in valid.items() if now - value["checked_at"] < PRICE_TTL_SECONDS}
         wishlist = set(self._price_wishlist)
         return {"price_connection": self._price_connection["mode"], "price_server_queue": self._price_server_queue,
                 "price_provider": self._price_preferences.get("provider", "aks"),
@@ -627,7 +627,7 @@ class Plugin:
         for app_id in sorted(self._price_wishlist, key=lambda key: max(
                 self._active_price_cache().get(key, {}).get("checked_at", 0), self._price_wishlist_attempts.get(key, 0))):
             entry = self._active_price_cache().get(app_id)
-            if entry and "error" not in entry and now - entry["checked_at"] < 1800:
+            if entry and "error" not in entry and now - entry["checked_at"] < PRICE_TTL_SECONDS:
                 continue
             if self._price_wishlist_retry.get(app_id, 0) > now:
                 continue
@@ -1089,6 +1089,12 @@ class Plugin:
         return re.sub(r"[^\w]", "", unicodedata.normalize("NFKC", value).casefold())
 
     @staticmethod
+    def _aks_search_name(value: str) -> str:
+        # Omit trademark glyphs in the request too, preserving words, accents,
+        # punctuation and edition names. Exact result/AppID validation is unchanged.
+        return " ".join(html.unescape(value).replace("™", "").replace("®", "").split())
+
+    @staticmethod
     def _retry_after(headers: Any) -> float:
         value = str((headers or {}).get("Retry-After", "")).strip()
         if value.isdigit():
@@ -1266,7 +1272,7 @@ class Plugin:
             if match:
                 url = match["url"]
             else:
-                query = urllib.parse.urlencode({"action": "quicksearch", "search_name": title, "currency": "eur",
+                query = urllib.parse.urlencode({"action": "quicksearch", "search_name": self._aks_search_name(title), "currency": "eur",
                                                 "locale": "en", "platform": "pc", "activation_country": "HU"})
                 search = json.loads(self._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?" + query))
                 fragment = search.get("resultsGames", search.get("results", "")) if isinstance(search, dict) else ""
@@ -1406,7 +1412,7 @@ class Plugin:
             entry = self._price_cache.get(normalized)
             previous = entry
             epoch = self._price_epoch
-            if not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else 1800):
+            if not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else PRICE_TTL_SECONDS):
                 if self._price_service_error and time.time() < self._price_service_retry_at:
                     return {"success": False, **self._price_service_error,
                             "retry_after": max(1, int(self._price_service_retry_at - time.time()))}

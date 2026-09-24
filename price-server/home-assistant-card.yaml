@@ -11,7 +11,7 @@ cards:
       - entity: sensor.deck_price_stored
         name: Tárolt AKS + GG bejegyzések
       - entity: sensor.deck_price_fresh
-        name: Friss (30 percen belüli)
+        name: Friss (24 órán belüli)
       - entity: sensor.deck_price_stale
         name: Lejárt
   - type: markdown

@@ -19,8 +19,8 @@ Ez a szerver **nem IP-forgató és nem tiltásmegkerülő szolgáltatás**. A Du
 Az Ubuntu termináljában:
 
 ```bash
-curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.85/DeckPriceServer-v1.0.85.tar.gz
-tar -xzf DeckPriceServer-v1.0.85.tar.gz
+curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.86/DeckPriceServer-v1.0.86.tar.gz
+tar -xzf DeckPriceServer-v1.0.86.tar.gz
 cd DeckPriceServer
 sudo bash install.sh sajat-szerver.duckdns.org
 ```
@@ -55,7 +55,7 @@ sudo journalctl -u caddy -n 80 --no-pager
 systemctl list-timers deck-price-duckdns.timer
 ```
 
-- Cache: `/var/lib/deck-price-server/`. Steam-adatok 24 óra, AKS-párosítás 7 nap, árak 30 perc.
+- Cache: `/var/lib/deck-price-server/`. Steam-adatok 24 óra, AKS-párosítás 7 nap, árak 24 óra.
 - Konfiguráció: `/etc/deck-price-server/config.json`. Módosítás után: `sudo systemctl restart deck-price-server`.
 - A szerver nem tárol Steam-fiókot, belépési adatot vagy kívánságlista-tagságot. A Deck a szükséges AppID-t, forrást és prioritást küldi.
 - Nincs folyamatos teljes-katalógus letöltés. Külső lekérést az igényelt, hiányzó vagy lejárt ár indít. Már sorba állított feladatok az áruház bezárása után még befejeződhetnek.
@@ -98,7 +98,7 @@ Az API mezői:
 | `waiting_count`, `waiting` | Sorban álló feladatok a futó nélkül; prioritás és szolgáltatói várakozás másodpercben |
 | `queue` | Visszafelé kompatibilis számláló: futó + sorban álló feladatok |
 | `recent` | Legutóbbi 50 befejezett próbálkozás, legújabb elöl; kimenetel, időpont, időtartam, újrapróbálhatóság időpontja |
-| `stored`, `fresh`, `stale` | Tárolt eredmények; 30 percen belüli és lejárt bejegyzések. Az AKS és GG ugyanahhoz a játékhoz két külön bejegyzés |
+| `stored`, `fresh`, `stale` | Tárolt eredmények; 24 órán belüli és lejárt bejegyzések. Az AKS és GG ugyanahhoz a játékhoz két külön bejegyzés |
 | `providers` | AKS/GG külön számlálók, kihagyott játékok száma, beállítottság és szolgáltatói várakozás |
 | `metadata_entries`, `match_entries` | Steam metadata és ellenőrzött AKS-párosítások száma |
 | `completed`, `failed`, `cache_hits` | Indulás óta sikeres (kihagyást is beleértve) és hibás munkák, illetve friss cache-ből kiszolgált klienskérések. Nem HTTP-kérésszámok |

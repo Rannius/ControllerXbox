@@ -379,10 +379,10 @@ function PriceCacheStatus() {
         void poll();
         return () => { active = false; clearTimeout(timer); };
     }, []);
-    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { role: "status", style: { fontSize: "12px", lineHeight: 1.5 }, children: [stats ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { children: [stats.price_provider === "gg" ? "GG.deals" : "AKS", " \u00E1rgyors\u00EDt\u00F3t\u00E1r: ", stats.price_fresh_entries, "/", stats.price_entries, " friss \u00B7 30 perc \u00B7 lemezre mentve"] }), stats.price_connection === "server" && SP_JSX.jsxs("div", { children: ["Saj\u00E1t szerver \u00B7 sorban: ", stats.price_server_queue, " \u00B7 helyi \u00E1rment\u00E9s akt\u00EDv"] }), SP_JSX.jsxs("div", { children: ["Steam-adatok: ", stats.price_metadata_entries, " \u00B7 AKS-hivatkoz\u00E1sok: ", stats.price_match_entries] }), SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_ready, "/", stats.price_wishlist_total, " ellen\u0151rizve", stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""] }), stats.price_wishlist_deferred > 0 && SP_JSX.jsxs("div", { children: [stats.price_wishlist_deferred, " t\u00E9tel v\u00E1rakozik a k\u00F6vetkez\u0151 h\u00E1tt\u00E9rpr\u00F3b\u00E1ra."] }), SP_JSX.jsx("div", { children: stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { role: "status", style: { fontSize: "12px", lineHeight: 1.5 }, children: [stats ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { children: [stats.price_provider === "gg" ? "GG.deals" : "AKS", " \u00E1rgyors\u00EDt\u00F3t\u00E1r: ", stats.price_fresh_entries, "/", stats.price_entries, " friss \u00B7 24 \u00F3ra \u00B7 lemezre mentve"] }), stats.price_connection === "server" && SP_JSX.jsxs("div", { children: ["Saj\u00E1t szerver \u00B7 sorban: ", stats.price_server_queue, " \u00B7 helyi \u00E1rment\u00E9s akt\u00EDv"] }), SP_JSX.jsxs("div", { children: ["Steam-adatok: ", stats.price_metadata_entries, " \u00B7 AKS-hivatkoz\u00E1sok: ", stats.price_match_entries] }), SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_ready, "/", stats.price_wishlist_total, " ellen\u0151rizve", stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""] }), stats.price_wishlist_deferred > 0 && SP_JSX.jsxs("div", { children: [stats.price_wishlist_deferred, " t\u00E9tel v\u00E1rakozik a k\u00F6vetkez\u0151 h\u00E1tt\u00E9rpr\u00F3b\u00E1ra."] }), SP_JSX.jsx("div", { children: stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
                                         : !stats.price_wishlist_active ? "Előtöltés szünetel. Az áruház megnyitásakor indul."
                                             : stats.price_wishlist_current ? `Ellenőrzés: Steam ${stats.price_wishlist_current}`
-                                                : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 30 percnél régebbi adatok frissülnek."
+                                                : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 24 óránál régebbi adatok frissülnek."
                                                     : "A következő játék ellenőrzésére vár." }), stats.price_disk_error && SP_JSX.jsx("div", { children: stats.price_disk_error }), stats.price_wishlist_error && SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_error] }), stats.price_last_error && SP_JSX.jsxs("div", { children: ["Legut\u00F3bbi \u00E1rlek\u00E9r\u00E9si hiba: ", stats.price_last_error] })] }) : "Árgyorsítótár betöltése…", error && SP_JSX.jsx("div", { children: error })] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
                         setBusy(true);
                         try {
@@ -484,7 +484,7 @@ function AllKeyShopSettings({ openMerchants }) {
                                 finally {
                                     setBusy(false);
                                 }
-                            }, children: "Mentett szerverkapcsolat tesztel\u00E9se" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás." }) })] });
+                            }, children: "Mentett szerverkapcsolat tesztel\u00E9se" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 24 óráig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás." }) })] });
 }
 function AllKeyShopMerchants({ onBack }) {
     const [names, setNames] = SP_REACT.useState([]);
@@ -765,7 +765,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
         if (cached.disabled)
             return cached;
         if (cached.success && cached.checked_at) {
-            prices.set(requestId, { value: cached, expires: cached.checked_at * 1000 + 1800000 });
+            prices.set(requestId, { value: cached, expires: cached.checked_at * 1000 + (24 * 60 * 60 * 1000) });
             if (currentApp === requestId)
                 void send(buildPricePanelScript(requestId, cached)).catch(() => { });
             if (!cached.stale)
@@ -796,7 +796,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
         if (prices.size >= 500)
             prices.delete(prices.keys().next().value);
         const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-        const expires = Date.now() + (value.pending ? Math.max(1, value.retry_after ?? 3) * 1000 : value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
+        const expires = Date.now() + (value.pending ? Math.max(1, value.retry_after ?? 3) * 1000 : value.success && !value.disabled ? Math.max(0, (24 * 60 * 60 * 1000) - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
         if (!value.success)
             value = { ...value, retry_at: expires };
         prices.set(requestId, { value, expires });

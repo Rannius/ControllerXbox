@@ -77,10 +77,11 @@ test('new tiles precede expired cached tiles and open game has priority',async()
  f.requests[2].resolve({success:true,offers:[]});await f.drain();
 });
 
-test('successful prices refresh only on reappearance after 30 minutes',async()=>{
+test('successful prices remain fresh for 24 hours and refresh only on reappearance',async()=>{
  const f=fixture(),url='https://store.steampowered.com/search/';
  f.api.updatePriceView(url,f.send,['10']);await f.drain();f.requests[0].resolve({success:true,checked_at:f.clock.now/1000,offers:[]});await f.drain();
- f.clock.now+=1801000;f.api.updatePriceView(url,f.send,['10']);await f.drain();assert.equal(f.requests.length,1);
+ f.clock.now+=23*3600000;f.api.updatePriceView(url,f.send,[]);await f.drain();f.api.updatePriceView(url,f.send,['10']);await f.drain();assert.equal(f.requests.length,1);
+ f.clock.now+=3601000;f.api.updatePriceView(url,f.send,['10']);await f.drain();assert.equal(f.requests.length,1);
  f.api.updatePriceView(url,f.send,[]);await f.drain();f.api.updatePriceView(url,f.send,['10']);await f.drain();assert.equal(f.requests.length,2);
  f.requests[1].resolve({success:true,checked_at:f.clock.now/1000,offers:[]});await f.drain();
  f.api.updatePriceView(url,f.send,[]);await f.drain();f.api.updatePriceView(url,f.send,['10']);await f.drain();assert.equal(f.requests.length,2);
@@ -119,7 +120,7 @@ test('backend cooldown above one minute is respected without premature retries',
 
 test('persistent cached price renders before a slow refresh and fresh cache avoids requests',async()=>{
  const f=fixture(),url='https://store.steampowered.com/app/10/';
- f.cached.set('10',{success:true,stale:true,checked_at:(f.clock.now-1801000)/1000,offers:[{price:4,merchant:'Saved',kind:'Steam key',edition:'Standard',coupon:''}]});
+ f.cached.set('10',{success:true,stale:true,checked_at:(f.clock.now-86401000)/1000,offers:[{price:4,merchant:'Saved',kind:'Steam key',edition:'Standard',coupon:''}]});
  f.api.updatePriceView(url,f.send);await f.drain();
  assert.equal(f.requests.length,1);
  assert.ok(f.scripts.some(s=>s.includes('"merchant":"Saved"')));
@@ -145,7 +146,7 @@ test('server-requested cooldown is not shortened to the client five-minute limit
 
 test('remote pending stale price is displayed and polled only after its retry delay',async()=>{
  const f=fixture(),url='https://store.steampowered.com/app/10/';
- const old={success:true,stale:true,checked_at:f.clock.now/1000-1900,offers:[{merchant:'Eneba',price:3,kind:'Steam',edition:'Standard',coupon:''}]};
+ const old={success:true,stale:true,checked_at:f.clock.now/1000-86401,offers:[{merchant:'Eneba',price:3,kind:'Steam',edition:'Standard',coupon:''}]};
  f.cached.set('10',old);
  f.api.updatePriceView(url,f.send);await f.drain();
  assert.equal(f.requests.length,1);

@@ -53,7 +53,7 @@ export function PriceCacheStatus() {
   return <>
     <PanelSectionRow><div role="status" style={{ fontSize: "12px", lineHeight: 1.5 }}>
       {stats ? <>
-        <div>{stats.price_provider === "gg" ? "GG.deals" : "AKS"} árgyorsítótár: {stats.price_fresh_entries}/{stats.price_entries} friss · 30 perc · lemezre mentve</div>
+        <div>{stats.price_provider === "gg" ? "GG.deals" : "AKS"} árgyorsítótár: {stats.price_fresh_entries}/{stats.price_entries} friss · 24 óra · lemezre mentve</div>
         {stats.price_connection === "server" && <div>Saját szerver · sorban: {stats.price_server_queue} · helyi ármentés aktív</div>}
         <div>Steam-adatok: {stats.price_metadata_entries} · AKS-hivatkozások: {stats.price_match_entries}</div>
         <div>Kívánságlista: {stats.price_wishlist_ready}/{stats.price_wishlist_total} ellenőrizve
@@ -62,7 +62,7 @@ export function PriceCacheStatus() {
         <div>{stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
           : !stats.price_wishlist_active ? "Előtöltés szünetel. Az áruház megnyitásakor indul."
           : stats.price_wishlist_current ? `Ellenőrzés: Steam ${stats.price_wishlist_current}`
-          : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 30 percnél régebbi adatok frissülnek."
+          : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 24 óránál régebbi adatok frissülnek."
           : "A következő játék ellenőrzésére vár."}</div>
         {stats.price_disk_error && <div>{stats.price_disk_error}</div>}
         {stats.price_wishlist_error && <div>Kívánságlista: {stats.price_wishlist_error}</div>}
@@ -160,7 +160,7 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
         } catch { setMessage("A szerverkapcsolat nem ellenőrizhető."); } finally { setBusy(false); }
       }}>Mentett szerverkapcsolat tesztelése</ButtonItem></PanelSectionRow>}
     </>}
-    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás."}</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 24 óráig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás."}</div></PanelSectionRow>
   </>;
 }
 
@@ -420,7 +420,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     if (requestRevision !== revision) return { success: true, disabled: true } as PriceResult;
     if (cached.disabled) return cached;
     if (cached.success && cached.checked_at) {
-      prices.set(requestId, { value: cached, expires: cached.checked_at * 1000 + 1800000 });
+      prices.set(requestId, { value: cached, expires: cached.checked_at * 1000 + (24 * 60 * 60 * 1000) });
       if (currentApp === requestId) void send(buildPricePanelScript(requestId, cached)).catch(() => {});
       if (!cached.stale) return cached;
     }
@@ -444,7 +444,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     }
     if (prices.size >= 500) prices.delete(prices.keys().next().value!);
     const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-    const expires = Date.now() + (value.pending ? Math.max(1, value.retry_after ?? 3) * 1000 : value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
+    const expires = Date.now() + (value.pending ? Math.max(1, value.retry_after ?? 3) * 1000 : value.success && !value.disabled ? Math.max(0, (24 * 60 * 60 * 1000) - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
     if (!value.success) value = { ...value, retry_at: expires };
     prices.set(requestId, { value, expires });
     if (currentApp === requestId) void send(buildPricePanelScript(requestId, value)).catch(() => {});
