@@ -1,0 +1,46 @@
+# Merge into configuration.yaml. If a rest: section exists, append this item there.
+# secrets.yaml (replace locally, never commit your real host or token):
+# deck_price_status_url: "https://YOUR_HOST/v1/status"
+# deck_price_authorization: "Bearer YOUR_SERVER_TOKEN"
+rest:
+  - resource: !secret deck_price_status_url
+    headers:
+      Authorization: !secret deck_price_authorization
+    scan_interval: 15
+    timeout: 10
+    verify_ssl: true
+    sensor:
+      - name: Deck Price Server
+        unique_id: deck_price_server_status
+        value_template: "{{ value_json.state }}"
+        json_attributes:
+          - current
+          - waiting
+          - recent
+          - providers
+          - completed
+          - failed
+          - cache_hits
+          - observed_count
+          - observed_evicted
+          - missing_count
+          - missing
+          - missing_truncated
+          - started_at
+          - scope
+      - name: Deck Price Waiting
+        unique_id: deck_price_server_waiting
+        value_template: "{{ value_json.waiting_count }}"
+        unit_of_measurement: "játék"
+      - name: Deck Price Stored
+        unique_id: deck_price_server_stored
+        value_template: "{{ value_json.stored }}"
+        unit_of_measurement: "bejegyzés"
+      - name: Deck Price Fresh
+        unique_id: deck_price_server_fresh
+        value_template: "{{ value_json.fresh }}"
+        unit_of_measurement: "bejegyzés"
+      - name: Deck Price Stale
+        unique_id: deck_price_server_stale
+        value_template: "{{ value_json.stale }}"
+        unit_of_measurement: "bejegyzés"

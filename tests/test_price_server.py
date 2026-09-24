@@ -134,6 +134,72 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
         self.http.requests.extend([time.monotonic()] * 300)
         self.assertEqual((await self.request("/v1/status"))[0], 429)
 
+    async def test_monitor_shows_running_waiting_results_and_cache_without_fetching(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        self.release_events.append(release)
+        calls = []
+        async def lookup(app_id):
+            calls.append(app_id)
+            started.set()
+            await release.wait()
+            self.engine._price_cache[app_id] = self.entry()
+            return {"success": True}
+        self.engine._price_cache["90"] = self.entry(age=1801)
+        with patch.object(self.engine, "_get_allkeyshop_price", side_effect=lookup):
+            await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            await asyncio.wait_for(started.wait(), 1)
+            await self.request("/v1/price", {"provider": "aks", "app_id": "20"})
+            for _ in range(2):
+                code, status = await self.request("/v1/status")
+                self.assertEqual(code, 200)
+                self.assertEqual(status["state"], "running")
+                self.assertEqual(status["current"]["app_id"], "10")
+                self.assertEqual([item["app_id"] for item in status["waiting"]], ["20"])
+                self.assertEqual(status["missing_count"], 2)
+                self.assertEqual(status["stale"], 1)
+                self.assertEqual(status["fresh"], 0)
+                self.assertEqual(status["completed"], 0)
+            self.assertEqual(calls, ["10"])
+            release.set()
+            await asyncio.sleep(.05)
+            _, status = await self.request("/v1/status")
+            self.assertEqual(status["state"], "idle")
+            self.assertEqual(status["completed"], 2)
+            self.assertEqual(status["stored"], 3)
+            self.assertEqual(status["fresh"], 2)
+            self.assertEqual(status["missing_count"], 0)
+            self.assertEqual([item["app_id"] for item in status["recent"]], ["20", "10"])
+            await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            self.assertEqual(self.broker.status()["cache_hits"], 1)
+            self.assertEqual(calls, ["10", "20"])
+
+    async def test_monitor_failure_cooldown_redaction_and_bounded_history(self):
+        async def fail(app_id):
+            return {"success": False, "error": "secret_in_raw_provider_error", "retry_after": 60}
+        with patch.object(self.engine, "_get_allkeyshop_price", side_effect=fail):
+            with self.assertLogs(server.LOG, level="INFO") as logs:
+                await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+                await asyncio.sleep(.05)
+            self.assertNotIn("secret_in_raw_provider_error", str(logs.output))
+            self.assertIn("app_id=10", str(logs.output))
+        self.engine._price_service_retry_at = time.time() + 120
+        await self.request("/v1/price", {"provider": "aks", "app_id": "20"})
+        _, status = await self.request("/v1/status")
+        self.assertEqual(status["failed"], 1)
+        self.assertEqual(status["completed"], 0)
+        self.assertGreaterEqual(status["providers"]["aks"]["retry_after"], 119)
+        self.assertEqual(status["missing_count"], 2)
+        self.assertEqual(status["recent"][0]["outcome"], "failed")
+        self.assertNotIn("secret_in_raw_provider_error", json.dumps(status))
+        self.assertEqual(self.broker.pending, {})
+        for i in range(server.MAX_OBSERVED + 1):
+            self.broker.observe(("aks", str(i + 1)), "provider_wait")
+        self.assertEqual(len(self.broker.observed), server.MAX_OBSERVED)
+        status = self.broker.status()
+        self.assertTrue(status["missing_truncated"])
+        self.assertEqual(len(status["missing"]), 50)
+        self.assertGreater(status["observed_evicted"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

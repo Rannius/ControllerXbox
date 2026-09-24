@@ -1,0 +1,50 @@
+# Dashboard -> Edit -> Add card -> Manual. Adjust entity IDs if HA renamed them.
+type: vertical-stack
+cards:
+  - type: entities
+    title: Deck árszerver
+    entities:
+      - entity: sensor.deck_price_server
+        name: Állapot
+      - entity: sensor.deck_price_waiting
+        name: Sorban várakozik
+      - entity: sensor.deck_price_stored
+        name: Tárolt AKS + GG bejegyzések
+      - entity: sensor.deck_price_fresh
+        name: Friss (30 percen belüli)
+      - entity: sensor.deck_price_stale
+        name: Lejárt
+  - type: markdown
+    title: Folyamat és legutóbbi eredmények
+    content: |
+      {% set labels = {'idle': 'Nincs feladat', 'running': 'Lekérés folyamatban', 'waiting': 'Várakozás a szolgáltatóra', 'merchants': 'Boltlista frissítése', 'completed': 'Feldolgozva', 'skipped': 'Kihagyva', 'not_found': 'Nincs találat', 'failed': 'Hiba', 'queued': 'Sorban', 'provider_wait': 'Szolgáltatói várakozás', 'missing_key': 'Hiányzó GG-kulcs', 'queue_full': 'Megtelt a sor', 'requested': 'Kérés érkezett'} %}
+      {% set state = states('sensor.deck_price_server') %}
+      **{{ labels.get(state, state) }}**
+      {% if state not in ['unavailable', 'unknown'] %}
+      Indulás óta: {{ state_attr('sensor.deck_price_server', 'completed') }} sikeres munka · {{ state_attr('sensor.deck_price_server', 'failed') }} hiba · {{ state_attr('sensor.deck_price_server', 'cache_hits') }} cache-találat.
+      {% set current = state_attr('sensor.deck_price_server', 'current') %}
+      {% if current %}
+      Most: **{{ current.title or ('Steam ' ~ current.app_id) }}** · {{ current.provider | upper }} · {{ current.elapsed_seconds }} mp
+      {% endif %}
+
+      **Következők (legfeljebb 10):**
+      {% for item in (state_attr('sensor.deck_price_server', 'waiting') or [])[:10] %}
+      - {{ item.title or ('Steam ' ~ item.app_id) }} · {{ item.provider | upper }}{% if item.retry_after %} · várakozás: {{ item.retry_after }} mp{% endif %}
+      {% else %}
+      Üres sor.
+      {% endfor %}
+
+      **Legutóbbi feldolgozások:**
+      {% for item in (state_attr('sensor.deck_price_server', 'recent') or [])[:10] %}
+      - {{ item.title or ('Steam ' ~ item.app_id) }} · {{ item.provider | upper }} · {{ labels.get(item.outcome, item.outcome) }} · {{ item.duration_seconds }} mp · {{ item.finished_at | timestamp_custom('%H:%M:%S') }}
+      {% else %}
+      A szerver indulása óta még nincs eredmény.
+      {% endfor %}
+
+      **Még nincs tárolt eredmény:** {{ state_attr('sensor.deck_price_server', 'missing_count') }}
+      {% for item in (state_attr('sensor.deck_price_server', 'missing') or [])[:10] %}
+      - Steam {{ item.app_id }} · {{ item.provider | upper }} · {{ labels.get(item.state, item.state) }}{% if item.retry_after %} · újrapróbálható: {{ item.retry_after }} mp múlva{% endif %}
+      {% endfor %}
+
+      Az ismert kérésekre vonatkozik; a szerver nem ismeri a teljes kívánságlistát. A lejárt cache frissítését új klienskérés indítja.
+      {% endif %}

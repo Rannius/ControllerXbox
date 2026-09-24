@@ -125,6 +125,7 @@ if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile; then
 fi
 systemctl daemon-reload
 systemctl enable --now deck-price-server.service deck-price-duckdns.timer
+systemctl restart deck-price-server.service
 if ! systemctl start deck-price-duckdns.service; then
   echo 'A DuckDNS-frissítés nem sikerült. Ellenőrizd a tokent és a hálózatot.' >&2
 fi

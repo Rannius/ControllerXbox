@@ -25,6 +25,8 @@ from pathlib import Path
 PROTOCOL = 1
 MAX_QUEUE = 128
 MAX_BODY = 2048
+MAX_OBSERVED = 2048
+RECENT_JOBS = 50
 LOG = logging.getLogger("deck-price-server")
 
 
@@ -57,6 +59,14 @@ class PriceBroker:
         self.worker = None
         self.directory_task = None
         self.directory_retry = 0
+        self.started_at = time.time()
+        self.current_started_at = None
+        self.observed = {}
+        self.observed_evicted = 0
+        self.recent = deque(maxlen=RECENT_JOBS)
+        self.completed = 0
+        self.failed = 0
+        self.cache_hits = 0
 
     async def start(self):
         await self.engine._load_price_cache()
@@ -80,9 +90,59 @@ class PriceBroker:
             return dict(entry)
         return {**entry, "data": {key: entry["data"][key] for key in ("prices", "merchants", "regions", "editions")}}
 
+    def describe(self, key):
+        provider, app_id = key
+        entry = self.cache(provider).get(app_id) or self.engine._price_metadata.get(app_id) or {}
+        return {"provider": provider, "app_id": app_id, "title": str(entry.get("title", ""))[:160]}
+
+    def observe(self, key, state, retry_at=0):
+        self.observed.pop(key, None)
+        self.observed[key] = {"state": state, "retry_at": retry_at}
+        if len(self.observed) > MAX_OBSERVED:
+            self.observed.pop(next(iter(self.observed)))
+            self.observed_evicted += 1
+
     def status(self):
+        # Read-only snapshot: never enqueue work, refresh caches or write files.
+        now = time.time()
+        providers = {}
+        for provider in ("aks", "gg"):
+            entries = [entry for entry in self.cache(provider).values() if "error" not in entry]
+            fresh = sum(0 <= now - entry["checked_at"] < 1800 for entry in entries)
+            providers[provider] = {"stored": len(entries), "fresh": fresh, "stale": len(entries) - fresh,
+                                   "skipped": sum(bool(entry.get("skipped")) for entry in entries),
+                                   "retry_after": max(0, round(self.cooldown(provider) - now)),
+                                   "configured": provider == "aks" or bool(self.engine._gg_api_key)}
+        waiting = [{**self.describe(key), "priority": "foreground" if priority[0] == 0 else "background",
+                    "retry_after": max(0, round(self.cooldown(key[0]) - now))}
+                   for key, priority in sorted(self.pending.items(), key=lambda pair: pair[1]) if key != self.current]
+        missing = []
+        for key, observation in self.observed.items():
+            entry = self.cache(key[0]).get(key[1])
+            if entry and "error" not in entry:
+                continue
+            missing.append({**self.describe(key), **observation,
+                            "state": "running" if key == self.current else "queued" if key in self.pending else observation["state"],
+                            "retry_after": max(0, round(observation["retry_at"] - now))})
+        current = None
+        if self.current:
+            current = {**self.describe(self.current), "started_at": self.current_started_at,
+                       "elapsed_seconds": round(now - self.current_started_at, 1)}
+        directory_running = bool(self.directory_task and not self.directory_task.done())
+        state = "running" if current else "waiting" if waiting else "merchants" if directory_running else "idle"
+        stored = sum(value["stored"] for value in providers.values())
+        fresh = sum(value["fresh"] for value in providers.values())
         return {"protocol": PROTOCOL, "gg_available": bool(self.engine._gg_api_key), "queue": len(self.pending),
-                "aks_entries": len(self.engine._price_cache), "gg_entries": len(self.engine._gg_cache)}
+                "aks_entries": len(self.engine._price_cache), "gg_entries": len(self.engine._gg_cache),
+                "state": state, "started_at": self.started_at, "updated_at": now,
+                "current": current, "waiting_count": len(waiting), "waiting": waiting,
+                "recent": list(reversed(self.recent)), "providers": providers,
+                "stored": stored, "fresh": fresh, "stale": stored - fresh,
+                "metadata_entries": len(self.engine._price_metadata), "match_entries": len(self.engine._aks_matches),
+                "completed": self.completed, "failed": self.failed, "cache_hits": self.cache_hits,
+                "observed_count": len(self.observed), "observed_evicted": self.observed_evicted,
+                "missing_count": len(missing), "missing": missing[:50], "missing_truncated": len(missing) > 50,
+                "scope": "requested_since_restart", "merchant_refresh": directory_running}
 
     async def price(self, request):
         if not isinstance(request, dict) or set(request) - {"provider", "app_id", "priority"}:
@@ -94,24 +154,31 @@ class PriceBroker:
             raise ValueError("Invalid product")
         now = time.time()
         key = (provider, app_id)
+        self.observe(key, "requested")
         entry = self.entry_copy(self.cache(provider).get(app_id))
         response = {"protocol": PROTOCOL, "provider": provider, "app_id": app_id, "entry": entry,
                     "pending": False, "retry_after": 3, "queue": len(self.pending)}
         if entry and 0 <= now - entry["checked_at"] < 1800:
+            self.cache_hits += 1
+            self.observe(key, "cached")
             return response
         if provider == "gg" and not self.engine._gg_api_key:
+            self.observe(key, "missing_key", now + 60)
             return {**response, "failure": {"global_error": True, "error": "A szerveren nincs beállítva GG.deals API-kulcs."}, "retry_after": 60}
         self.failures = {k: v for k, v in self.failures.items() if v[0] > now}
         failure = self.failures.get(key)
         if failure:
+            self.observe(key, "failed", failure[0])
             return {**response, "failure": failure[1], "retry_after": max(1, failure[0] - now)}
         cooldown = self.cooldown(provider)
         if cooldown > now:
+            self.observe(key, "provider_wait", cooldown)
             message = self.engine._gg_last_error if provider == "gg" else self.engine._price_last_error
             return {**response, "failure": {"global_error": True, "error": message or "Az árforrás várakozást kér."}, "retry_after": cooldown - now}
         priority = 0 if request.get("priority") == "foreground" else 1
         if key not in self.pending:
             if len(self.pending) >= MAX_QUEUE:
+                self.observe(key, "queue_full", now + 15)
                 return {**response, "failure": {"global_error": True, "error": "A szerver lekérési sora megtelt."}, "retry_after": 15}
             self.sequence += 1
             self.pending[key] = (priority, self.sequence)
@@ -119,6 +186,7 @@ class PriceBroker:
             old_priority, sequence = self.pending[key]
             self.pending[key] = (min(priority, old_priority), sequence)
         self.wake.set()
+        self.observe(key, "queued")
         ahead = sum(value < self.pending[key] for value in self.pending.values())
         return {**response, "pending": True, "queue": len(self.pending), "retry_after": min(30, max(3, ahead * 2))}
 
@@ -134,13 +202,19 @@ class PriceBroker:
                 continue
             key = min(ready, key=lambda candidate: self.pending[candidate])
             self.current = key
+            self.current_started_at = time.time()
             provider, app_id = key
+            outcome, retry_at = "failed", 0
+            LOG.info("Price job started provider=%s app_id=%s waiting=%d", provider, app_id, len(self.pending) - 1)
             try:
                 # One worker means this provider selection cannot race another lookup.
                 self.engine._price_preferences["provider"] = provider
                 result = await self.engine._get_allkeyshop_price(app_id)
+                if result.get("success"):
+                    outcome = "skipped" if result.get("skipped") else "not_found" if result.get("not_found") else "completed"
                 if not result.get("success"):
                     delay = max(1, result.get("retry_after", 30))
+                    retry_at = time.time() + delay
                     self.failures[key] = (time.time() + delay, {
                         "global_error": result.get("global_error") is True,
                         "error": str(result.get("error", "Az árlekérés sikertelen."))[:500]})
@@ -149,10 +223,20 @@ class PriceBroker:
             except Exception:
                 # No request headers, URLs, provider credentials or exception body in logs.
                 LOG.error("Price job failed")
+                retry_at = time.time() + 30
                 self.failures[key] = (time.time() + 30, {"global_error": False, "error": "Szerveroldali feldolgozási hiba."})
             finally:
+                finished_at = time.time()
+                duration = round(finished_at - self.current_started_at, 2)
+                self.failed += int(outcome == "failed")
+                self.completed += int(outcome != "failed")
+                self.observe(key, outcome, retry_at)
+                self.recent.append({**self.describe(key), "outcome": outcome, "finished_at": finished_at,
+                                    "duration_seconds": duration, "retry_at": retry_at})
+                LOG.info("Price job finished provider=%s app_id=%s outcome=%s seconds=%.2f", provider, app_id, outcome, duration)
                 self.pending.pop(key, None)
                 self.current = None
+                self.current_started_at = None
             await asyncio.sleep(0)
 
     async def merchants(self, request):

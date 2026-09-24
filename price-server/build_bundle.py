@@ -10,7 +10,8 @@ root = Path(__file__).resolve().parents[1]
 version = json.loads((root / "package.json").read_text())["version"]
 output = Path(sys.argv[1]) if len(sys.argv) > 1 else root / "out"
 output.mkdir(parents=True, exist_ok=True)
-files = {name: (root / "price-server" / name).read_bytes() for name in ("server.py", "configure.py", "install.sh", "README.md")}
+files = {name: (root / "price-server" / name).read_bytes() for name in
+         ("server.py", "configure.py", "install.sh", "README.md", "home-assistant.yaml", "home-assistant-card.yaml")}
 files.update({name: (root / name).read_bytes() for name in ("main.py", "package.json", "LICENSE")})
 # Install shell files must use LF, even when packaged from a Windows checkout.
 files = {name: content.replace(b"\r\n", b"\n") for name, content in files.items()}

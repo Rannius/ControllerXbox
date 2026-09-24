@@ -19,8 +19,8 @@ Ez a szerver **nem IP-forgató és nem tiltásmegkerülő szolgáltatás**. A Du
 Az Ubuntu termináljában:
 
 ```bash
-curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.84/DeckPriceServer-v1.0.84.tar.gz
-tar -xzf DeckPriceServer-v1.0.84.tar.gz
+curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.85/DeckPriceServer-v1.0.85.tar.gz
+tar -xzf DeckPriceServer-v1.0.85.tar.gz
 cd DeckPriceServer
 sudo bash install.sh sajat-szerver.duckdns.org
 ```
@@ -70,5 +70,53 @@ systemctl list-timers deck-price-duckdns.timer
 ## Frissítés / visszaállítás
 
 Az új vagy korábbi **GitHub Release** szervercsomagját külön könyvtárba bontsd ki, majd futtasd annak telepítőjét. A meglévő token és cache megmarad; a kulcsmezők üresen hagyva megtartják a korábbi értéket. Éles fájlokat ne írj felül kiadatlan fejlesztői kóddal. A helyi konfigurációt és cache-t külön mentsd, ezek nem részei a nyilvános release-nek.
+
+## Home Assistant: élő állapot (1.0.85-től)
+
+A `GET /v1/status` végpont ugyanazzal a `Authorization: Bearer ...` szervertokennel olvasható, mint amit a Decky használ. Csak HTTPS-en, a saját beállított címeden érd el. Az állapot olvasása nem indít árlekérést, nem frissíti a cache-t és nem ír lemezre. A meglévő Decky 1.0.84 kliens továbbra is használható; ehhez a funkcióhoz csak a szerver frissítése szükséges.
+
+1. Frissítsd az Ubuntu szervert az 1.0.85-ös release csomagjából. A telepítő az új kóddal újraindítja a szolgáltatást; a kulcsmezők üresen hagyva megtartják a korábbi beállításokat.
+2. A Home Assistant `secrets.yaml` fájljába helyben írd be (a helyőrzőket cseréld):
+
+   ```yaml
+   deck_price_status_url: "https://YOUR_HOST/v1/status"
+   deck_price_authorization: "Bearer YOUR_SERVER_TOKEN"
+   ```
+
+3. A csomag `home-assistant.yaml` fájljának tartalmát illeszd a HA `configuration.yaml` fájljába. Ha van már `rest:` szakasz, az új elemet abba tedd, ne legyen két azonos felső szintű kulcs. A megoldás egyetlen HTTP-kéréssel, 15 másodpercenként frissíti az összes szenzort. A HTTPS-tanúsítvány ellenőrzése bekapcsolva marad.
+4. Ellenőrizd a HA konfigurációját, majd indítsd újra a Home Assistantot.
+5. Irányítópult → Szerkesztés → Kártya hozzáadása → Kézi: másold be a `home-assistant-card.yaml` tartalmát. Ha a HA eltérő entitásazonosítót osztott ki, igazítsd a kártyában szereplő azonosítókat.
+
+A kártya mutatja a futó játék nevét (ha már ismert), AppID-jét, forrását és eltelt idejét; a következő feladatokat, az utolsó feldolgozásokat, valamint a hiányzó eredményeket. Hálózati hiba esetén a HA-szenzor nem elérhető állapotba kerül.
+
+Az API mezői:
+
+| Mező | Jelentés |
+| --- | --- |
+| `state` | `idle`, `running`, `waiting` (szolgáltatói szünet miatt sorban áll), `merchants` |
+| `current` | Futó feladat: AppID, ismert cím, forrás, kezdési idő és eltelt másodperc |
+| `waiting_count`, `waiting` | Sorban álló feladatok a futó nélkül; prioritás és szolgáltatói várakozás másodpercben |
+| `queue` | Visszafelé kompatibilis számláló: futó + sorban álló feladatok |
+| `recent` | Legutóbbi 50 befejezett próbálkozás, legújabb elöl; kimenetel, időpont, időtartam, újrapróbálhatóság időpontja |
+| `stored`, `fresh`, `stale` | Tárolt eredmények; 30 percen belüli és lejárt bejegyzések. Az AKS és GG ugyanahhoz a játékhoz két külön bejegyzés |
+| `providers` | AKS/GG külön számlálók, kihagyott játékok száma, beállítottság és szolgáltatói várakozás |
+| `metadata_entries`, `match_entries` | Steam metadata és ellenőrzött AKS-párosítások száma |
+| `completed`, `failed`, `cache_hits` | Indulás óta sikeres (kihagyást is beleértve) és hibás munkák, illetve friss cache-ből kiszolgált klienskérések. Nem HTTP-kérésszámok |
+| `observed_count`, `missing_count`, `missing` | A szerver indulása óta kért, legutóbbi legfeljebb 2048 külön AppID/forrás közül hányat ismer és melyikhez nincs tárolt eredmény. A hiányzó lista legfeljebb 50 elemes |
+| `observed_evicted`, `missing_truncated` | Jelzi, ha a megfigyelési ablakból régi kérés kikerült, illetve a hiányzó lista csonkolva van |
+
+Az eseménytörténet és a munkaszámlálók újraindításkor nullázódnak; az árak tartós cache-e megmarad. A `stored` tartalmazza a sikeresen ellenőrzött, kihagyott vagy találat nélküli eredményeket is, nem csak a tényleges árakat. A lejárt tárolt eredmény nem számít hiányzónak. A szerver nem ismeri a teljes könyvtárat vagy kívánságlistát: a Deck által még el nem küldött játékokról nem állítja, hogy feldolgozta őket, ezért nincs félrevezető teljeslistás százalék.
+
+A `missing` lista okai: `queued`, `running`, `failed`, `provider_wait`, `missing_key`, `queue_full`. A jelzett idő az újrapróbálás legkorábbi ideje, nem határidő vagy garantált automatikus újraindítás: a már sorba vett munkák folytatódnak, a visszautasított kérést a Deck küldi újra.
+
+Az élő systemd-napló is kiírja a munkák indulását és végét (AppID, forrás, kimenetel, időtartam):
+
+```bash
+sudo journalctl -u deck-price-server -n 50 -f
+```
+
+Személyes szervercím, token, kliens-IP és nyers szolgáltatói hiba nem kerül az új eseménynaplóba vagy az állapotválaszba. A HA-példákban csak helyőrzők vannak. A részletes attribútumok HA-előzménymentését igény esetén a Recorder beállításaival kizárhatod a `sensor.deck_price_server` entitásnál.
+
+HA dokumentáció: [RESTful integráció](https://www.home-assistant.io/integrations/rest/).
 
 Források: [DuckDNS API](https://www.duckdns.org/spec.jsp), [Caddy automatikus HTTPS](https://caddyserver.com/docs/automatic-https).
