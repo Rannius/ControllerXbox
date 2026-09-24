@@ -561,7 +561,7 @@ class Plugin:
         # No network and no price lock: a slow background lookup must not delay display.
         if not self._price_preferences["enabled"]:
             return {"success": True, "disabled": True}
-        entry = self._active_price_cache().get(str(app_id))
+        entry = self._effective_price_entry(str(app_id))
         if not entry or "error" in entry:
             return {"success": True, "missing": True}
         return {**self._active_price_result(entry), "stale": time.time() - entry["checked_at"] >= PRICE_TTL_SECONDS}
@@ -625,8 +625,8 @@ class Plugin:
         # Unknown games first, then oldest entries: large lists must not keep
         # refreshing their first items while the tail has never been checked.
         for app_id in sorted(self._price_wishlist, key=lambda key: max(
-                self._active_price_cache().get(key, {}).get("checked_at", 0), self._price_wishlist_attempts.get(key, 0))):
-            entry = self._active_price_cache().get(app_id)
+                (self._effective_price_entry(key) or {}).get("checked_at", 0), self._price_wishlist_attempts.get(key, 0))):
+            entry = self._effective_price_entry(app_id)
             if entry and "error" not in entry and now - entry["checked_at"] < PRICE_TTL_SECONDS:
                 continue
             if self._price_wishlist_retry.get(app_id, 0) > now:
@@ -777,15 +777,19 @@ class Plugin:
                 raise ValueError("Invalid retry time")
             self._price_server_queue = max(0, int(response.get("queue", 0)))
             entry = response.get("entry")
+            entry_provider = response.get("entry_provider", provider)
+            if entry_provider != provider and not (provider == "aks" and entry_provider == "gg"
+                    and isinstance(entry, dict) and entry.get("fallback_from") == "aks"):
+                raise ValueError("Invalid fallback source")
             if entry is not None:
-                if not (self._valid_gg_entry(entry) if provider == "gg" else self._valid_price_entry(entry)):
+                if not (self._valid_gg_entry(entry) if entry_provider == "gg" else self._valid_price_entry(entry)):
                     raise ValueError("Invalid price data")
-                cache = self._gg_cache if provider == "gg" else self._price_cache
+                cache = self._gg_cache if entry_provider == "gg" else self._price_cache
                 if app_id not in cache and len(cache) >= 10000:
                     cache.pop(next(iter(cache)))
                 if cache.get(app_id) != entry:
                     cache[app_id] = entry
-                    if provider == "aks" and "data" in entry:
+                    if entry_provider == "aks" and "data" in entry:
                         self._price_merchants.update(row["name"] for row in entry["data"]["merchants"].values()
                             if isinstance(row, dict) and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 80)
                     self._schedule_price_save()
@@ -798,13 +802,14 @@ class Plugin:
                 if shared:
                     self._price_server_retry_at = time.time() + max(1, retry)
                 self._price_server_error = message
-                return {"success": False, "provider": provider, "global_error": shared, "error_code": "server",
+                failed_provider = "gg" if provider == "aks" and failure.get("provider") == "gg" else provider
+                return {"success": False, "provider": failed_provider, "global_error": shared, "error_code": "server",
                         "error": message, "retry_after": max(1, retry)}
             self._price_server_failures = 0
             self._price_server_error = ""
             pending = response.get("pending") is True
             if entry:
-                return {**(dict(entry) if provider == "gg" else self._price_result(entry)),
+                return {**self._active_price_result(entry),
                         "stale": time.time() - entry["checked_at"] >= PRICE_TTL_SECONDS,
                         "pending": pending, "retry_after": max(1, retry)}
             return {"success": False, "provider": provider, "pending": pending, "error_code": "pending" if pending else "server",
@@ -890,14 +895,47 @@ class Plugin:
         return await self.get_price_preferences()
 
     def _active_price_cache(self) -> Dict[str, Dict[str, Any]]:
-        return self._gg_cache if self._price_preferences.get("provider") == "gg" else self._price_cache
+        if self._price_preferences.get("provider") == "gg":
+            return self._gg_cache
+        keys = set(self._price_cache) | {key for key, value in self._gg_cache.items() if value.get("fallback_from") == "aks"}
+        return {key: self._effective_price_entry(key) for key in keys}
+
+    def _effective_price_entry(self, app_id: str, provider: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        provider = provider or self._price_preferences.get("provider", "aks")
+        if provider == "gg":
+            return self._gg_cache.get(app_id)
+        aks, gg = self._price_cache.get(app_id), self._gg_cache.get(app_id)
+        if aks and "error" not in aks and 0 <= time.time() - aks["checked_at"] < PRICE_TTL_SECONDS:
+            return aks
+        if gg and gg.get("fallback_from") == "aks":
+            if not aks or "error" in aks or gg["checked_at"] >= aks["checked_at"]:
+                return gg
+        return aks
 
     def _active_price_result(self, entry: Dict[str, Any]) -> Dict[str, Any]:
-        return dict(entry) if self._price_preferences.get("provider") == "gg" else self._price_result(entry)
+        if entry.get("provider") == "gg":
+            result = dict(entry)
+            if self._price_preferences.get("provider") == "gg":
+                result.pop("fallback_from", None)
+            return result
+        return self._price_result(entry)
+
+    @staticmethod
+    def _aks_fallback_allowed(result: Any) -> bool:
+        return bool(isinstance(result, dict) and result.get("global_error") and (
+            result.get("error_code") in ("connection", "rate_limit") or
+            result.get("error_code") == "http" and (result.get("http_status") in (403, 408)
+                or type(result.get("http_status")) is int and 500 <= result["http_status"] <= 599)))
+
+    def _aks_fallback_available(self) -> bool:
+        return bool(self._gg_api_key and self._aks_fallback_allowed(self._price_service_error)
+                    and (self._price_service_retry_at > time.time() or self._aks_pause_until > time.monotonic()))
 
     def _active_price_retry_at(self) -> float:
         if self._price_connection["mode"] == "server":
             return self._price_server_retry_at
+        if self._price_preferences.get("provider", "aks") == "aks" and self._aks_fallback_available():
+            return self._gg_retry_at
         return self._gg_retry_at if self._price_preferences.get("provider") == "gg" else self._price_service_retry_at
 
     @staticmethod
@@ -1362,6 +1400,7 @@ class Plugin:
         message = stage + (" (%.1f mp)" % elapsed if isinstance(elapsed, (int, float)) else "") + ": " + message
         details = {"error": message, "error_code": code, "global_error": shared}
         if isinstance(cause, urllib.error.HTTPError):
+            details["http_status"] = cause.code
             retry = Plugin._retry_after(cause.headers)
             if retry:
                 details["retry_after"] = retry
@@ -1380,17 +1419,13 @@ class Plugin:
             return {"success": False, "error": "Érvénytelen Steam AppID."}
         if not self._price_preferences["enabled"] or self._price_stopping:
             return {"success": True, "disabled": True}
-        entry = self._active_price_cache().get(normalized)
+        entry = self._effective_price_entry(normalized)
         if entry and "error" not in entry and 0 <= time.time() - entry["checked_at"] < PRICE_TTL_SECONDS:
             return self._active_price_result(entry)
         task_key = str(self._price_epoch) + ":" + normalized
         task = self._price_tasks.get(task_key)
         if task is None:
-            task = asyncio.create_task(self._lookup_remote_price(normalized, self._price_epoch)
-                                       if self._price_connection["mode"] == "server"
-                                       else self._lookup_gg_price(normalized, self._price_epoch)
-                                       if self._price_preferences.get("provider") == "gg"
-                                       else self._lookup_allkeyshop_price(normalized, self._price_epoch))
+            task = asyncio.create_task(self._lookup_price_with_fallback(normalized, self._price_epoch))
             self._price_tasks[task_key] = task
             def completed(done: asyncio.Task) -> None:
                 if self._price_tasks.get(task_key) is done:
@@ -1399,6 +1434,28 @@ class Plugin:
                     done.exception()
             task.add_done_callback(completed)
         return await asyncio.shield(task)
+
+    async def _lookup_price_with_fallback(self, app_id: str, epoch: int) -> Dict[str, Any]:
+        # Server mode delegates fallback to that server; never bypass it locally.
+        if self._price_connection["mode"] == "server":
+            return await self._lookup_remote_price(app_id, epoch)
+        if self._price_preferences.get("provider") == "gg":
+            return await self._lookup_gg_price(app_id, epoch)
+        result = await self._lookup_allkeyshop_price(app_id, epoch)
+        if (epoch != self._price_epoch or self._price_stopping or not self._price_preferences["enabled"]
+                or not self._gg_api_key or not self._aks_fallback_allowed(result)):
+            return result
+        # The AKS lock has been released; GG has its own limits and uses the same
+        # lookup lock. One outer single-flight still covers the entire operation.
+        decky.logger.info("Price fallback provider=gg app_id=%s", app_id)
+        fallback = await self._lookup_gg_price(app_id, epoch)
+        if epoch != self._price_epoch or fallback.get("disabled"):
+            return {"success": True, "disabled": True}
+        fallback = {**fallback, "provider": "gg", "fallback_from": "aks"}
+        if fallback.get("success"):
+            self._gg_cache[app_id] = fallback
+            self._schedule_price_save()
+        return fallback
 
     async def _lookup_allkeyshop_price(self, app_id: Any, request_epoch: int) -> Dict[str, Any]:
         normalized = str(app_id)

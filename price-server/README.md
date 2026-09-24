@@ -19,8 +19,8 @@ Ez a szerver **nem IP-forgató és nem tiltásmegkerülő szolgáltatás**. A Du
 Az Ubuntu termináljában:
 
 ```bash
-curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.86/DeckPriceServer-v1.0.86.tar.gz
-tar -xzf DeckPriceServer-v1.0.86.tar.gz
+curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.87/DeckPriceServer-v1.0.87.tar.gz
+tar -xzf DeckPriceServer-v1.0.87.tar.gz
 cd DeckPriceServer
 sudo bash install.sh sajat-szerver.duckdns.org
 ```
@@ -72,6 +72,8 @@ systemctl list-timers deck-price-duckdns.timer
 Az új vagy korábbi **GitHub Release** szervercsomagját külön könyvtárba bontsd ki, majd futtasd annak telepítőjét. A meglévő token és cache megmarad; a kulcsmezők üresen hagyva megtartják a korábbi értéket. Éles fájlokat ne írj felül kiadatlan fejlesztői kóddal. A helyi konfigurációt és cache-t külön mentsd, ezek nem részei a nyilvános release-nek.
 
 ## Home Assistant: élő állapot (1.0.85-től)
+
+1.0.87-től AKS-kapcsolati hiba vagy hozzáférési korlátozás esetén a szerver a beállított GG.deals-kulccsal tartalék árat kér. A Decky és a szerver egyaránt 1.0.87-es legyen. A GG-kulcs az Ubuntu telepítőjével megadható, a többi mező üresen megtartja korábbi értékét. Hiányzó kulcs esetén a meglévő AKS-hibajelzés marad. Az AKS kiválasztva marad, az árat `GG.deals:` jelöli; a bolt- és Steam-kulcs/Gift-szűrők erre az összehasonlító árra nem alkalmazhatók. A friss GG tartalék ár 24 óráig használható, majd újra AKS-lekéréssel próbálkozunk. Az AKS- és GG-korlátokat egyaránt tiszteletben tartjuk. A saját szerver kiesése nem indít közvetlen lekérést a Decken.
 
 A `GET /v1/status` végpont ugyanazzal a `Authorization: Bearer ...` szervertokennel olvasható, mint amit a Decky használ. Csak HTTPS-en, a saját beállított címeden érd el. Az állapot olvasása nem indít árlekérést, nem frissíti a cache-t és nem ír lemezre. A meglévő Decky 1.0.84 kliens továbbra is használható; ehhez a funkcióhoz csak a szerver frissítése szükséges.
 

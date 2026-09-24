@@ -792,6 +792,84 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("test_key", json.dumps(result))
         self.assertNotIn("secret detail", json.dumps(result))
 
+    async def test_aks_fallback_is_single_flight_persistent_and_keeps_sources_separate(self):
+        self.plugin._gg_api_key = "test_key_not_a_real_secret"
+        self.plugin._price_metadata["10"] = self.price_metadata()
+        response = {"headers": {}, "data": {"10": {"title": "Example", "url": "https://gg.deals/game/example/",
+            "prices": {"currentRetail": "5.99", "currentKeyshops": "3.20", "currency": "EUR"}}}}
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=TimeoutError()) as aks, patch.object(self.plugin, "_fetch_gg_prices", return_value=response) as gg:
+            first, second = await asyncio.gather(self.plugin.get_allkeyshop_price("10"), self.plugin.get_allkeyshop_price("10"))
+            self.assertEqual(first, second)
+            self.assertEqual(first["provider"], "gg")
+            self.assertEqual(first["fallback_from"], "aks")
+            self.assertNotIn("offers", first)
+            self.assertNotIn("10", self.plugin._price_cache)
+            self.assertEqual(self.plugin._price_preferences.get("provider", "aks"), "aks")
+            await self.plugin.get_allkeyshop_price("10")
+            aks.assert_called_once()
+            gg.assert_called_once()
+        await self.plugin._price_save_task
+        restarted = self.plugin_type()
+        await restarted._load_price_cache()
+        with patch.object(restarted, "_fetch_aks_game") as aks, patch.object(restarted, "_fetch_gg_prices") as gg:
+            self.assertEqual((await restarted.get_cached_allkeyshop_price("10"))["provider"], "gg")
+            self.assertEqual((await restarted.get_allkeyshop_price("10"))["keyshop_price"], 3.2)
+            self.assertEqual(restarted._price_stats()["price_fresh_entries"], 1)
+            aks.assert_not_called(); gg.assert_not_called()
+        restarted._price_cache["10"] = {"title": "Example", "skipped": "free", "checked_at": time.time()}
+        self.assertEqual((await restarted.get_cached_allkeyshop_price("10"))["skipped"], "free")
+        restarted._price_cache.clear()
+        restarted._gg_cache["10"]["checked_at"] = time.time() - 86401
+        restarted._price_service_retry_at = 0
+        restarted._aks_pause_until = 0
+        recovered = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+                     "data": self.aks_fixture(), "checked_at": time.time()}
+        with patch.object(restarted, "_fetch_aks_game", return_value=recovered) as aks, patch.object(restarted, "_fetch_gg_prices") as gg:
+            self.assertIn("offers", await restarted.get_allkeyshop_price("10"))
+            aks.assert_called_once(); gg.assert_not_called()
+
+    def test_aks_fallback_only_for_connection_and_access_failures(self):
+        for status in (403, 408, 429, 500, 502, 503):
+            detail = self.plugin._aks_error_details(urllib.error.HTTPError("https://www.allkeyshop.com/", status, "", {}, None))
+            self.assertTrue(self.plugin._aks_fallback_allowed(detail), status)
+        for status in (400, 401, 404, 410):
+            detail = self.plugin._aks_error_details(urllib.error.HTTPError("https://www.allkeyshop.com/", status, "", {}, None))
+            self.assertFalse(self.plugin._aks_fallback_allowed(detail), status)
+        for error in (ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz."), ValueError("A Steam-játék neve most nem kérdezhető le.")):
+            self.assertFalse(self.plugin._aks_fallback_allowed(self.plugin._aks_error_details(error)))
+
+    async def test_aks_fallback_missing_key_and_gg_rate_limit_do_not_loop(self):
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=TimeoutError()), patch.object(self.plugin, "_fetch_gg_prices") as gg:
+            self.assertEqual((await self.plugin.get_allkeyshop_price("10"))["error_code"], "connection")
+            gg.assert_not_called()
+        self.plugin._gg_api_key = "test_key_not_a_real_secret"
+        self.plugin._gg_retry_at = time.time() + 120
+        with patch.object(self.plugin, "_fetch_aks_game") as aks, patch.object(self.plugin, "_fetch_gg_prices") as gg:
+            result = await self.plugin.get_allkeyshop_price("20")
+            self.assertEqual(result["provider"], "gg")
+            self.assertEqual(result["error_code"], "rate_limit")
+            self.assertGreater(result["retry_after"], 119)
+            aks.assert_not_called(); gg.assert_not_called()
+        self.plugin._price_service_retry_at = 0
+        self.plugin._aks_pause_until = 0
+        self.assertFalse(self.plugin._aks_fallback_available())
+
+    async def test_remote_aks_fallback_entry_is_validated_and_never_fetches_locally(self):
+        await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
+        entry = {"success": True, "provider": "gg", "fallback_from": "aks", "title": "Example", "currency": "EUR",
+                 "url": "https://gg.deals/game/example/", "retail_price": 5.99, "keyshop_price": 3.2, "checked_at": time.time()}
+        response = {"provider": "aks", "entry_provider": "gg", "app_id": "10", "entry": entry, "pending": False}
+        with patch.object(self.plugin, "_price_server_request", return_value=response), patch.object(self.plugin, "_fetch_gg_prices") as gg:
+            result = await self.plugin.get_allkeyshop_price("10")
+            self.assertEqual(result["provider"], "gg")
+            self.assertNotIn("10", self.plugin._price_cache)
+            self.assertEqual((await self.plugin.get_cached_allkeyshop_price("10"))["provider"], "gg")
+            gg.assert_not_called()
+        self.plugin._gg_cache.clear()
+        response["entry"] = {k: v for k, v in entry.items() if k != "fallback_from"}
+        with patch.object(self.plugin, "_price_server_request", return_value=response):
+            self.assertFalse((await self.plugin.get_allkeyshop_price("10"))["success"])
+
     async def test_private_server_settings_roundtrip_and_host_change_requires_new_token(self):
         token = "private_server_test_token_12345"
         result = await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org/", token)

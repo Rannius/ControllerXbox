@@ -147,6 +147,31 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status["stale"], 1)
             lookup.assert_not_called()
 
+    async def test_aks_fallback_runs_during_aks_pause_and_reports_actual_source(self):
+        self.engine._gg_api_key = "test_gg_key_for_fallback"
+        self.engine._price_metadata["10"] = {"app_id": "10", "title": "Example", "is_free": False, "coming_soon": False, "checked_at": time.time()}
+        self.engine._price_service_error = {"global_error": True, "error_code": "connection", "error": "Unavailable"}
+        self.engine._price_service_retry_at = time.time() + 120
+        response = {"headers": {}, "data": {"10": {"title": "Example", "url": "https://gg.deals/game/example/",
+                    "prices": {"currentRetail": "5.99", "currentKeyshops": "3.20", "currency": "EUR"}}}}
+        with patch.object(self.engine, "_fetch_aks_game") as aks, patch.object(self.engine, "_fetch_gg_prices", return_value=response) as gg:
+            _, first = await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            self.assertTrue(first["pending"])
+            for _ in range(30):
+                if self.broker.completed: break
+                await asyncio.sleep(.01)
+            _, final = await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            self.assertEqual(final["provider"], "aks")
+            self.assertEqual(final["entry_provider"], "gg")
+            self.assertEqual(final["entry"]["fallback_from"], "aks")
+            self.assertFalse(final["pending"])
+            _, status = await self.request("/v1/status")
+            self.assertEqual(status["missing_count"], 0)
+            self.assertEqual(status["recent"][0]["provider"], "gg")
+            self.assertEqual(status["recent"][0]["requested_provider"], "aks")
+            self.assertEqual(status["gg_entries"], 1)
+            aks.assert_not_called(); gg.assert_called_once()
+
     async def test_monitor_shows_running_waiting_results_and_cache_without_fetching(self):
         started, release = asyncio.Event(), asyncio.Event()
         self.release_events.append(release)

@@ -83,6 +83,10 @@ class PriceBroker:
         remaining = self.engine._aks_pause_until - time.monotonic()
         return max(self.engine._price_service_retry_at, time.time() + remaining if remaining > 0 else 0)
 
+    def work_cooldown(self, provider):
+        # AKS may be paused while independent GG fallback can still serve work.
+        return self.cooldown("gg") if provider == "aks" and self.engine._aks_fallback_available() else self.cooldown(provider)
+
     @staticmethod
     def entry_copy(entry):
         if entry is None or "error" in entry:
@@ -93,7 +97,7 @@ class PriceBroker:
 
     def describe(self, key):
         provider, app_id = key
-        entry = self.cache(provider).get(app_id) or self.engine._price_metadata.get(app_id) or {}
+        entry = self.engine._effective_price_entry(app_id, provider) or self.engine._price_metadata.get(app_id) or {}
         return {"provider": provider, "app_id": app_id, "title": str(entry.get("title", ""))[:160]}
 
     def observe(self, key, state, retry_at=0):
@@ -115,11 +119,11 @@ class PriceBroker:
                                    "retry_after": max(0, round(self.cooldown(provider) - now)),
                                    "configured": provider == "aks" or bool(self.engine._gg_api_key)}
         waiting = [{**self.describe(key), "priority": "foreground" if priority[0] == 0 else "background",
-                    "retry_after": max(0, round(self.cooldown(key[0]) - now))}
+                    "retry_after": max(0, round(self.work_cooldown(key[0]) - now))}
                    for key, priority in sorted(self.pending.items(), key=lambda pair: pair[1]) if key != self.current]
         missing = []
         for key, observation in self.observed.items():
-            entry = self.cache(key[0]).get(key[1])
+            entry = self.engine._effective_price_entry(key[1], key[0])
             if entry and "error" not in entry:
                 continue
             missing.append({**self.describe(key), **observation,
@@ -156,8 +160,9 @@ class PriceBroker:
         now = time.time()
         key = (provider, app_id)
         self.observe(key, "requested")
-        entry = self.entry_copy(self.cache(provider).get(app_id))
+        entry = self.entry_copy(self.engine._effective_price_entry(app_id, provider))
         response = {"protocol": PROTOCOL, "provider": provider, "app_id": app_id, "entry": entry,
+                    "entry_provider": "gg" if entry and entry.get("provider") == "gg" else provider,
                     "pending": False, "retry_after": 3, "queue": len(self.pending)}
         if entry and 0 <= now - entry["checked_at"] < self.engine.price_ttl_seconds:
             self.cache_hits += 1
@@ -171,11 +176,12 @@ class PriceBroker:
         if failure:
             self.observe(key, "failed", failure[0])
             return {**response, "failure": failure[1], "retry_after": max(1, failure[0] - now)}
-        cooldown = self.cooldown(provider)
+        cooldown = self.work_cooldown(provider)
         if cooldown > now:
             self.observe(key, "provider_wait", cooldown)
-            message = self.engine._gg_last_error if provider == "gg" else self.engine._price_last_error
-            return {**response, "failure": {"global_error": True, "error": message or "Az árforrás várakozást kér."}, "retry_after": cooldown - now}
+            source = "gg" if provider == "gg" or self.engine._aks_fallback_available() else "aks"
+            message = self.engine._gg_last_error if source == "gg" else self.engine._price_last_error
+            return {**response, "failure": {"provider": source, "global_error": True, "error": message or "Az árforrás várakozást kér."}, "retry_after": cooldown - now}
         priority = 0 if request.get("priority") == "foreground" else 1
         if key not in self.pending:
             if len(self.pending) >= MAX_QUEUE:
@@ -193,7 +199,7 @@ class PriceBroker:
 
     async def run(self):
         while not self.stopping:
-            ready = [key for key in self.pending if self.cooldown(key[0]) <= time.time()]
+            ready = [key for key in self.pending if self.work_cooldown(key[0]) <= time.time()]
             if not ready:
                 self.wake.clear()
                 try:
@@ -205,18 +211,20 @@ class PriceBroker:
             self.current = key
             self.current_started_at = time.time()
             provider, app_id = key
-            outcome, retry_at = "failed", 0
+            outcome, retry_at, actual_provider = "failed", 0, provider
             LOG.info("Price job started provider=%s app_id=%s waiting=%d", provider, app_id, len(self.pending) - 1)
             try:
                 # One worker means this provider selection cannot race another lookup.
                 self.engine._price_preferences["provider"] = provider
                 result = await self.engine._get_allkeyshop_price(app_id)
+                actual_provider = result.get("provider", provider)
                 if result.get("success"):
                     outcome = "skipped" if result.get("skipped") else "not_found" if result.get("not_found") else "completed"
                 if not result.get("success"):
                     delay = max(1, result.get("retry_after", 30))
                     retry_at = time.time() + delay
                     self.failures[key] = (time.time() + delay, {
+                        "provider": actual_provider,
                         "global_error": result.get("global_error") is True,
                         "error": str(result.get("error", "Az árlekérés sikertelen."))[:500]})
                     while len(self.failures) > 512:
@@ -232,9 +240,10 @@ class PriceBroker:
                 self.failed += int(outcome == "failed")
                 self.completed += int(outcome != "failed")
                 self.observe(key, outcome, retry_at)
-                self.recent.append({**self.describe(key), "outcome": outcome, "finished_at": finished_at,
+                self.recent.append({**self.describe(key), "provider": actual_provider, "requested_provider": provider,
+                                    "outcome": outcome, "finished_at": finished_at,
                                     "duration_seconds": duration, "retry_at": retry_at})
-                LOG.info("Price job finished provider=%s app_id=%s outcome=%s seconds=%.2f", provider, app_id, outcome, duration)
+                LOG.info("Price job finished provider=%s app_id=%s outcome=%s seconds=%.2f", actual_provider, app_id, outcome, duration)
                 self.pending.pop(key, None)
                 self.current = None
                 self.current_started_at = None

@@ -5,7 +5,7 @@ import { callable } from "@decky/api";
 
 
 type Preferences = { provider: "aks" | "gg"; gg_key_configured: boolean; success: boolean; enabled: boolean; allow_gifts: boolean; merchants: string[]; restrict_merchants: boolean; error?: string };
-export type PriceResult = { pending?: boolean; provider?: "aks" | "gg"; retail_price?: number | null; keyshop_price?: number | null; success: boolean; missing?: boolean; stale?: boolean; skipped?: "unreleased" | "release_unknown" | "free"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
+export type PriceResult = { pending?: boolean; fallback_from?: "aks"; provider?: "aks" | "gg"; retail_price?: number | null; keyshop_price?: number | null; success: boolean; missing?: boolean; stale?: boolean; skipped?: "unreleased" | "release_unknown" | "free"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
   checked_at?: number; currency?: string; preferred_only?: boolean; matched_offers?: number;
   offers?: { merchant: string; price: number; kind: string; edition: string; coupon: string }[] };
 const getPreferences = callable<[], Preferences>("get_price_preferences");
@@ -110,15 +110,15 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
       </>}
       <PanelSectionRow><ToggleField label="Árforrás: GG.deals" description="Kikapcsolva: AllKeyShop. Váltás az Alkalmazás gombbal."
         checked={prefs.provider === "gg"} disabled={busy} onChange={gg => setPrefs({ ...prefs, provider: gg ? "gg" : "aks" })} /></PanelSectionRow>
-      {prefs.provider === "gg" && <>
+      <>
         {connection.mode === "direct" && <PanelSectionRow><TextField label={prefs.gg_key_configured ? "GG.deals API-kulcs (mentve; üresen megtartja)" : "GG.deals API-kulcs"}
           bIsPassword value={apiKey} disabled={busy} onChange={event => setApiKey(event.currentTarget.value)} /></PanelSectionRow>}
         <PanelSectionRow><div style={{ fontSize: "12px", lineHeight: 1.5 }}>
           GG.deals összehasonlító minimumárak (EU/EUR). Az API nem ad boltonkénti ajánlatokat:
           a boltszűrő, a Steam-kulcs/Gift és kiadásszűrő itt nem alkalmazható. A pontos terméket és aktiválhatóságot a GG.deals adatlapján ellenőrizd.
-          Az AllKeyShop-beállításaid megmaradnak.
+          AKS-kapcsolati hiba vagy korlátozás esetén automatikusan ezt használjuk tartalékként, ha van GG.deals-kulcs. Az AllKeyShop-beállításaid megmaradnak.
         </div></PanelSectionRow>
-      </>}
+      </>
       <PanelSectionRow><ToggleField label="Árak az áruházi játékoldalon" checked={prefs.enabled} disabled={busy}
         onChange={async (enabled) => {
           const updated = { ...prefs, enabled };
@@ -277,7 +277,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     if (data?.retry_at && !data.success) { summary.dataset.dpbRetryAt = String(data.retry_at); summary.dataset.dpbLabel = summary.textContent; }
     const ggRetailCheaper = data?.retail_price != null && (data?.keyshop_price == null || data.retail_price <= data.keyshop_price);
     if (gg) summary.textContent = !data.success ? 'GG.deals: ' + (data.pending ? 'szerveres lekérés folyamatban' : data.error_code === 'rate_limit' ? 'várakozás' : 'hiba')
-      : 'GG.deals · ' + (ggRetailCheaper ? 'Hivatalos boltok: ' + data.retail_price.toFixed(2) + ' €'
+      : 'GG.deals: ' + (ggRetailCheaper ? 'Hivatalos boltok: ' + data.retail_price.toFixed(2) + ' €'
       : data.keyshop_price != null ? 'Kulcsboltok: ' + data.keyshop_price.toFixed(2) + ' €' : 'nincs ár');
     if (data?.retry_at && !data.success) summary.dataset.dpbLabel = summary.textContent;
     summary.title = (gg ? 'GG.deals' : 'AllKeyShop') + ' ár és ajánlatok – megnyitás';
@@ -291,6 +291,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     if (!data) line('Árak betöltése…');
     else if (!data.success) { line(data.error || 'Az ár most nem érhető el.'); if (data.global_error) line('A többi árlekérés is szünetel. A következő próbáig hátralévő idő az ársorban látható. Az újrapróbálkozáshoz maradjon nyitva az áruház.'); }
     else if (gg) {
+      if (data.fallback_from === 'aks') line('Tartalék árforrás: az AllKeyShop kapcsolati hibája vagy korlátozása miatt.');
       line('Kulcsboltok minimuma: ' + (data.keyshop_price != null ? data.keyshop_price.toFixed(2) + ' €' : 'nincs ár'));
       line('Hivatalos boltok minimuma: ' + (data.retail_price != null ? data.retail_price.toFixed(2) + ' €' : 'nincs ár'));
       line('Összesített ár: a kiválasztott boltokra, Steam-kulcs/Gift típusra és kiadásra nem szűrhető.');
@@ -357,7 +358,7 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {
         const amount = value.keyshop_price ?? value.retail_price;
-        row.textContent = !value.success ? 'GG.deals: várakozás / hiba' : amount != null ? 'GG.deals · tájékoztató ár: ' + amount.toFixed(2) + ' €' : 'GG.deals: nincs ár';
+        row.textContent = !value.success ? 'GG.deals: várakozás / hiba' : amount != null ? 'GG.deals: tájékoztató ár: ' + amount.toFixed(2) + ' €' : 'GG.deals: nincs ár';
         if (row.dataset.dpbRetryAt) row.dataset.dpbLabel = row.textContent;
       }
       row.title = row.textContent;
