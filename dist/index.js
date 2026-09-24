@@ -347,6 +347,9 @@ async function timed(request) {
         clearTimeout(timer);
     }
 }
+const getConnection = callable("get_price_connection");
+const setConnection = callable("set_price_connection");
+const testServer = callable("test_price_server");
 const getPriceStats = callable("get_price_cache_stats");
 const clearPriceCache = callable("clear_price_cache");
 function PriceCacheStatus() {
@@ -376,7 +379,7 @@ function PriceCacheStatus() {
         void poll();
         return () => { active = false; clearTimeout(timer); };
     }, []);
-    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { role: "status", style: { fontSize: "12px", lineHeight: 1.5 }, children: [stats ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { children: [stats.price_provider === "gg" ? "GG.deals" : "AKS", " \u00E1rgyors\u00EDt\u00F3t\u00E1r: ", stats.price_fresh_entries, "/", stats.price_entries, " friss \u00B7 30 perc \u00B7 lemezre mentve"] }), SP_JSX.jsxs("div", { children: ["Steam-adatok: ", stats.price_metadata_entries, " \u00B7 AKS-hivatkoz\u00E1sok: ", stats.price_match_entries] }), SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_ready, "/", stats.price_wishlist_total, " ellen\u0151rizve", stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""] }), stats.price_wishlist_deferred > 0 && SP_JSX.jsxs("div", { children: [stats.price_wishlist_deferred, " sikertelen ellen\u0151rz\u00E9s \u00B7 \u00FAjabb h\u00E1tt\u00E9rpr\u00F3ba 30 perc ut\u00E1n."] }), SP_JSX.jsx("div", { children: stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { role: "status", style: { fontSize: "12px", lineHeight: 1.5 }, children: [stats ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { children: [stats.price_provider === "gg" ? "GG.deals" : "AKS", " \u00E1rgyors\u00EDt\u00F3t\u00E1r: ", stats.price_fresh_entries, "/", stats.price_entries, " friss \u00B7 30 perc \u00B7 lemezre mentve"] }), stats.price_connection === "server" && SP_JSX.jsxs("div", { children: ["Saj\u00E1t szerver \u00B7 sorban: ", stats.price_server_queue, " \u00B7 helyi \u00E1rment\u00E9s akt\u00EDv"] }), SP_JSX.jsxs("div", { children: ["Steam-adatok: ", stats.price_metadata_entries, " \u00B7 AKS-hivatkoz\u00E1sok: ", stats.price_match_entries] }), SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_ready, "/", stats.price_wishlist_total, " ellen\u0151rizve", stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""] }), stats.price_wishlist_deferred > 0 && SP_JSX.jsxs("div", { children: [stats.price_wishlist_deferred, " t\u00E9tel v\u00E1rakozik a k\u00F6vetkez\u0151 h\u00E1tt\u00E9rpr\u00F3b\u00E1ra."] }), SP_JSX.jsx("div", { children: stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
                                         : !stats.price_wishlist_active ? "Előtöltés szünetel. Az áruház megnyitásakor indul."
                                             : stats.price_wishlist_current ? `Ellenőrzés: Steam ${stats.price_wishlist_current}`
                                                 : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 30 percnél régebbi adatok frissülnek."
@@ -398,21 +401,24 @@ function PriceCacheStatus() {
 function AllKeyShopSettings({ openMerchants }) {
     const [prefs, setPrefs] = SP_REACT.useState();
     const [apiKey, setApiKey] = SP_REACT.useState("");
+    const [connection, setConnectionState] = SP_REACT.useState();
+    const [serverToken, setServerToken] = SP_REACT.useState("");
     const [busy, setBusy] = SP_REACT.useState(false);
     const [message, setMessage] = SP_REACT.useState("");
     SP_REACT.useEffect(() => {
         let active = true;
-        void timed(getPreferences()).then(value => {
+        void Promise.all([timed(getPreferences()), timed(getConnection())]).then(([value, transport]) => {
             if (active) {
-                if (!value.success)
-                    throw new Error(value.error || "Betöltési hiba");
+                if (!value.success || !transport.success)
+                    throw new Error(value.error || transport.error || "Betöltési hiba");
                 setPrefs(value);
+                setConnectionState(transport);
             }
         }).catch(error => { if (active)
             setMessage(String(error)); });
         return () => { active = false; };
     }, []);
-    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "J\u00E1t\u00E9k\u00E1rak \u00B7 AllKeyShop / GG.deals" }) }), prefs && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rforr\u00E1s: GG.deals", description: "Kikapcsolva: AllKeyShop. V\u00E1lt\u00E1s az Alkalmaz\u00E1s gombbal.", checked: prefs.provider === "gg", disabled: busy, onChange: gg => setPrefs({ ...prefs, provider: gg ? "gg" : "aks" }) }) }), prefs.provider === "gg" && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: prefs.gg_key_configured ? "GG.deals API-kulcs (mentve; üresen megtartja)" : "GG.deals API-kulcs", bIsPassword: true, value: apiKey, disabled: busy, onChange: event => setApiKey(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", lineHeight: 1.5 }, children: "GG.deals \u00F6sszehasonl\u00EDt\u00F3 minimum\u00E1rak (EU/EUR). Az API nem ad boltonk\u00E9nti aj\u00E1nlatokat: a boltsz\u0171r\u0151, a Steam-kulcs/Gift \u00E9s kiad\u00E1ssz\u0171r\u0151 itt nem alkalmazhat\u00F3. A pontos term\u00E9ket \u00E9s aktiv\u00E1lhat\u00F3s\u00E1got a GG.deals adatlapj\u00E1n ellen\u0151rizd. Az AllKeyShop-be\u00E1ll\u00EDt\u00E1said megmaradnak." }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi j\u00E1t\u00E9koldalon", checked: prefs.enabled, disabled: busy, onChange: async (enabled) => {
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { marginTop: "12px", fontWeight: 700 }, children: "J\u00E1t\u00E9k\u00E1rak \u00B7 AllKeyShop / GG.deals" }) }), prefs && connection && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Lek\u00E9r\u00E9s saj\u00E1t szerveren kereszt\u00FCl", checked: connection.mode === "server", disabled: busy, onChange: server => setConnectionState({ ...connection, mode: server ? "server" : "direct" }) }) }), connection.mode === "server" && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Szerver HTTPS c\u00EDme", value: connection.url, disabled: busy, onChange: event => setConnectionState({ ...connection, url: event.currentTarget.value }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: connection.token_configured ? "Szervertoken (mentve; üresen megtartja)" : "Szervertoken", bIsPassword: true, value: serverToken, disabled: busy, onChange: event => setServerToken(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px" }, children: "P\u00E9lda: https://sajat-szerver.duckdns.org \u00B7 Az Ubuntu telep\u00EDt\u0151je adja a szervertokent. Ez nem a DuckDNS-token \u00E9s nem a GG.deals-kulcs. A GG.deals-kulcs szerveres m\u00F3dban az Ubuntun sz\u00FCks\u00E9ges." }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rforr\u00E1s: GG.deals", description: "Kikapcsolva: AllKeyShop. V\u00E1lt\u00E1s az Alkalmaz\u00E1s gombbal.", checked: prefs.provider === "gg", disabled: busy, onChange: gg => setPrefs({ ...prefs, provider: gg ? "gg" : "aks" }) }) }), prefs.provider === "gg" && SP_JSX.jsxs(SP_JSX.Fragment, { children: [connection.mode === "direct" && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: prefs.gg_key_configured ? "GG.deals API-kulcs (mentve; üresen megtartja)" : "GG.deals API-kulcs", bIsPassword: true, value: apiKey, disabled: busy, onChange: event => setApiKey(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", lineHeight: 1.5 }, children: "GG.deals \u00F6sszehasonl\u00EDt\u00F3 minimum\u00E1rak (EU/EUR). Az API nem ad boltonk\u00E9nti aj\u00E1nlatokat: a boltsz\u0171r\u0151, a Steam-kulcs/Gift \u00E9s kiad\u00E1ssz\u0171r\u0151 itt nem alkalmazhat\u00F3. A pontos term\u00E9ket \u00E9s aktiv\u00E1lhat\u00F3s\u00E1got a GG.deals adatlapj\u00E1n ellen\u0151rizd. Az AllKeyShop-be\u00E1ll\u00EDt\u00E1said megmaradnak." }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "\u00C1rak az \u00E1ruh\u00E1zi j\u00E1t\u00E9koldalon", checked: prefs.enabled, disabled: busy, onChange: async (enabled) => {
                                 const updated = { ...prefs, enabled };
                                 setPrefs(updated);
                                 setBusy(true);
@@ -441,6 +447,14 @@ function AllKeyShopSettings({ openMerchants }) {
                                     const current = await timed(getPreferences());
                                     if (!current.success)
                                         throw new Error(current.error || "Betöltési hiba");
+                                    if (connection.mode === "direct" && prefs.provider === "gg" && !prefs.gg_key_configured && !apiKey.trim())
+                                        throw new Error("Közvetlen GG.deals módhoz add meg az API-kulcsot a Decken is.");
+                                    const transport = await timed(setConnection(connection.mode, connection.url.trim(), serverToken.trim() || null));
+                                    if (!transport.success)
+                                        throw new Error(transport.error || "Kapcsolati beállítás mentési hiba");
+                                    setConnectionState(transport);
+                                    setServerToken("");
+                                    resetPriceView();
                                     const provider = await timed(setProvider(prefs.provider, apiKey.trim() || null));
                                     if (!provider.success)
                                         throw new Error(provider.error || "Árforrás mentési hiba");
@@ -458,7 +472,19 @@ function AllKeyShopSettings({ openMerchants }) {
                                 finally {
                                     setBusy(false);
                                 }
-                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás." }) })] });
+                            }, children: busy ? "Mentés…" : "Árbeállítások alkalmazása" }) }), connection.mode === "server" && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: busy, onClick: async () => {
+                                setBusy(true);
+                                try {
+                                    const result = await timed(testServer());
+                                    setMessage(result.success ? `Mentett szerverkapcsolat működik. AKS: ${result.aks_entries}, GG.deals: ${result.gg_entries}, sorban: ${result.queue}. GG.deals-kulcs: ${result.gg_available ? "beállítva" : "hiányzik"}.` : result.error || "Kapcsolati hiba.");
+                                }
+                                catch {
+                                    setMessage("A szerverkapcsolat nem ellenőrizhető.");
+                                }
+                                finally {
+                                    setBusy(false);
+                                }
+                            }, children: "Mentett szerverkapcsolat tesztel\u00E9se" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 30 percig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás." }) })] });
 }
 function AllKeyShopMerchants({ onBack }) {
     const [names, setNames] = SP_REACT.useState([]);
@@ -582,10 +608,10 @@ function buildPricePanelScript(appId, result) {
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
     const gg = data?.provider === 'gg';
-    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
+    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
     if (data?.retry_at && !data.success) { summary.dataset.dpbRetryAt = String(data.retry_at); summary.dataset.dpbLabel = summary.textContent; }
     const ggRetailCheaper = data?.retail_price != null && (data?.keyshop_price == null || data.retail_price <= data.keyshop_price);
-    if (gg) summary.textContent = !data.success ? 'GG.deals: ' + (data.error_code === 'rate_limit' ? 'várakozás' : 'hiba')
+    if (gg) summary.textContent = !data.success ? 'GG.deals: ' + (data.pending ? 'szerveres lekérés folyamatban' : data.error_code === 'rate_limit' ? 'várakozás' : 'hiba')
       : 'GG.deals · ' + (ggRetailCheaper ? 'Hivatalos boltok: ' + data.retail_price.toFixed(2) + ' €'
       : data.keyshop_price != null ? 'Kulcsboltok: ' + data.keyshop_price.toFixed(2) + ' €' : 'nincs ár');
     if (data?.retry_at && !data.success) summary.dataset.dpbLabel = summary.textContent;
@@ -660,7 +686,7 @@ function buildTilePricesScript(url, values) {
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
       row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
-      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
+      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {
         const amount = value.keyshop_price ?? value.retail_price;
@@ -724,7 +750,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
     // Expiry alone never refreshes a successful visible price. Failed requests retain
     // the existing retry countdown; stale successful prices wait for a new appearance.
     const needsRequest = (app) => refreshQueue.has(app) ||
-        (prices.has(app) && !prices.get(app).value.success && prices.get(app).expires <= Date.now());
+        (prices.has(app) && (!prices.get(app).value.success || prices.get(app).value.pending) && prices.get(app).expires <= Date.now());
     const pending = [...refreshQueue];
     const requestId = id && needsRequest(id) ? id : pending.find(app => !prices.has(app)) ??
         pending[0] ?? tileIds.find(needsRequest);
@@ -765,12 +791,12 @@ function updatePriceView(url, send, visibleTileIds = []) {
         serviceFailure = undefined;
         refreshQueue.delete(requestId);
         if (!value.success && prices.get(requestId)?.value.success) {
-            value = { ...prices.get(requestId).value, stale: true, error: value.error };
+            value = { ...prices.get(requestId).value, stale: true, error: value.error, pending: value.pending, retry_after: value.retry_after };
         }
         if (prices.size >= 500)
             prices.delete(prices.keys().next().value);
         const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-        const expires = Date.now() + (value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
+        const expires = Date.now() + (value.pending ? Math.max(1, value.retry_after ?? 3) * 1000 : value.success && !value.disabled ? Math.max(0, 1800000 - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
         if (!value.success)
             value = { ...value, retry_at: expires };
         prices.set(requestId, { value, expires });

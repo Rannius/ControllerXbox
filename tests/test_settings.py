@@ -763,6 +763,116 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("test_key", json.dumps(result))
         self.assertNotIn("secret detail", json.dumps(result))
 
+    async def test_private_server_settings_roundtrip_and_host_change_requires_new_token(self):
+        token = "private_server_test_token_12345"
+        result = await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org/", token)
+        self.assertTrue(result["success"])
+        self.assertNotIn(token, json.dumps(result))
+        self.assertEqual(result["url"], "https://sajat-szerver.duckdns.org")
+        restarted = self.plugin_type()
+        await restarted._load_price_connection()
+        self.assertEqual(restarted._price_server_token, token)
+        self.assertNotIn(token, json.dumps(await restarted.get_price_connection()))
+        changed = await restarted.set_price_connection("server", "https://other.duckdns.org")
+        self.assertFalse(changed["success"])
+        self.assertEqual(restarted._price_connection["url"], "https://sajat-szerver.duckdns.org")
+        for url in ("http://example.com", "https://user:pass@example.com", "https://example.com/?token=x", "https://example.com/path", "https://example.com/#x"):
+            self.assertFalse((await restarted.set_price_connection("server", url, token))["success"])
+        await restarted.set_price_connection("direct", "https://sajat-szerver.duckdns.org")
+        self.assertEqual(restarted._price_server_token, token)
+
+    async def test_remote_prices_preserve_local_filters_and_cache_only_is_network_free(self):
+        await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
+        await self.plugin.set_price_preferences(True, False, ["Eneba"], True)
+        entry = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+                 "data": self.aks_fixture(), "checked_at": time.time()}
+        response = {"protocol": 1, "provider": "aks", "app_id": "10", "entry": entry, "pending": False}
+        with patch.object(self.plugin, "_price_server_request", return_value=response) as remote, patch.object(self.plugin, "_fetch_aks_game") as direct:
+            result = await self.plugin.get_allkeyshop_price("10")
+            self.assertTrue(result["success"])
+            self.assertEqual(result["offers"][0]["merchant"], "Eneba")
+            await self.plugin.get_allkeyshop_price("10")
+            await self.plugin.get_cached_allkeyshop_price("10")
+            await self.plugin.get_cached_allkeyshop_price("20")
+            self.assertEqual(remote.call_count, 1)
+            direct.assert_not_called()
+            self.plugin._price_preferences["merchants"] = []
+            self.assertEqual((await self.plugin.get_cached_allkeyshop_price("10"))["offers"], [])
+
+    async def test_remote_pending_wishlist_retries_soon_and_mismatched_response_is_rejected(self):
+        await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
+        self.plugin._price_wishlist = ["10"]
+        self.plugin._price_wishlist_lease = time.monotonic() + 90
+        response = {"protocol": 1, "provider": "aks", "app_id": "10", "entry": None, "pending": True, "retry_after": 4}
+        with patch.object(self.plugin, "_price_server_request", return_value=response):
+            await self.plugin._price_wishlist_step()
+            self.assertLess(self.plugin._price_wishlist_retry["10"] - time.time(), 5)
+            self.assertFalse(await self.plugin._price_wishlist_step())
+        response["app_id"] = "20"
+        with patch.object(self.plugin, "_price_server_request", return_value=response):
+            result = await self.plugin.get_allkeyshop_price("10")
+            self.assertFalse(result["success"])
+        self.assertNotIn("10", self.plugin._price_cache)
+
+    async def test_server_offline_retains_stale_price_and_never_falls_back_to_provider(self):
+        await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
+        entry = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+                 "data": self.aks_fixture(), "checked_at": time.time() - 1801}
+        self.plugin._price_cache["10"] = entry
+        with patch.object(self.plugin, "_price_server_request", side_effect=TimeoutError("sensitive URL")) as remote, patch.object(self.plugin, "_fetch_aks_game") as direct:
+            self.assertTrue((await self.plugin.get_cached_allkeyshop_price("10"))["stale"])
+            result = await self.plugin.get_allkeyshop_price("10")
+            self.assertFalse(result["success"])
+            self.assertTrue(result["global_error"])
+            self.assertNotIn("sensitive", result["error"])
+            await self.plugin.get_allkeyshop_price("20")
+            self.assertEqual(remote.call_count, 1)
+            direct.assert_not_called()
+            self.assertEqual(self.plugin._price_cache["10"], entry)
+
+    async def test_server_gg_mode_does_not_require_or_transmit_local_gg_key(self):
+        await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
+        self.assertTrue((await self.plugin.set_price_provider("gg"))["success"])
+        entry = {"success": True, "provider": "gg", "title": "Example", "url": "https://gg.deals/game/example/",
+                 "currency": "EUR", "keyshop_price": 3.2, "retail_price": 5.1, "checked_at": time.time()}
+        with patch.object(self.plugin, "_price_server_request", return_value={"protocol": 1, "provider": "gg", "app_id": "10", "entry": entry}) as remote:
+            self.assertEqual((await self.plugin.get_allkeyshop_price("10"))["keyshop_price"], 3.2)
+            self.assertEqual(set(remote.call_args.args[-1]), {"provider", "app_id", "priority"})
+
+    async def test_remote_bolt_directory_uses_server_only(self):
+        await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
+        with patch.object(self.plugin, "_price_server_request", return_value={"protocol": 1, "merchants": ["Eneba", "GAMIVO"]}) as remote, patch.object(self.plugin, "_aks_read") as aks:
+            result = await self.plugin.get_price_merchants(True)
+            self.assertEqual(result["merchants"], ["Eneba", "GAMIVO"])
+            self.assertEqual(remote.call_args.args[2], "/v1/merchants")
+            aks.assert_not_called()
+
+    async def test_aks_server_cooldown_survives_backend_restart(self):
+        self.plugin._aks_pause_until = time.monotonic() + 120
+        await self.plugin._save_price_cache()
+        restarted = self.plugin_type()
+        await restarted._load_price_cache()
+        self.assertGreater(restarted._price_service_retry_at - time.time(), 119)
+        self.assertGreater(restarted._aks_pause_until - time.monotonic(), 119)
+        with patch.object(restarted, "_fetch_aks_game") as lookup:
+            result = await restarted.get_allkeyshop_price("10")
+            self.assertTrue(result["global_error"])
+            lookup.assert_not_called()
+
+    def test_server_token_uses_verified_tls_header_and_redirect_is_refused(self):
+        import ssl
+        with patch("urllib.request.build_opener") as build:
+            build.return_value.open.return_value = io.BytesIO(b'{"protocol":1}')
+            self.plugin._price_server_request("https://sajat-szerver.duckdns.org", "test_server_token_1234567890", "/v1/status")
+            request = build.return_value.open.call_args.args[0]
+            self.assertNotIn("test_server_token", request.full_url)
+            self.assertEqual(request.get_header("Authorization"), "Bearer test_server_token_1234567890")
+            https, redirect = build.call_args.args
+            self.assertEqual(https._context.verify_mode, ssl.CERT_REQUIRED)
+            self.assertTrue(https._context.check_hostname)
+            with self.assertRaises(urllib.error.HTTPError):
+                redirect.redirect_request(request, None, 302, "redirect", {}, "https://other.example/")
+
     async def asyncSetUp(self):
         self.directory = tempfile.TemporaryDirectory()
         decky = types.ModuleType("decky")

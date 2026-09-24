@@ -141,3 +141,26 @@ test('server-requested cooldown is not shortened to the client five-minute limit
  assert.equal(f.requests.length,2);
  f.requests[1].resolve({success:true,offers:[]});await f.drain();
 });
+
+
+test('remote pending stale price is displayed and polled only after its retry delay',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/app/10/';
+ const old={success:true,stale:true,checked_at:f.clock.now/1000-1900,offers:[{merchant:'Eneba',price:3,kind:'Steam',edition:'Standard',coupon:''}]};
+ f.cached.set('10',old);
+ f.api.updatePriceView(url,f.send);await f.drain();
+ assert.equal(f.requests.length,1);
+ f.requests[0].resolve({...old,pending:true,retry_after:4});await f.drain();
+ f.clock.now+=3000;f.api.updatePriceView(url,f.send);await f.drain();assert.equal(f.requests.length,1);
+ f.clock.now+=1001;f.api.updatePriceView(url,f.send);await f.drain();assert.equal(f.requests.length,2);
+ f.requests[1].resolve({success:true,checked_at:f.clock.now/1000,offers:[{merchant:'Eneba',price:2,kind:'Steam',edition:'Standard',coupon:''}]});await f.drain();
+ f.clock.now+=5000;f.api.updatePriceView(url,f.send);await f.drain();assert.equal(f.requests.length,2);
+ assert.match(f.scripts.at(-1),/"price":2/);
+});
+
+test('remote pending result stops polling when the game page is closed',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/app/10/';
+ f.api.updatePriceView(url,f.send);await f.drain();
+ f.requests[0].resolve({success:false,pending:true,error_code:'pending',retry_after:3});await f.drain();
+ f.clock.now+=4000;f.api.updatePriceView('https://store.steampowered.com/',f.send);await f.drain();
+ assert.equal(f.requests.length,1);
+});

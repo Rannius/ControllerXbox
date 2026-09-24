@@ -147,3 +147,19 @@ A Beállítások → Játékárak részen választható az AllKeyShop vagy a GG.
 A GG.deals API nem ad boltonkénti vagy terméktípus szerinti ajánlatlistát. Emiatt az ottani ár külön jelölt összehasonlító ár, nem az AKS-szűrőkkel ellenőrzött Steam-kulcs/Gift-ajánlat. A felület ezt jelzi, mindkét minimumárat és a GG.deals forráshivatkozását megmutatja. Az AllKeyShop boltszűrése megmarad visszaváltáshoz. API-dokumentáció: https://gg.deals/api/prices/
 
 Ellenőrzés: TypeScript, 32 frontend- és 72 Python-teszt; a tényleges ársor böngészős ellenőrzése. Fejlesztői hálózaton a Gas Station Simulator hideg AKS-lekérése 3,88 mp / 3 HTTP-kérés, az ismert játéké 1,94 mp / 1 kérés, mindkettő 50 megfelelő ajánlattal. Három játék GG.deals-lekérése egy API-hívással 0,28 mp. A Steam Deck hálózatán és felületén a kiadást külön ki kell próbálni.
+
+## 1.0.84 – Saját Ubuntu árszerver és Decky-kapcsolat
+
+A Beállítások → Játékárak részen választható a közvetlen vagy a saját HTTPS-szerveren keresztüli lekérés. A szerver címét és külön hozzáférési tokenjét a Decky helyben tárolja; maszkolt tokenmező és kapcsolatellenőrző gomb segíti a beállítást. A GG.deals-kulcs szerveres módban csak az Ubuntun szükséges. A kliens ellenőrzi a TLS-tanúsítványt és nem követ tokenes átirányításokat.
+
+Az Ubuntu szolgáltatás a kiadott plugin árlekérő kódját használja: közös tartós Steam-, AKS-párosítás- és árcache, központi kérési sor, AppID/forrás szerinti duplikációszűrés, foreground prioritás, AKS-kérésköz és szolgáltatói várakozás. A boltonkénti AKS-szűrés a Decken marad, így két felhasználó eltérő megbízhatóbolt-listát használhat ugyanazzal a szervercache-sel. A szerver sem Steam-belépést, sem kívánságlista-tagságot nem igényel.
+
+Szerverhiba esetén megmarad a helyi mentett ár, és nincs automatikus közvetlen szolgáltatói fallback. A szerver sorban lévő feladatainak eredményét a Decky rövid, jelzett várakozás után kérdezi újra; az áruház bezárásával a felületi polling megszűnik. A helyi cache-only függvények továbbra sem használnak hálózatot.
+
+Új, külön Ubuntu-csomag: `DeckPriceServer-v1.0.84.tar.gz`. Telepítő, Caddy HTTPS, systemd szolgáltatás, opcionális DuckDNS-frissítés és részletes magyar útmutató. A Decky ZIP rögzített szerkezete változatlan. Portok: TCP 80/443 az Ubuntura; a belső 8765-ös port nem publikálandó. A telepítő saját szervertokent generál, személyes API-kulcs nincs a csomagban.
+
+A DuckDNS stabil nevet ad a változó IP-hez; nem rejt IP-címet és nem garantál tiltásmentességet. Közös hálózaton a szerver és a Deck ugyanazt a nyilvános címet használhatja. A védelem a közös cache és a szolgáltatói limitek betartása.
+
+Ellenőrzés: TypeScript, 34 frontend- és 85 Python-teszt, köztük valódi helyi HTTP-kapcsolatokkal hitelesítés, két kliens közös lekérése, prioritás, régi ár azonnali visszaadása, szerverhiba és cache-only működés. Az Ubuntu-telepítő shell szintaxisa és a kiadási csomagok ellenőrizve. A felhasználó Ubuntu-gépére telepítés, a router porttovábbítása és a nyilvános HTTPS-tanúsítvány kiadása még helyszíni lépés; ezek működését a helyi teszt nem igazolja.
+
+Telepítési útmutató: [price-server/README.md](https://github.com/Rannius/ControllerXbox/blob/v1.0.84/price-server/README.md).

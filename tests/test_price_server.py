@@ -1,0 +1,139 @@
+import asyncio
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("private_price_server", ROOT / "price-server/server.py")
+server = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(server)
+
+
+class PriceServerTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.release_events = []
+        self.engine = server.load_engine(self.directory.name)
+        self.broker = server.PriceBroker(self.engine)
+        await self.broker.start()
+        self.token = "server_test_token_1234567890123456"
+        self.http = server.PrivateHTTPServer(("127.0.0.1", 0), self.broker, asyncio.get_event_loop(), self.token)
+        self.thread = threading.Thread(target=self.http.serve_forever, daemon=True)
+        self.thread.start()
+
+    async def asyncTearDown(self):
+        for event in self.release_events:
+            event.set()
+        await asyncio.get_event_loop().run_in_executor(None, self.http.shutdown)
+        self.http.server_close()
+        self.thread.join(2)
+        await self.broker.close()
+        self.directory.cleanup()
+
+    async def request(self, path, data=None, token=True):
+        def send():
+            headers = {"Content-Type": "application/json"}
+            if token:
+                headers["Authorization"] = "Bearer " + self.token
+            req = urllib.request.Request("http://127.0.0.1:%s%s" % (self.http.server_port, path),
+                data=json.dumps(data).encode() if data is not None else None, headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=5) as response:
+                    return response.status, json.load(response)
+            except urllib.error.HTTPError as error:
+                return error.code, json.load(error)
+        return await asyncio.get_event_loop().run_in_executor(None, send)
+
+    def entry(self, age=0):
+        return {"title": "Example", "checked_at": time.time() - age,
+                "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+                "data": {"prices": [], "merchants": {}, "regions": {}, "editions": {}}}
+
+    async def test_authentication_validation_health_and_no_arbitrary_proxy(self):
+        self.assertEqual((await self.request("/health", token=False))[0], 200)
+        self.assertEqual((await self.request("/v1/status", token=False))[0], 401)
+        self.assertEqual((await self.request("/v1/status"))[0], 200)
+        self.assertEqual((await self.request("/v1/price", {"provider": "aks", "app_id": "10", "url": "http://localhost/private"}))[0], 400)
+        self.assertEqual((await self.request("/v1/price", {"provider": "other", "app_id": "10"}))[0], 400)
+        self.assertEqual((await self.request("/v1/price", {"provider": "aks", "app_id": "-10"}))[0], 400)
+        self.assertEqual((await self.request("/anything", {"url": "http://localhost"}))[0], 404)
+        self.assertEqual((await self.request("/v1/price", {"padding": "x" * 3000}))[0], 413)
+        self.assertEqual(self.broker.pending, {})
+
+    async def test_two_clients_share_one_job_and_fresh_price_never_fetches_again(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        self.release_events.append(release)
+        calls = []
+        async def lookup(app_id):
+            calls.append(app_id)
+            started.set()
+            await release.wait()
+            self.engine._price_cache[app_id] = self.entry()
+            return {"success": True}
+        with patch.object(self.engine, "_get_allkeyshop_price", side_effect=lookup):
+            _, first = await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            self.assertTrue(first["pending"])
+            await asyncio.wait_for(started.wait(), 1)
+            _, second = await self.request("/v1/price", {"provider": "aks", "app_id": "10", "priority": "foreground"})
+            self.assertTrue(second["pending"])
+            self.assertEqual(calls, ["10"])
+            release.set()
+            await asyncio.sleep(.02)
+            _, cached = await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            self.assertFalse(cached["pending"])
+            self.assertEqual(cached["entry"]["title"], "Example")
+            self.assertEqual(calls, ["10"])
+
+    async def test_stale_price_is_immediate_and_foreground_overtakes_waiting_jobs(self):
+        release, started = asyncio.Event(), asyncio.Event()
+        self.release_events.append(release)
+        calls = []
+        self.engine._price_cache["10"] = self.entry(age=1801)
+        async def lookup(app_id):
+            calls.append(app_id)
+            started.set()
+            await release.wait()
+            self.engine._price_cache[app_id] = self.entry()
+            return {"success": True}
+        with patch.object(self.engine, "_get_allkeyshop_price", side_effect=lookup):
+            _, value = await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            self.assertTrue(value["pending"])
+            self.assertIsNotNone(value["entry"])
+            await asyncio.wait_for(started.wait(), 1)
+            await self.request("/v1/price", {"provider": "aks", "app_id": "20"})
+            await self.request("/v1/price", {"provider": "aks", "app_id": "30", "priority": "foreground"})
+            release.set()
+            await asyncio.sleep(.05)
+            self.assertEqual(calls, ["10", "30", "20"])
+
+    async def test_provider_pause_and_missing_gg_key_do_not_trigger_network(self):
+        self.assertEqual(self.broker.cooldown("aks"), 0)
+        self.engine._price_service_retry_at = time.time() + 120
+        with patch.object(self.engine, "_get_allkeyshop_price") as lookup:
+            _, aks = await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            self.assertTrue(aks["failure"]["global_error"])
+            self.assertGreater(aks["retry_after"], 119)
+            _, gg = await self.request("/v1/price", {"provider": "gg", "app_id": "10"})
+            self.assertIn("API", gg["failure"]["error"])
+            lookup.assert_not_called()
+        self.assertEqual(self.broker.pending, {})
+
+    async def test_request_limits_and_status_never_disclose_secrets(self):
+        self.engine._gg_api_key = "private_gg_secret"
+        _, status = await self.request("/v1/status")
+        self.assertTrue(status["gg_available"])
+        self.assertNotIn("private_gg_secret", json.dumps(status))
+        self.assertNotIn(self.token, json.dumps(status))
+        self.http.requests.extend([time.monotonic()] * 300)
+        self.assertEqual((await self.request("/v1/status"))[0], 429)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -117,6 +117,11 @@ jobs:
                   assert entry.external_attr == 0
           PY
 
+      - name: Ubuntu árszerver telepítőcsomag készítése
+        run: |
+          bash -n price-server/install.sh
+          python3 price-server/build_bundle.py release
+
       - name: GitHub Release létrehozása
         env:
           GH_TOKEN: ${{ github.token }}
@@ -125,11 +130,13 @@ jobs:
           if [ -f "$NOTES_FILE" ]; then
             gh release create "${GITHUB_REF_NAME}" \
               "release/ControllerXbox-${GITHUB_REF_NAME}.zip" \
+              "release/DeckPriceServer-${GITHUB_REF_NAME}.tar.gz" \
               --title "Deck Play Badges ${GITHUB_REF_NAME}" \
               --notes-file "$NOTES_FILE"
             exit 0
           fi
           gh release create "${GITHUB_REF_NAME}" \
             "release/ControllerXbox-${GITHUB_REF_NAME}.zip" \
+              "release/DeckPriceServer-${GITHUB_REF_NAME}.tar.gz" \
             --title "Deck Play Badges ${GITHUB_REF_NAME}" \
             --generate-notes

@@ -159,6 +159,12 @@ class HungarianCuratorParser:
 
 class Plugin:
     def __init__(self) -> None:
+        self._price_connection = {"mode": "direct", "url": ""}
+        self._price_server_token = ""
+        self._price_server_retry_at = 0.0
+        self._price_server_failures = 0
+        self._price_server_error = ""
+        self._price_server_queue = 0
         self._price_preferences = {"enabled": True, "allow_gifts": True, "merchants": []}
         self._price_merchants: Set[str] = set()
         self._price_merchants_checked_at = 0.0
@@ -242,6 +248,7 @@ class Plugin:
         settings_directory = getattr(decky, "decky_SETTINGS_DIR", None) or getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", None)
         if not settings_directory:
             raise RuntimeError("Decky settings directory is unavailable")
+        self._price_connection_path = Path(settings_directory) / "price-connection.json"
         self._price_cache_path = Path(settings_directory) / "allkeyshop-price-cache.json"
         self._price_settings_path = Path(settings_directory) / "price-preferences.json"
         self._price_merchants_path = Path(settings_directory) / "price-merchants.json"
@@ -263,6 +270,7 @@ class Plugin:
         self._watchlist_lock = asyncio.Lock()
 
     async def _main(self) -> None:
+        await self._load_price_connection()
         await self._load_price_preferences()
         await self._load_price_merchants()
         await self._load_price_cache()
@@ -462,6 +470,11 @@ class Plugin:
             limits = payload.get("gg_requests", [])
             if isinstance(limits, list):
                 self._gg_requests = [v for v in limits[-1000:] if type(v) in (int, float) and 0 <= time.time() - v < 3600]
+            aks_retry = payload.get("aks_retry_at", 0)
+            if type(aks_retry) in (int, float) and time.time() < aks_retry < float("inf"):
+                self._price_service_retry_at = aks_retry
+                self._aks_pause_until = time.monotonic() + (aks_retry - time.time())
+                self._price_service_error = {"error": "AllKeyShop: korábban kért lekérési szünet.", "error_code": "rate_limit", "global_error": True}
             retry = payload.get("gg_retry_at", 0)
             if type(retry) in (int, float) and retry > 0:
                 self._gg_retry_at = retry
@@ -506,6 +519,8 @@ class Plugin:
             # Values are immutable snapshots. Encode/filter on the worker, not Steam's event loop.
             entries, matches, metadata = self._price_cache.copy(), self._aks_matches.copy(), self._price_metadata.copy()
             gg, requests, retry = self._gg_cache.copy(), self._gg_requests[:], self._gg_retry_at
+            remaining = self._aks_pause_until - time.monotonic()
+            aks_retry = max(self._price_service_retry_at, time.time() + remaining if remaining > 0 else 0)
             def write() -> None:
                 valid = {key: value for key, value in entries.items() if self._valid_price_entry(value)}
                 valid = {key: ({**value, "data": {field: value["data"][field] for field in
@@ -514,7 +529,7 @@ class Plugin:
                 now = time.time()
                 payload = json.dumps({"version": 1, "entries": valid,
                     "gg_entries": {k: v for k, v in gg.items() if self._valid_gg_entry(v)},
-                    "gg_requests": requests, "gg_retry_at": retry,
+                    "gg_requests": requests, "gg_retry_at": retry, "aks_retry_at": aks_retry,
                     "matches": {k: v for k, v in matches.items() if self._valid_aks_match(k, v, now)},
                     "metadata": {k: v for k, v in metadata.items() if self._valid_price_metadata(k, v, now)}}, ensure_ascii=False)
                 if len(payload.encode("utf-8")) > 64 * 1024 * 1024:
@@ -567,7 +582,8 @@ class Plugin:
         valid = {key: value for key, value in self._active_price_cache().items() if "error" not in value}
         fresh = {key for key, value in valid.items() if now - value["checked_at"] < 1800}
         wishlist = set(self._price_wishlist)
-        return {"price_provider": self._price_preferences.get("provider", "aks"),
+        return {"price_connection": self._price_connection["mode"], "price_server_queue": self._price_server_queue,
+                "price_provider": self._price_preferences.get("provider", "aks"),
                 "price_metadata_entries": len(self._price_metadata), "price_match_entries": len(self._aks_matches),
                 "price_entries": len(valid), "price_fresh_entries": len(fresh),
                 "price_wishlist_total": len(wishlist), "price_wishlist_ready": len(wishlist & fresh),
@@ -577,7 +593,8 @@ class Plugin:
                 "price_wishlist_active": self._price_preferences["enabled"] and time.monotonic() < self._price_wishlist_lease,
                 "price_retry_after": max(0, int(self._active_price_retry_at() - now)),
                 "price_wishlist_error": self._price_wishlist_error,
-                "price_last_error": self._gg_last_error if self._price_preferences.get("provider") == "gg" else self._price_last_error,
+                "price_last_error": self._price_server_error if self._price_connection["mode"] == "server" else (
+                    self._gg_last_error if self._price_preferences.get("provider") == "gg" else self._price_last_error),
                 "price_disk_error": self._price_disk_error}
 
     async def get_price_cache_stats(self) -> Dict[str, Any]:
@@ -619,8 +636,11 @@ class Plugin:
             epoch = self._price_epoch
             try:
                 result = await self._get_allkeyshop_price(app_id)
-                if epoch == self._price_epoch and not result.get("success") and not result.get("global_error"):
-                    self._price_wishlist_retry[app_id] = time.time() + 1800
+                if epoch == self._price_epoch:
+                    if result.get("pending"):
+                        self._price_wishlist_retry[app_id] = time.time() + result.get("retry_after", 3)
+                    elif not result.get("success") and not result.get("global_error"):
+                        self._price_wishlist_retry[app_id] = time.time() + 1800
             finally:
                 self._price_wishlist_current = ""
             return True
@@ -636,6 +656,185 @@ class Plugin:
                 self._price_service_retry_at = max(self._price_service_retry_at, time.time() + 60)
             # Only idle polling sleeps; successful work is paced by the HTTP gate.
             await asyncio.sleep(0 if progressed else 2)
+
+    @staticmethod
+    def _valid_price_server_url(value: Any) -> str:
+        if not isinstance(value, str) or len(value) > 250:
+            raise ValueError("Invalid server URL")
+        parsed = urllib.parse.urlparse(value.strip())
+        if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
+                or parsed.path not in ("", "/") or parsed.query or parsed.fragment
+                or not re.fullmatch(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?", parsed.hostname)
+                or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
+            raise ValueError("Invalid server URL")
+        return "https://" + parsed.netloc.lower()
+
+    async def _load_price_connection(self) -> None:
+        try:
+            value = json.loads(await self._run_blocking(lambda: self._price_connection_path.read_text(encoding="utf-8")))
+            if not isinstance(value, dict):
+                return
+            url = self._valid_price_server_url(value["url"]) if value.get("url") else ""
+            token = value.get("token", "")
+            if not isinstance(token, str) or (token and not re.fullmatch(r"[A-Za-z0-9_-]{24,200}", token)):
+                return
+            self._price_connection = {"mode": "server" if value.get("mode") == "server" and url and token else "direct", "url": url}
+            self._price_server_token = token
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
+    async def get_price_connection(self) -> Dict[str, Any]:
+        return {"success": True, **self._price_connection, "token_configured": bool(self._price_server_token)}
+
+    async def set_price_connection(self, mode: Any, url: Any, token: Any = None) -> Dict[str, Any]:
+        try:
+            if mode not in ("direct", "server"):
+                raise ValueError("Invalid mode")
+            address = self._valid_price_server_url(url) if url else ""
+            if token is not None and (not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{24,200}", token)):
+                raise ValueError("Invalid token")
+            # Changing hosts requires an explicit new token; do not forward an existing secret to another host.
+            if address != self._price_connection["url"] and token is None:
+                key = ""
+            else:
+                key = self._price_server_token if token is None else token
+            if mode == "server" and (not address or not key):
+                raise ValueError("Missing settings")
+            value = {"mode": mode, "url": address, "token": key}
+            await self._run_blocking(self._write_file_atomically, self._price_connection_path, "price-connection-", json.dumps(value))
+        except (ValueError, OSError):
+            return {"success": False, "error": "HTTPS szervercím és legalább 24 karakteres hozzáférési token szükséges. Új címhez add meg a hozzá tartozó tokent."}
+        self._price_connection = {"mode": mode, "url": address}
+        self._price_server_token = key
+        self._price_epoch += 1
+        self._price_server_retry_at = 0
+        self._price_server_failures = 0
+        self._price_server_error = ""
+        self._price_server_queue = 0
+        self._price_wishlist_retry.clear()
+        return await self.get_price_connection()
+
+    def _price_server_request(self, address: str, token: str, path: str, data: Any = None) -> Dict[str, Any]:
+        if path not in ("/v1/price", "/v1/status", "/v1/merchants"):
+            raise ValueError("Invalid server endpoint")
+        address = self._valid_price_server_url(address)
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+                raise urllib.error.HTTPError(req.full_url, code, "Redirect refused", headers, fp)
+        context = ssl.create_default_context(cafile=certifi.where()) if certifi else ssl.create_default_context()
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=context), NoRedirect())
+        request = urllib.request.Request(address + path, data=json.dumps(data).encode("utf-8") if data is not None else None,
+            headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json",
+                     "User-Agent": "Deck Play Badges/1.0"})
+        with opener.open(request, timeout=10) as response:
+            body = response.read(8000001)
+        if len(body) > 8000000:
+            raise ValueError("Oversized response")
+        result = json.loads(body)
+        if not isinstance(result, dict) or result.get("protocol") != 1:
+            raise ValueError("Unsupported server protocol")
+        return result
+
+    @staticmethod
+    def _price_server_error_text(error: Exception) -> str:
+        if isinstance(error, urllib.error.HTTPError):
+            if error.code in (401, 403):
+                return "A saját szerver elutasította a hozzáférést. Ellenőrizd a tokent."
+            return "Saját szerver: HTTP %s." % error.code
+        cause = getattr(error, "reason", error)
+        if isinstance(cause, ssl.SSLError):
+            return "A saját szerver HTTPS-tanúsítványa nem ellenőrizhető."
+        if isinstance(error, OSError):
+            return "A saját szerver nem érhető el vagy időtúllépés történt. A mentett árak megmaradtak."
+        return "A saját szerver válasza nem ellenőrizhető. Frissítsd mindkét oldalt."
+
+    async def test_price_server(self) -> Dict[str, Any]:
+        try:
+            result = await self._run_blocking(self._price_server_request, self._price_connection["url"],
+                                             self._price_server_token, "/v1/status")
+            return {"success": True, "queue": int(result.get("queue", 0)), "gg_available": result.get("gg_available") is True,
+                    "aks_entries": int(result.get("aks_entries", 0)), "gg_entries": int(result.get("gg_entries", 0))}
+        except (OSError, ValueError, TypeError):
+            return {"success": False, "error": "A szerverkapcsolat ellenőrzése sikertelen. Ellenőrizd a HTTPS címet, tokent és porttovábbítást."}
+
+    async def _lookup_remote_price(self, app_id: str, epoch: int) -> Dict[str, Any]:
+        provider = self._price_preferences.get("provider", "aks")
+        if epoch != self._price_epoch:
+            return {"success": True, "disabled": True}
+        now = time.time()
+        if now < self._price_server_retry_at:
+            return {"success": False, "provider": provider, "global_error": True, "error_code": "server",
+                    "error": self._price_server_error, "retry_after": self._price_server_retry_at - now}
+        try:
+            response = await self._run_blocking(self._price_server_request, self._price_connection["url"], self._price_server_token,
+                "/v1/price", {"provider": provider, "app_id": app_id, "priority": "foreground" if self._price_foreground_waiters else "background"})
+            if epoch != self._price_epoch:
+                return {"success": True, "disabled": True}
+            if response.get("provider") != provider or response.get("app_id") != app_id:
+                raise ValueError("Mismatched response")
+            retry = response.get("retry_after", 3)
+            if type(retry) not in (int, float) or not 0 <= retry <= 604800:
+                raise ValueError("Invalid retry time")
+            self._price_server_queue = max(0, int(response.get("queue", 0)))
+            entry = response.get("entry")
+            if entry is not None:
+                if not (self._valid_gg_entry(entry) if provider == "gg" else self._valid_price_entry(entry)):
+                    raise ValueError("Invalid price data")
+                cache = self._gg_cache if provider == "gg" else self._price_cache
+                if app_id not in cache and len(cache) >= 10000:
+                    cache.pop(next(iter(cache)))
+                if cache.get(app_id) != entry:
+                    cache[app_id] = entry
+                    if provider == "aks" and "data" in entry:
+                        self._price_merchants.update(row["name"] for row in entry["data"]["merchants"].values()
+                            if isinstance(row, dict) and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 80)
+                    self._schedule_price_save()
+            failure = response.get("failure")
+            if failure:
+                if not isinstance(failure, dict):
+                    raise ValueError("Invalid failure")
+                message = str(failure.get("error", "A szerver árlekérése sikertelen."))[:500]
+                shared = failure.get("global_error") is True
+                if shared:
+                    self._price_server_retry_at = time.time() + max(1, retry)
+                self._price_server_error = message
+                return {"success": False, "provider": provider, "global_error": shared, "error_code": "server",
+                        "error": message, "retry_after": max(1, retry)}
+            self._price_server_failures = 0
+            self._price_server_error = ""
+            pending = response.get("pending") is True
+            if entry:
+                return {**(dict(entry) if provider == "gg" else self._price_result(entry)),
+                        "stale": time.time() - entry["checked_at"] >= PRICE_TTL_SECONDS,
+                        "pending": pending, "retry_after": max(1, retry)}
+            return {"success": False, "provider": provider, "pending": pending, "error_code": "pending" if pending else "server",
+                    "error": "A saját szerver lekérési sorában vár." if pending else "A szerver nem adott áradatot.", "retry_after": max(1, retry)}
+        except (OSError, ValueError, TypeError, KeyError) as error:
+            if epoch != self._price_epoch:
+                return {"success": True, "disabled": True}
+            self._price_server_failures += 1
+            delay = max(min(300, 10 * 2 ** min(5, self._price_server_failures - 1)), self._retry_after(getattr(error, "headers", None)))
+            self._price_server_retry_at = time.time() + delay
+            self._price_server_error = self._price_server_error_text(error)
+            return {"success": False, "provider": provider, "global_error": True, "error_code": "server",
+                    "error": self._price_server_error, "retry_after": delay}
+
+    async def _get_remote_merchants(self, refresh: bool) -> Dict[str, Any]:
+        error = ""
+        try:
+            result = await self._run_blocking(self._price_server_request, self._price_connection["url"], self._price_server_token,
+                                             "/v1/merchants", {"refresh": refresh})
+            names = result.get("merchants")
+            if not isinstance(names, list) or len(names) > 2000 or any(not isinstance(v, str) or not 0 < len(v) <= 80 for v in names):
+                raise ValueError("Invalid merchant list")
+            self._price_merchants.update(names)
+            self._schedule_price_save()
+            if result.get("pending"):
+                error = "A szerver frissíti a boltlistát. A már ismert boltok választhatók; néhány másodperc múlva frissítsd a listát."
+        except (OSError, ValueError, TypeError) as exc:
+            error = self._price_server_error_text(exc)
+        names = self._price_merchants | set(self._price_preferences["merchants"])
+        return {"success": True, "merchants": sorted(names, key=str.casefold), "error": error}
 
     async def _load_price_preferences(self) -> None:
         try:
@@ -675,7 +874,7 @@ class Plugin:
                 not isinstance(api_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,200}", api_key))):
             return {"success": False, "error": "Érvénytelen árforrás vagy API-kulcs."}
         key = self._gg_api_key if api_key is None else api_key
-        if provider == "gg" and not key:
+        if provider == "gg" and not key and self._price_connection["mode"] != "server":
             return {"success": False, "error": "Add meg a GG.deals API-kulcsot."}
         value = {**self._price_preferences, "provider": provider}
         await self._run_blocking(self._write_file_atomically, self._price_settings_path,
@@ -684,6 +883,8 @@ class Plugin:
         self._gg_api_key = key
         self._price_preferences = value
         self._price_epoch += 1
+        self._price_server_retry_at = 0
+        self._price_server_error = ""
         self._price_wishlist_retry.clear()
         self._price_wishlist_attempts.clear()
         return await self.get_price_preferences()
@@ -695,6 +896,8 @@ class Plugin:
         return dict(entry) if self._price_preferences.get("provider") == "gg" else self._price_result(entry)
 
     def _active_price_retry_at(self) -> float:
+        if self._price_connection["mode"] == "server":
+            return self._price_server_retry_at
         return self._gg_retry_at if self._price_preferences.get("provider") == "gg" else self._price_service_retry_at
 
     @staticmethod
@@ -861,6 +1064,8 @@ class Plugin:
         return names
 
     async def get_price_merchants(self, refresh: Any = False) -> Dict[str, Any]:
+        if self._price_connection["mode"] == "server":
+            return await self._get_remote_merchants(refresh is True)
         error = ""
         async with self._price_merchants_lock:
             if refresh is True or time.time() - self._price_merchants_checked_at >= 86400:
@@ -1175,7 +1380,9 @@ class Plugin:
         task_key = str(self._price_epoch) + ":" + normalized
         task = self._price_tasks.get(task_key)
         if task is None:
-            task = asyncio.create_task(self._lookup_gg_price(normalized, self._price_epoch)
+            task = asyncio.create_task(self._lookup_remote_price(normalized, self._price_epoch)
+                                       if self._price_connection["mode"] == "server"
+                                       else self._lookup_gg_price(normalized, self._price_epoch)
                                        if self._price_preferences.get("provider") == "gg"
                                        else self._lookup_allkeyshop_price(normalized, self._price_epoch))
             self._price_tasks[task_key] = task
