@@ -186,7 +186,7 @@ export function AllKeyShopMerchants({ onBack }: { onBack(): void }) {
   return <>
     <PanelSectionRow><ButtonItem layout="below" onClick={onBack}>← Vissza</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ fontSize: "12px", lineHeight: 1.5 }}>
-      Te döntöd el, mely boltokban bízol. A mentés után kizárólag a bepipált boltok megfelelő Steam-kulcs/Gift ajánlatait mutatjuk. Ha egyet sem választasz, nem jelenik meg ajánlat. Az újonnan talált boltokat külön engedélyezheted.
+      Te döntöd el, mely boltokban bízol. A mentés után kizárólag a bepipált boltok megfelelő Steam-kulcs/Gift ajánlatait mutatjuk. Ha egyet sem választasz, nem jelenik meg ajánlat. Az API-val ellenőrzött játékoknál talált boltok automatikusan felkerülnek a listára; az új boltokat külön engedélyezheted.
     </div></PanelSectionRow>
     <PanelSectionRow><TextField label="Bolt keresése" value={query} onChange={event => setQuery(event.currentTarget.value)} /></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={async () => {

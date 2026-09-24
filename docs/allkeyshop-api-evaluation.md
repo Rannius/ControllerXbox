@@ -8,7 +8,7 @@ Forrásvizsgálat: 2026-09-24, [sergioalmela/allkeyshop-api 2.0.0](https://githu
 - Pontos normalizált címillesztés (™/® nélkül), több eltérő termékazonosítóra illeszkedő cím elutasítása. Nincs fuzzy elsőtalálat-választás. A konzolos és Steam Account utótagokat nem töröljük.
 - Steam AppID → katalógus-termékazonosító: 7 napos tartós cache. A Steam-metaadatok 24 órásak. Címeltérés vagy új katalógusban megváltozott párosítás érvényteleníti a találatot. HTTP 404/410 után legfeljebb egy friss katalógusos újrakeresés történik.
 - `https://www.allkeyshop.com/api/price_history_api.php?normalised_name=<ID>&currency=EUR&database=allkeyshop.com&v2=1`: ismert játék esetén egyetlen AKS-lekérés. A válaszokat 24 óráig használjuk. A friss ár olvasása teljesen hálózatmentes, a lejárt mentett ár azonnal látható a háttérfrissítés alatt.
-- Megmarad az egyetlen AKS HTTP-lock, 1,5 másodperces pacing, Retry-After, backoff, AppID single-flight és deduplikált háttérmentés. A boltlista külön, korábbi napi/frissítés gombos útvonalon érhető el.
+- Megmarad az egyetlen AKS HTTP-lock, 1,5 másodperces pacing, Retry-After, backoff, AppID single-flight és deduplikált háttérmentés. 1.0.89-től a boltlista az API-ban megismert és korábban mentett nevekből áll. A régi HTML-boltlista nem kérdezhető le: az AKS HTTP-réteg csak a két JSON-végpontot engedi.
 
 ## A legutóbbi megfelelő minimum kiválasztása
 

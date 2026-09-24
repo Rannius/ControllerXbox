@@ -27,6 +27,7 @@ MAX_QUEUE = 128
 MAX_BODY = 2048
 MAX_OBSERVED = 2048
 RECENT_JOBS = 50
+FOREGROUND_WAIT_SECONDS = 2.5
 LOG = logging.getLogger("deck-price-server")
 
 
@@ -52,6 +53,7 @@ class PriceBroker:
     def __init__(self, engine):
         self.engine = engine
         self.pending = {}
+        self.finished = {}
         self.failures = {}
         self.sequence = 0
         self.current = None
@@ -149,7 +151,7 @@ class PriceBroker:
                 "missing_count": len(missing), "missing": missing[:50], "missing_truncated": len(missing) > 50,
                 "scope": "requested_since_restart", "merchant_refresh": directory_running}
 
-    async def price(self, request):
+    async def price(self, request, wait_for_result=True):
         if not isinstance(request, dict) or set(request) - {"provider", "app_id", "priority"}:
             raise ValueError("Invalid request")
         provider, app_id = request.get("provider"), request.get("app_id")
@@ -189,13 +191,25 @@ class PriceBroker:
                 return {**response, "failure": {"global_error": True, "error": "A szerver lekérési sora megtelt."}, "retry_after": 15}
             self.sequence += 1
             self.pending[key] = (priority, self.sequence)
+            self.finished[key] = asyncio.Event()
         else:
             old_priority, sequence = self.pending[key]
             self.pending[key] = (min(priority, old_priority), sequence)
         self.wake.set()
         self.observe(key, "queued")
+        # An opened game can receive a fast lookup in this HTTP response, without
+        # an extra polling interval. Cached/stale data and background jobs return
+        # immediately. Timing out the event wait never cancels the shared worker.
+        if priority == 0 and entry is None and wait_for_result:
+            try:
+                await asyncio.wait_for(self.finished[key].wait(), FOREGROUND_WAIT_SECONDS)
+            except asyncio.TimeoutError:
+                pass
+            if key not in self.pending:
+                return await self.price(request, wait_for_result=False)
         ahead = sum(value < self.pending[key] for value in self.pending.values())
-        return {**response, "pending": True, "queue": len(self.pending), "retry_after": min(30, max(3, ahead * 2))}
+        return {**response, "pending": True, "queue": len(self.pending),
+                "retry_after": 1 if priority == 0 else min(30, max(3, ahead * 2))}
 
     async def run(self):
         while not self.stopping:
@@ -245,6 +259,9 @@ class PriceBroker:
                                     "duration_seconds": duration, "retry_at": retry_at})
                 LOG.info("Price job finished provider=%s app_id=%s outcome=%s seconds=%.2f", actual_provider, app_id, outcome, duration)
                 self.pending.pop(key, None)
+                finished = self.finished.pop(key, None)
+                if finished:
+                    finished.set()
                 self.current = None
                 self.current_started_at = None
             await asyncio.sleep(0)
@@ -252,22 +269,8 @@ class PriceBroker:
     async def merchants(self, request):
         if not isinstance(request, dict) or set(request) - {"refresh"} or type(request.get("refresh", False)) is not bool:
             raise ValueError("Invalid request")
-        now = time.time()
-        due = request.get("refresh") or now - self.engine._price_merchants_checked_at >= 86400
-        if (due and now >= max(self.directory_retry, self.cooldown("aks"))
-                and (self.directory_task is None or self.directory_task.done())):
-            self.directory_retry = now + 60
-            self.directory_task = asyncio.create_task(self.refresh_directory())
-        return {"protocol": PROTOCOL, "merchants": sorted(self.engine._price_merchants),
-                "pending": bool(self.directory_task and not self.directory_task.done())}
-
-    async def refresh_directory(self):
-        try:
-            await self.engine.get_price_merchants(True)
-        except Exception:
-            LOG.warning("Merchant directory refresh failed")
-        finally:
-            self.engine._schedule_price_save()
+        result = await self.engine.get_price_merchants(request.get("refresh", False))
+        return {"protocol": PROTOCOL, "merchants": result["merchants"], "pending": False}
 
     async def close(self):
         self.stopping = True

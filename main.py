@@ -1095,40 +1095,15 @@ class Plugin:
         await self._run_blocking(self._write_file_atomically, self._price_merchants_path, "price-merchants-",
             json.dumps({"names": sorted(self._price_merchants), "checked_at": self._price_merchants_checked_at}, ensure_ascii=False))
 
-    @staticmethod
-    def _aks_merchant_names(page: str) -> Set[str]:
-        names: Set[str] = set()
-        for attrs in re.findall(r'<a\b([^>]+)>', page, re.S):
-            if not re.search(r'class="[^"]*\bmerchant-card\b[^"]*"', attrs):
-                continue
-            match = re.search(r'aria-label="([^"]+)"', attrs)
-            if match:
-                name = html.unescape(match.group(1)).strip()
-                if 0 < len(name) <= 80:
-                    names.add(name)
-        if not names:
-            raise ValueError("Az AllKeyShop boltlistája nem olvasható.")
-        return names
-
     async def get_price_merchants(self, refresh: Any = False) -> Dict[str, Any]:
         if self._price_connection["mode"] == "server":
             return await self._get_remote_merchants(refresh is True)
-        error = ""
-        async with self._price_merchants_lock:
-            if refresh is True or time.time() - self._price_merchants_checked_at >= 86400:
-                try:
-                    page = await self._run_blocking(self._aks_read, "https://www.allkeyshop.com/blog/cdkey-store-reviews-aggregated/")
-                    self._price_merchants.update(self._aks_merchant_names(page))
-                    self._price_merchants_checked_at = time.time()
-                    await self._save_price_merchants()
-                except (OSError, ValueError) as exc:
-                    decky.logger.debug("AllKeyShop merchant list failed: %s", exc)
-                    error = "A boltlista frissítése sikertelen; a már ismert boltok megmaradtak."
-            names = {name.casefold(): name for name in self._price_merchants}
-            for name in self._price_preferences["merchants"]:
-                names.setdefault(name.casefold(), name)
-            return {"success": True, "merchants": sorted(names.values(), key=str.casefold),
-                    "checked_at": self._price_merchants_checked_at, "error": error}
+        # API responses already supply merchant names. Never scrape the old directory.
+        names = {name.casefold(): name for name in self._price_merchants}
+        for name in self._price_preferences["merchants"]:
+            names.setdefault(name.casefold(), name)
+        return {"success": True, "merchants": sorted(names.values(), key=str.casefold),
+                "checked_at": self._price_merchants_checked_at, "error": ""}
 
     @staticmethod
     def _aks_title(value: str) -> str:
@@ -1154,14 +1129,15 @@ class Plugin:
 
     def _aks_read(self, url: str) -> str:
         parsed = urllib.parse.urlparse(url)
-        if parsed.scheme != "https" or parsed.netloc != "www.allkeyshop.com":
+        if (parsed.scheme != "https" or parsed.netloc != "www.allkeyshop.com"
+                or parsed.path not in ("/api/v2/vaks.php", "/api/price_history_api.php")):
             raise ValueError("Invalid AllKeyShop URL")
         request = urllib.request.Request(url, headers={"User-Agent": "Deck Play Badges price comparison/1.0",
-                                                        "Accept-Encoding": "identity", "Accept": "text/html,application/json"})
+                                                        "Accept-Encoding": "identity", "Accept": "application/json"})
         # Executed only in the blocking worker: one global AKS request at a time,
-        # including search, offer pages and merchant-directory refreshes.
+        # covering both the catalog and price-history API.
         with self._aks_request_lock:
-            # Applies to *all* AKS paths, including the merchant directory.
+            # The same cooldown applies to both API endpoints.
             remaining = self._aks_pause_until - time.monotonic()
             if remaining > 0:
                 raise urllib.error.HTTPError(url, 429, "AKS cooldown", {"Retry-After": str(int(remaining) + 1)}, None)
@@ -1171,7 +1147,7 @@ class Plugin:
             started = time.monotonic()
             try:
                 with self._open_request(request, timeout=30) as response:
-                    if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
+                    if response.geturl() != url:
                         raise ValueError("Unexpected AllKeyShop redirect")
                     limit = 32 * 1024 * 1024 if parsed.path == "/api/v2/vaks.php" else 16 * 1024 * 1024
                     body = response.read(limit + 1)
@@ -1188,10 +1164,7 @@ class Plugin:
                     if pause:
                         self._aks_pause_until = max(self._aks_pause_until, time.monotonic() + pause)
                         self._aks_next_request_at = max(self._aks_next_request_at, self._aks_pause_until)
-                error.price_stage = ("AKS-katalógus" if parsed.path == "/api/v2/vaks.php" else
-                    "AKS-áradatok" if parsed.path == "/api/price_history_api.php" else
-                    "AKS-kereső" if "admin-ajax.php" in parsed.path else
-                    "AKS-boltlista" if "cdkey-store-reviews" in parsed.path else "AKS-ajánlatoldal")
+                error.price_stage = "AKS-katalógus" if parsed.path == "/api/v2/vaks.php" else "AKS-áradatok"
                 error.price_elapsed = round(time.monotonic() - started, 1)
                 raise
             finally:
@@ -1647,6 +1620,7 @@ class Plugin:
                         "checked_at": entry["checked_at"], "offers": []}
             discovered = {row["name"] for row in entry["data"]["merchants"].values()
                           if isinstance(row, dict) and isinstance(row.get("name"), str) and 0 < len(row["name"]) <= 80}
+            self._price_merchants_checked_at = max(self._price_merchants_checked_at, entry["checked_at"])
             if discovered - self._price_merchants:
                 self._price_merchants.update(discovered)
                 self._schedule_price_save()

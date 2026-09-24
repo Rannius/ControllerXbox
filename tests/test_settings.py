@@ -33,11 +33,11 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
     def test_network_diagnostic_identifies_step_elapsed_and_timeout(self):
         with patch.object(self.plugin, "_open_request", side_effect=urllib.error.URLError(TimeoutError("slow"))), patch("time.monotonic", side_effect=[100, 100, 100, 130, 130]):
             try:
-                self.plugin._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?search=game")
+                self.plugin._aks_read("https://www.allkeyshop.com/api/price_history_api.php?normalised_name=10")
             except urllib.error.URLError as error:
                 details = self.plugin._aks_error_details(error)
         self.assertEqual(details["error_code"], "connection")
-        self.assertIn("AKS-kereső (30.0 mp)", details["error"])
+        self.assertIn("AKS-áradatok (30.0 mp)", details["error"])
         self.assertIn("Időtúllépés", details["error"])
 
     async def test_server_retry_after_is_honored_and_missing_game_does_not_pause_others(self):
@@ -166,7 +166,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
     def test_aks_timeout_does_not_hide_another_thirty_second_attempt(self):
         with patch.object(self.plugin, "_open_request", side_effect=TimeoutError("slow")) as fetch, patch("time.sleep") as sleep:
             with self.assertRaises(TimeoutError):
-                self.plugin._aks_read("https://www.allkeyshop.com/blog/")
+                self.plugin._aks_read("https://www.allkeyshop.com/api/price_history_api.php")
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(fetch.call_args.kwargs["timeout"], 30)
         sleep.assert_not_called()
@@ -204,11 +204,14 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
 
     def test_aks_requests_have_a_shared_one_and_a_half_second_gap(self):
         class Response(io.BytesIO):
+            def __init__(self, request):
+                super().__init__(b"{}")
+                self.url = request.full_url
             def geturl(self):
-                return "https://www.allkeyshop.com/blog/"
-        with patch.object(self.plugin, "_open_request", side_effect=lambda *args, **kwargs: Response(b"{}")) as fetch, patch("time.monotonic", return_value=100.0), patch("time.sleep") as sleep:
-            self.plugin._aks_read("https://www.allkeyshop.com/blog/?search=one")
-            self.plugin._aks_read("https://www.allkeyshop.com/blog/?search=two")
+                return self.url
+        with patch.object(self.plugin, "_open_request", side_effect=lambda request, **kwargs: Response(request)) as fetch, patch("time.monotonic", return_value=100.0), patch("time.sleep") as sleep:
+            self.plugin._aks_read("https://www.allkeyshop.com/api/price_history_api.php?normalised_name=1")
+            self.plugin._aks_read("https://www.allkeyshop.com/api/price_history_api.php?normalised_name=2")
         self.assertEqual(fetch.call_count, 2)
         sleep.assert_called_once_with(1.5)
 
@@ -305,23 +308,22 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
                 await self.plugin.set_badge_sides({})
         self.assertEqual((await self.plugin.get_settings())["store_badge_sides"], sides)
 
-    async def test_aks_merchant_directory_preserves_selection_and_offline_cache(self):
-        page = '<a class="merchant-card " href="/review/eneba" aria-label="Eneba"></a><a class="merchant-card is-official" aria-label="A &amp; B"></a><a aria-label="Not a store"></a>'
-        with patch.object(self.plugin, "_aks_read", return_value=page) as fetch:
-            directory = await self.plugin.get_price_merchants()
-            await self.plugin.get_price_merchants()
-        self.assertEqual(fetch.call_count, 1)
-        self.assertEqual(directory["merchants"], ["A & B", "Eneba"])
+    async def test_aks_merchants_use_only_saved_api_names_and_keep_selection(self):
+        self.plugin._price_merchants = {"Eneba", "New store"}
         await self.plugin.set_price_preferences(True, True, ["Eneba"], True)
-        self.plugin._price_merchants.add("New store")
-        self.assertEqual(self.plugin._price_preferences["merchants"], ["Eneba"])
+        await self.plugin._save_price_merchants()
         restarted = self.plugin_type()
         await restarted._load_price_merchants()
-        self.assertIn("Eneba", restarted._price_merchants)
-        with patch.object(restarted, "_aks_read", side_effect=OSError("offline")):
-            offline = await restarted.get_price_merchants(True)
-        self.assertIn("Eneba", offline["merchants"])
-        self.assertTrue(offline["error"])
+        with patch.object(restarted, "_aks_read") as network:
+            result = await restarted.get_price_merchants(True)
+            self.assertEqual(result["merchants"], ["Eneba", "New store"])
+            network.assert_not_called()
+        self.assertEqual(self.plugin._price_preferences["merchants"], ["Eneba"])
+        with patch.object(self.plugin, "_open_request") as network:
+            for url in ("https://www.allkeyshop.com/blog/", "https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php"):
+                with self.assertRaises(ValueError):
+                    self.plugin._aks_read(url)
+            network.assert_not_called()
 
     async def test_aks_empty_selection_is_none_and_survives_restart(self):
         await self.plugin.set_price_preferences(True, True, [], True)
@@ -793,7 +795,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         value = email.utils.formatdate(time.time() + 120, usegmt=True)
         error = urllib.error.HTTPError("https://www.allkeyshop.com/", 429, "slow", {"Retry-After": value}, None)
         with patch.object(self.plugin, "_open_request", side_effect=error) as request, patch("time.sleep") as sleep:
-            for url in ("https://www.allkeyshop.com/blog/", "https://www.allkeyshop.com/blog/cdkey-store-reviews-aggregated/"):
+            for url in ("https://www.allkeyshop.com/api/v2/vaks.php", "https://www.allkeyshop.com/api/price_history_api.php"):
                 with self.assertRaises(urllib.error.HTTPError):
                     self.plugin._aks_read(url)
             self.assertEqual(request.call_count, 1)

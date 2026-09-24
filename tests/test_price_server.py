@@ -57,6 +57,39 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
                 "source_updated_at": "2026-09-24 12:00:00",
                 "data": {"prices": [], "merchants": {}, "regions": {}, "editions": {}}}
 
+    async def test_foreground_receives_quick_result_in_first_response(self):
+        async def lookup(app_id):
+            await asyncio.sleep(.01)
+            self.engine._price_cache[app_id] = self.entry()
+            return {"success": True}
+        with patch.object(self.engine, "_get_allkeyshop_price", side_effect=lookup) as fetch:
+            _, response = await asyncio.wait_for(self.request("/v1/price",
+                {"provider": "aks", "app_id": "10", "priority": "foreground"}), 1)
+            self.assertFalse(response["pending"])
+            self.assertEqual(response["entry"]["source"], "aks_history")
+            self.assertEqual(fetch.call_count, 1)
+            self.assertEqual(self.broker.finished, {})
+
+    async def test_foreground_wait_timeout_keeps_shared_job_running(self):
+        release = asyncio.Event()
+        self.release_events.append(release)
+        async def lookup(app_id):
+            await release.wait()
+            self.engine._price_cache[app_id] = self.entry()
+            return {"success": True}
+        request = {"provider": "aks", "app_id": "10", "priority": "foreground"}
+        with patch.object(self.engine, "_get_allkeyshop_price", side_effect=lookup) as fetch, patch.object(server, "FOREGROUND_WAIT_SECONDS", .02):
+            _, first = await self.request("/v1/price", request)
+            self.assertTrue(first["pending"])
+            self.assertEqual(first["retry_after"], 1)
+            self.assertIn(("aks", "10"), self.broker.pending)
+            done = self.broker.finished[("aks", "10")]
+            release.set()
+            await asyncio.wait_for(done.wait(), 1)
+            _, second = await self.request("/v1/price", request)
+            self.assertFalse(second["pending"])
+            self.assertEqual(fetch.call_count, 1)
+
     async def test_authentication_validation_health_and_no_arbitrary_proxy(self):
         self.assertEqual((await self.request("/health", token=False))[0], 200)
         self.assertEqual((await self.request("/v1/status", token=False))[0], 401)
