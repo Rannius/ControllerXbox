@@ -53,7 +53,8 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
 
     def entry(self, age=0):
         return {"title": "Example", "checked_at": time.time() - age,
-                "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
+                "url": "https://www.allkeyshop.com/", "source": "aks_history",
+                "source_updated_at": "2026-09-24 12:00:00",
                 "data": {"prices": [], "merchants": {}, "regions": {}, "editions": {}}}
 
     async def test_authentication_validation_health_and_no_arbitrary_proxy(self):
@@ -89,6 +90,8 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
             _, cached = await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
             self.assertFalse(cached["pending"])
             self.assertEqual(cached["entry"]["title"], "Example")
+            self.assertEqual(cached["entry"]["source"], "aks_history")
+            self.assertEqual(cached["entry"]["source_updated_at"], "2026-09-24 12:00:00")
             self.assertEqual(calls, ["10"])
 
     async def test_stale_price_is_immediate_and_foreground_overtakes_waiting_jobs(self):

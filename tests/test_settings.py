@@ -171,23 +171,20 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fetch.call_args.kwargs["timeout"], 30)
         sleep.assert_not_called()
 
-    def test_known_aks_page_skips_search_but_rechecks_free_status(self):
+    def test_known_aks_product_skips_catalog_but_rechecks_free_status(self):
         body = {"10": {"success": True, "data": {"name": "Example", "is_free": False,
                 "release_date": {"coming_soon": False}}}}
-        page_url = "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/"
-        search = json.dumps({"resultsGames": '<li data-platforms="pc"><h2 class="ls-results-row-game-title">Example</h2><a href="' + page_url + '">Example</a></li>'})
-        def response(url):
-            return search if "admin-ajax.php" in url else '<h1><span data-itemprop="name">Example</span></h1>"currency":"eur"'
-        with patch.object(self.plugin, "_open_request", side_effect=lambda *a, **kw: io.StringIO(json.dumps(body))) as steam, patch.object(self.plugin, "_aks_read", side_effect=response) as aks, patch.object(self.plugin, "_aks_parse", return_value=self.aks_fixture()):
-            first = self.plugin._fetch_aks_game("10")
+        with patch.object(self.plugin, "_open_request", side_effect=lambda *a, **kw: io.StringIO(json.dumps(body))) as steam, patch.object(self.plugin, "_aks_read", side_effect=self.history_response) as aks:
+            self.plugin._fetch_aks_game("10")
             self.assertEqual(aks.call_count, 2)
             aks.reset_mock()
-            self.assertEqual(self.plugin._fetch_aks_game("10")["url"], first["url"])
-            aks.assert_called_once_with(page_url + "?currency=eur")
+            self.plugin._fetch_aks_game("10")
+            self.assertEqual(aks.call_count, 1)
+            self.assertIn("price_history_api.php?normalised_name=140254", aks.call_args.args[0])
             aks.reset_mock()
             self.plugin._aks_matches["10"]["checked_at"] -= 7 * 86400 + 1
             self.plugin._fetch_aks_game("10")
-            self.assertEqual(aks.call_count, 2)
+            self.assertEqual(aks.call_count, 1)  # still-fresh shared catalog needs no network
             aks.reset_mock()
             self.plugin._price_metadata["10"]["checked_at"] -= 86401
             body["10"]["data"]["is_free"] = True
@@ -195,15 +192,15 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             aks.assert_not_called()
             self.assertEqual(steam.call_count, 2)
 
-    def test_missing_known_aks_page_is_forgotten(self):
-        url = "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/"
-        self.plugin._aks_matches["10"] = {"title": "Example", "url": url, "checked_at": time.time()}
-        body = {"10": {"success": True, "data": {"name": "Example", "release_date": {"coming_soon": False}}}}
-        with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(body))), patch.object(self.plugin, "_aks_read", side_effect=urllib.error.HTTPError(url, 404, "missing", {}, None)) as aks:
+    def test_missing_known_aks_product_is_forgotten(self):
+        self.plugin._price_metadata["10"] = self.price_metadata()
+        self.plugin._aks_matches["10"] = {"title": "Example", "product_id": "140254", "checked_at": time.time()}
+        error = urllib.error.HTTPError("https://www.allkeyshop.com/", 404, "missing", {}, None)
+        with patch.object(self.plugin, "_aks_read", side_effect=[error, self.history_response("vaks.php"), error]) as aks:
             with self.assertRaises(urllib.error.HTTPError):
                 self.plugin._fetch_aks_game("10")
         self.assertNotIn("10", self.plugin._aks_matches)
-        self.assertEqual(aks.call_count, 2)
+        self.assertEqual(aks.call_count, 3)
 
     def test_aks_requests_have_a_shared_one_and_a_half_second_gap(self):
         class Response(io.BytesIO):
@@ -596,27 +593,82 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(recovered["hungarian"]["20"])
         self.assertEqual(recovered["retry_after"], 0)
 
+    def history_fixture(self):
+        return {"history": [False,
+            {"product_id": 100, "merchant_id": 1, "region": "2", "edition": "1", "min_discount_price": 10,
+             "start": "2026-09-24 09:00:00", "end": "2026-09-24 12:00:00"}],
+            "regions": {"2": {"name": "Steam"}, "9": {"name": "Steam EU"}, "row": {"name": "Steam ROW"},
+                        "gift": {"name": "Steam Gift EU"}, "giftrow": {"name": "Steam Gift ROW"},
+                        "account": {"name": "Steam Account"}, "xbox": {"name": "XBOX EU"}},
+            "merchants": {"1": {"name": "Kinguin"}, "2": {"name": "GAMIVO"}},
+            "editions": {"1": {"name": "Standard Edition"}, "2": {"name": "Deluxe"}}}
+
+    def history_response(self, url):
+        return json.dumps({"status": "success", "games": [{"id": 140254, "name": "Example"}]}
+                          if "vaks.php" in url else self.history_fixture())
+
+    def test_history_latest_before_cheapest_with_all_product_filters(self):
+        payload = self.history_fixture()
+        row = payload["history"][1]
+        payload["history"] += [
+            {**row, "min_discount_price": 1, "best_discount_code": "OLD", "end": "2026-09-24 10:00:00"},
+            {**row, "product_id": 101, "merchant_id": 2, "region": "9", "min_discount_price": 9},
+            {**row, "product_id": 102, "region": "row", "min_discount_price": 8},
+            {**row, "product_id": 103, "region": "gift", "min_discount_price": 7},
+            {**row, "product_id": 104, "region": "giftrow", "min_discount_price": 6},
+            {**row, "product_id": 105, "region": "account", "min_discount_price": .5},
+            {**row, "product_id": 106, "region": "xbox", "min_discount_price": .5},
+            {**row, "product_id": 107, "edition": "2", "min_discount_price": .5},
+            {**row, "product_id": 108, "region": "unknown", "min_discount_price": .5},
+            {**row, "product_id": 109, "min_discount_price": .5, "start": "2026-07-01 09:00:00", "end": "2026-07-01 12:00:00"}]
+        data = self.plugin._aks_history_data(payload)
+        prefs = {"merchants": [], "allow_gifts": True}
+        offers = self.plugin._aks_history_filter(data, prefs)
+        self.assertEqual([x["price"] for x in offers], [6, 7, 8, 9, 10])
+        self.assertEqual(offers[-1]["coupon"], "")  # no coupon inherited from an older row
+        prefs.update(allow_gifts=False, merchants=["KINGUIN"])
+        self.assertEqual([x["price"] for x in self.plugin._aks_history_filter(data, prefs)], [8, 10])
+        prefs.update(merchants=["GAMIVO"])
+        self.assertEqual(self.plugin._aks_history_filter(data, prefs)[0]["price"], 9)
+        prefs.update(merchants=[], restrict_merchants=True)
+        self.assertEqual(self.plugin._aks_history_filter(data, prefs), [])
+        payload["history"].reverse()
+        self.assertEqual(self.plugin._aks_history_filter(self.plugin._aks_history_data(payload),
+            {"merchants": [], "allow_gifts": True}), offers)
+
+    def test_history_newest_invalid_or_conflicting_price_never_resurrects_old_minimum(self):
+        payload = self.history_fixture()
+        row = payload["history"][1]
+        payload["history"].append({**row, "end": "2026-09-24 13:00:00", "min_discount_price": None})
+        self.assertEqual(self.plugin._aks_history_filter(self.plugin._aks_history_data(payload),
+            {"merchants": [], "allow_gifts": True}), [])
+        payload = self.history_fixture()
+        payload["history"].append({**payload["history"][1], "min_discount_price": 3})
+        self.assertEqual(self.plugin._aks_history_data(payload)["prices"], [])
+        for value in ({"history": []}, {**payload, "history": [False]}, {**payload, "history": "broken"}):
+            with self.assertRaises(ValueError):
+                self.plugin._aks_history_data(value)
+
     def price_metadata(self, app_id="10", title="Example"):
         return {"app_id": app_id, "title": title, "is_free": False, "coming_soon": False, "checked_at": time.time()}
 
     def price_page(self, title="Example"):
         return '<h1><span data-itemprop="name">' + title + '</span></h1>"currency":"eur"; var gamePageTrans = ' + json.dumps(self.aks_fixture())
 
-    def test_trademark_search_cleans_query_and_keeps_exact_validation(self):
-        from urllib.parse import parse_qs, urlparse
-        url = "https://www.allkeyshop.com/blog/buy-solarpunk-cd-key-compare-prices/"
-        row = '<li data-platforms="pc"><h2 class="ls-results-row-game-title">Solarpunk</h2><a href="' + url + '">Solarpunk</a></li>'
+    def test_catalog_trademarks_accounts_editions_and_ambiguity(self):
         self.plugin._price_metadata["10"] = self.price_metadata(title="Solarpunk™")
-        with patch.object(self.plugin, "_aks_read", side_effect=[json.dumps({"resultsGames": row}), self.price_page("Solarpunk")]) as fetch:
+        catalog = {"status": "success", "games": [{"id": 140254, "name": "Solarpunk"},
+            {"id": 2, "name": "Solarpunk Steam Account"}, {"id": 3, "name": "Solarpunk PS5"}]}
+        with patch.object(self.plugin, "_aks_read", side_effect=[json.dumps(catalog), json.dumps(self.history_fixture())]) as fetch:
             result = self.plugin._fetch_aks_game("10")
-        self.assertEqual(parse_qs(urlparse(fetch.call_args_list[0].args[0]).query)["search_name"], ["Solarpunk"])
         self.assertEqual(result["title"], "Solarpunk™")
+        self.assertIn("normalised_name=140254", fetch.call_args.args[0])
         self.assertEqual(fetch.call_count, 2)
-        self.assertEqual(self.plugin._aks_search_name(" LEGO®  Voyagers™ "), "LEGO Voyagers")
-        self.assertEqual(self.plugin._aks_search_name("Été™: A &amp; B – Deluxe"), "Été: A & B – Deluxe")
-        with self.assertRaises(ValueError):
-            self.plugin._aks_search_match(row.replace('>Solarpunk<', '>Solarpunk Deluxe<'), "Solarpunk™")
-        self.assertFalse(self.plugin._aks_page_matches('<h1><span itemprop="name">Solarpunk</span><a href="https://store.steampowered.com/app/20/">Steam</a></h1>', "Solarpunk™", "10"))
+        for games in ([{"id": 2, "name": "Solarpunk Steam Account"}],
+                      [{"id": 1, "name": "Solarpunk"}, {"id": 2, "name": "Solarpunk®"}]):
+            with patch.object(self.plugin, "_aks_read", return_value=json.dumps({"status": "success", "games": games})):
+                index = self.plugin._load_aks_catalog(force=True)
+            self.assertFalse(index.get(self.plugin._aks_title("Solarpunk™")))
 
     async def test_day_price_cache_serves_twenty_three_hours_then_refreshes(self):
         self.plugin._price_cache["10"] = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
@@ -632,22 +684,31 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             fetch.assert_called_once()
 
     async def test_three_price_cache_layers_survive_restart_and_skip_known_http_steps(self):
-        url = "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/"
         self.plugin._price_metadata["10"] = self.price_metadata()
-        self.plugin._aks_matches["10"] = {"title": "Example", "url": url, "checked_at": time.time() - 2 * 86400}
+        self.plugin._aks_matches["10"] = {"title": "Example", "product_id": "140254", "checked_at": time.time() - 2 * 86400}
         await self.plugin._save_price_cache()
         restarted = self.plugin_type()
         await restarted._load_price_cache()
-        with patch.object(restarted, "_open_request") as steam, patch.object(restarted, "_aks_read", return_value=self.price_page()) as aks:
+        with patch.object(restarted, "_open_request") as steam, patch.object(restarted, "_aks_read", side_effect=self.history_response) as aks:
             result = await restarted.get_allkeyshop_price("10")
             self.assertTrue(result["success"])
+            self.assertEqual(result["source"], "aks_history")
             steam.assert_not_called()
-            aks.assert_called_once_with(url + "?currency=eur")
+            self.assertEqual(aks.call_count, 1)
+            self.assertIn("normalised_name=140254", aks.call_args.args[0])
             async with restarted._price_lock:
                 cached = await asyncio.wait_for(restarted.get_allkeyshop_price("10"), 0.2)
             self.assertEqual(cached, result)
             self.assertEqual(aks.call_count, 1)
         await restarted._price_save_task
+        again = self.plugin_type()
+        await again._load_price_cache()
+        again._price_preferences.update(merchants=["Kinguin"], restrict_merchants=True)
+        with patch.object(again, "_aks_read") as network:
+            cached = await again.get_cached_allkeyshop_price("10")
+            self.assertEqual(cached["offers"][0]["merchant"], "Kinguin")
+            self.assertEqual(cached["offers"][0]["source_updated_at"], "2026-09-24 12:00:00")
+            network.assert_not_called()
 
     async def test_invalidated_match_is_not_resurrected_from_stale_price_after_restart(self):
         self.plugin._price_cache["10"] = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-old-cd-key-compare-prices/",
@@ -659,34 +720,39 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("10", restarted._price_cache)
         self.assertNotIn("10", restarted._aks_matches)
 
-    def test_cached_wrong_title_or_missing_url_searches_again_once(self):
-        old = "https://www.allkeyshop.com/blog/buy-old-cd-key-compare-prices/"
-        new = "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/"
-        search = json.dumps({"resultsGames": '<li data-platforms="pc"><h2 class="ls-results-row-game-title">Example</h2><a href="' + new + '">Example</a></li>'})
-        for first in (self.price_page("Wrong"), urllib.error.HTTPError(old, 404, "missing", {}, None), urllib.error.HTTPError(old, 410, "gone", {}, None)):
-            self.plugin._price_metadata["10"] = self.price_metadata()
-            self.plugin._aks_matches["10"] = {"title": "Example", "url": old, "checked_at": time.time()}
-            with patch.object(self.plugin, "_aks_read", side_effect=[first, search, self.price_page()]) as fetch:
-                self.assertEqual(self.plugin._fetch_aks_game("10")["url"], new)
-                self.assertEqual(fetch.call_count, 3)
-        self.plugin._aks_matches["10"] = {"title": "Example", "url": old, "checked_at": time.time()}
-        with patch.object(self.plugin, "_aks_read", side_effect=[self.price_page("Wrong"), search, self.price_page("Still wrong")]):
-            with self.assertRaises(ValueError):
+    def test_cached_wrong_title_or_missing_product_resolves_again_once(self):
+        self.plugin._price_metadata["10"] = self.price_metadata()
+        self.plugin._aks_matches["10"] = {"title": "Wrong", "product_id": "9", "checked_at": time.time()}
+        with patch.object(self.plugin, "_aks_read", side_effect=self.history_response) as fetch:
+            self.plugin._fetch_aks_game("10")
+            self.assertEqual(fetch.call_count, 2)
+        self.assertEqual(self.plugin._aks_matches["10"]["product_id"], "140254")
+        for code in (404, 410):
+            self.plugin._aks_matches["10"] = {"title": "Example", "product_id": "9", "checked_at": time.time()}
+            self.plugin._aks_catalog = {}
+            error = urllib.error.HTTPError("https://www.allkeyshop.com/", code, "missing", {}, None)
+            with patch.object(self.plugin, "_aks_read", side_effect=[error, self.history_response("vaks.php"), json.dumps(self.history_fixture())]) as fetch:
                 self.plugin._fetch_aks_game("10")
-        self.assertNotIn("10", self.plugin._aks_matches)
+            self.assertEqual(fetch.call_count, 3)
+            self.assertEqual(self.plugin._aks_matches["10"]["product_id"], "140254")
 
     async def test_failed_offers_keep_verified_search_match_and_metadata_on_disk(self):
         self.plugin._price_metadata["10"] = self.price_metadata()
-        url = "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/"
-        search = json.dumps({"resultsGames": '<li data-platforms="pc"><h2 class="ls-results-row-game-title">Example</h2><a href="' + url + '">Example</a></li>'})
-        with patch.object(self.plugin, "_aks_read", side_effect=[search, TimeoutError("timeout")]):
+        with patch.object(self.plugin, "_aks_read", side_effect=[self.history_response("vaks.php"), TimeoutError("timeout")]):
             await self.plugin.get_allkeyshop_price("10")
         await self.plugin._price_save_task
         restarted = self.plugin_type()
         await restarted._load_price_cache()
-        self.assertEqual(restarted._aks_matches["10"]["url"], url)
+        self.assertEqual(restarted._aks_matches["10"]["product_id"], "140254")
         self.assertIn("10", restarted._price_metadata)
         self.assertNotIn("10", restarted._price_cache)
+        with patch.object(restarted, "_aks_read") as network:
+            self.assertEqual(restarted._load_aks_catalog()["example"], "140254")
+            network.assert_not_called()
+        restarted._aks_catalog_checked_at -= 86401
+        with patch.object(restarted, "_aks_read", side_effect=self.history_response) as network:
+            restarted._load_aks_catalog()
+            self.assertEqual(network.call_count, 1)
 
     async def test_shared_price_lookup_survives_cancelled_waiter_and_does_not_wait_for_disk(self):
         release, started, save_started, save_release = (asyncio.Event() for _ in range(4))
@@ -890,14 +956,15 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_remote_prices_preserve_local_filters_and_cache_only_is_network_free(self):
         await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
-        await self.plugin.set_price_preferences(True, False, ["Eneba"], True)
-        entry = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
-                 "data": self.aks_fixture(), "checked_at": time.time()}
+        await self.plugin.set_price_preferences(True, False, ["Kinguin"], True)
+        entry = {"title": "Example", "url": "https://www.allkeyshop.com/", "source": "aks_history",
+                 "data": self.plugin._aks_history_data(self.history_fixture()), "checked_at": time.time()}
         response = {"protocol": 1, "provider": "aks", "app_id": "10", "entry": entry, "pending": False}
         with patch.object(self.plugin, "_price_server_request", return_value=response) as remote, patch.object(self.plugin, "_fetch_aks_game") as direct:
             result = await self.plugin.get_allkeyshop_price("10")
             self.assertTrue(result["success"])
-            self.assertEqual(result["offers"][0]["merchant"], "Eneba")
+            self.assertEqual(result["offers"][0]["merchant"], "Kinguin")
+            self.assertEqual(result["offers"][0]["source_updated_at"], "2026-09-24 12:00:00")
             await self.plugin.get_allkeyshop_price("10")
             await self.plugin.get_cached_allkeyshop_price("10")
             await self.plugin.get_cached_allkeyshop_price("20")

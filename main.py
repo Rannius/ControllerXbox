@@ -41,6 +41,8 @@ CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 PRICE_TTL_SECONDS = 24 * 60 * 60
 PRICE_METADATA_TTL_SECONDS = 86400
 AKS_MATCH_TTL_SECONDS = 7 * 86400
+AKS_CATALOG_TTL_SECONDS = 86400
+AKS_CATALOG_URL = "https://www.allkeyshop.com/api/v2/vaks.php?action=gameNames&currency=eur"
 AKS_REQUEST_GAP_SECONDS = 1.5
 CACHE_SCHEMA_VERSION = 6
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
@@ -177,6 +179,8 @@ class Plugin:
         self._gg_failures = 0
         self._gg_last_error = ""
         self._aks_matches: Dict[str, Dict[str, Any]] = {}
+        self._aks_catalog: Dict[str, Optional[str]] = {}
+        self._aks_catalog_checked_at = 0.0
         self._price_metadata: Dict[str, Dict[str, Any]] = {}
         self._price_tasks: Dict[str, asyncio.Task] = {}
         self._price_save_task: Optional[asyncio.Task] = None
@@ -433,8 +437,10 @@ class Plugin:
         if entry.get("skipped"):
             return {"success": True, "skipped": entry["skipped"], "title": entry["title"],
                     "checked_at": entry["checked_at"], "offers": []}
-        offers = self._aks_filter(entry["data"], self._price_preferences)
+        history = entry.get("source") == "aks_history"
+        offers = (self._aks_history_filter if history else self._aks_filter)(entry["data"], self._price_preferences)
         return {"success": True, "provider": "aks", "offers": offers[:1], "matched_offers": len(offers),
+                "source": entry.get("source", "aks_page"), "source_updated_at": entry.get("source_updated_at", ""),
                 "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
                 "currency": "EUR", "preferred_only": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
 
@@ -447,8 +453,9 @@ class Plugin:
         if "skipped" in entry:
             return entry["skipped"] in ("free", "unreleased", "release_unknown")
         data = entry.get("data")
-        return (isinstance(entry.get("url"), str) and bool(re.fullmatch(
+        valid_url = isinstance(entry.get("url"), str) and bool(re.fullmatch(
             r"https://www\.allkeyshop\.com/blog/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+/", entry["url"]))
+        return ((valid_url or (entry.get("source") == "aks_history" and entry.get("url") == "https://www.allkeyshop.com/"))
             and isinstance(data, dict) and isinstance(data.get("prices"), list)
             and all(isinstance(data.get(key), dict) for key in ("merchants", "regions", "editions")))
 
@@ -485,7 +492,7 @@ class Plugin:
                 candidates = {k: v for k, v in self._price_cache.items() if v.get("url")}
             if not isinstance(candidates, dict):
                 candidates = {}
-            self._aks_matches = {k: {f: v[f] for f in ("title", "url", "checked_at")}
+            self._aks_matches = {k: {f: v[f] for f in ("title", "url", "checked_at", "product_id") if f in v}
                                  for k, v in list(candidates.items())[-10000:] if self._valid_aks_match(k, v, now)}
             metadata = payload.get("metadata", {})
             if isinstance(metadata, dict):
@@ -500,9 +507,11 @@ class Plugin:
                 and isinstance(value, dict) and isinstance(value.get("title"), str) and bool(value["title"])
                 and type(value.get("checked_at")) in (int, float)
                 and 0 <= now - value["checked_at"] < AKS_MATCH_TTL_SECONDS
-                and isinstance(value.get("url"), str) and bool(re.fullmatch(
+                and ((isinstance(value.get("product_id"), str) and value["product_id"].isdigit()
+                      and 0 < int(value["product_id"]) < 10000000000)
+                or (isinstance(value.get("url"), str) and bool(re.fullmatch(
                     r"https://www\.allkeyshop\.com/blog/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+/", value["url"]))
-                and "account" not in value["url"])
+                and "account" not in value["url"])))
 
     @staticmethod
     def _valid_price_metadata(key: Any, value: Any, now: float) -> bool:
@@ -1164,8 +1173,9 @@ class Plugin:
                 with self._open_request(request, timeout=30) as response:
                     if urllib.parse.urlparse(response.geturl()).netloc != "www.allkeyshop.com":
                         raise ValueError("Unexpected AllKeyShop redirect")
-                    body = response.read(4000001)
-                if len(body) > 4000000:
+                    limit = 32 * 1024 * 1024 if parsed.path == "/api/v2/vaks.php" else 16 * 1024 * 1024
+                    body = response.read(limit + 1)
+                if len(body) > limit:
                     raise ValueError("AllKeyShop page is too large")
                 self._aks_http_failures = 0
                 return body.decode("utf-8")
@@ -1178,7 +1188,9 @@ class Plugin:
                     if pause:
                         self._aks_pause_until = max(self._aks_pause_until, time.monotonic() + pause)
                         self._aks_next_request_at = max(self._aks_next_request_at, self._aks_pause_until)
-                error.price_stage = "AKS-kereső" if "admin-ajax.php" in parsed.path else (
+                error.price_stage = ("AKS-katalógus" if parsed.path == "/api/v2/vaks.php" else
+                    "AKS-áradatok" if parsed.path == "/api/price_history_api.php" else
+                    "AKS-kereső" if "admin-ajax.php" in parsed.path else
                     "AKS-boltlista" if "cdkey-store-reviews" in parsed.path else "AKS-ajánlatoldal")
                 error.price_elapsed = round(time.monotonic() - started, 1)
                 raise
@@ -1294,6 +1306,135 @@ class Plugin:
         steam_ids = set(re.findall(r'https?://store\.steampowered\.com/app/(\+?\d+)', heading.group(1)))
         return not steam_ids or steam_ids == {app_id}
 
+    def _load_aks_catalog(self, force: bool = False) -> Dict[str, Optional[str]]:
+        # One shared exact-name index, independent of the frequently saved prices.
+        now = time.time()
+        if not force and self._aks_catalog and 0 <= now - self._aks_catalog_checked_at < AKS_CATALOG_TTL_SECONDS:
+            return self._aks_catalog
+        path = self._price_cache_path.with_name("aks-catalog.json")
+        if not force and not self._aks_catalog:
+            try:
+                if path.stat().st_size > 32 * 1024 * 1024:
+                    raise ValueError("Catalog too large")
+                cached = json.loads(path.read_text(encoding="utf-8"))
+                index, checked = cached.get("index"), cached.get("checked_at")
+                if (cached.get("version") == 1 and isinstance(index, dict) and index
+                        and type(checked) in (int, float) and 0 <= now - checked < AKS_CATALOG_TTL_SECONDS
+                        and all(isinstance(k, str) and 0 < len(k) <= 300 and
+                            (v is None or (isinstance(v, str) and v.isdigit() and 0 < int(v) < 10000000000))
+                            for k, v in index.items())):
+                    self._aks_catalog, self._aks_catalog_checked_at = index, checked
+                    return index
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
+        payload = json.loads(self._aks_read(AKS_CATALOG_URL))
+        if not isinstance(payload, dict) or payload.get("status") != "success" or not isinstance(payload.get("games"), list):
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
+        index = {}
+        for game in payload["games"]:
+            if not isinstance(game, dict) or not isinstance(game.get("name"), str):
+                continue
+            product_id = str(game.get("id", ""))
+            name = self._aks_title(game["name"])
+            if not name or len(name) > 300 or not product_id.isdigit() or not 0 < int(product_id) < 10000000000:
+                continue
+            # Duplicate normalized names with different IDs are deliberately ambiguous.
+            index[name] = product_id if name not in index or index[name] == product_id else None
+        if not index:
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
+        self._aks_catalog, self._aks_catalog_checked_at = index, now
+        try:
+            self._write_file_atomically(path, "aks-catalog-", json.dumps(
+                {"version": 1, "checked_at": now, "index": index}, ensure_ascii=False))
+        except OSError:
+            decky.logger.warning("Az AKS-katalógus nem menthető; a memóriában tovább használható.")
+        return index
+
+    @staticmethod
+    def _aks_observed_time(value: Any) -> str:
+        if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", value):
+            return ""
+        if not 2000 <= int(value[:4]) <= time.gmtime().tm_year + 1:
+            return ""
+        try:
+            time.strptime(value, "%Y-%m-%d %H:%M:%S")
+            return value
+        except ValueError:
+            return ""
+
+    @classmethod
+    def _aks_history_data(cls, payload: Any) -> Dict[str, Any]:
+        if (not isinstance(payload, dict) or not isinstance(payload.get("history"), list)
+                or any(not isinstance(payload.get(k), dict) for k in ("merchants", "regions", "editions"))):
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
+        latest: Dict[Any, Dict[str, Any]] = {}
+        for row in payload["history"]:
+            if not isinstance(row, dict):  # The public response can contain false rows.
+                continue
+            ids = tuple(str(row.get(k, "")) for k in ("product_id", "merchant_id", "edition", "region"))
+            if any(not item or len(item) > 80 for item in ids) or not ids[0].isdigit() or not ids[1].isdigit():
+                continue
+            start, end = cls._aks_observed_time(row.get("start")), cls._aks_observed_time(row.get("end"))
+            if not start or not end or end < start:
+                continue
+            previous = latest.get(ids)
+            rank = (end, start)
+            if previous is None or rank > (previous["end"], previous["start"]):
+                # Keep the newest observation even if its price is invalid: never resurrect an older price.
+                latest[ids] = {key: row[key] for key in ("product_id", "merchant_id", "edition", "region",
+                    "start", "end", "last_price", "min_discount_price", "best_discount_code") if key in row}
+            elif rank == (previous["end"], previous["start"]) and any(
+                    row.get(k) != previous.get(k) for k in ("last_price", "min_discount_price", "best_discount_code")):
+                previous["ambiguous"] = True
+        if payload["history"] and not latest:
+            raise ValueError("Az AllKeyShop ajánlatai most nem olvashatók.")
+        # Discontinued products must not compete indefinitely with recently observed offers.
+        newest = max((row["end"] for row in latest.values()), default="")
+        threshold = time.mktime(time.strptime(newest, "%Y-%m-%d %H:%M:%S")) - 86400 if newest else 0
+        prices = [row for row in latest.values() if not row.get("ambiguous") and
+                  time.mktime(time.strptime(row["end"], "%Y-%m-%d %H:%M:%S")) >= threshold]
+        return {"prices": prices, **{k: payload[k] for k in ("merchants", "regions", "editions")}}
+
+    @classmethod
+    def _aks_history_filter(cls, data: Dict[str, Any], preferences: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # Labels come from the API's region map, not from the merchant name.
+        # Bare Steam is the unqualified/global group, not a per-country activation guarantee.
+        regions = {"steam": "Steam-kulcs · Global (AKS: Steam)", "steam global": "Steam-kulcs · Global",
+                   "steam eu": "Steam-kulcs · EU", "steam row": "Steam-kulcs · ROW",
+                   "steam gift": "Steam Gift · Global (AKS: Steam Gift)",
+                   "steam gift global": "Steam Gift · Global", "steam gift eu": "Steam Gift · EU",
+                   "steam gift row": "Steam Gift · ROW"}
+        allowed = {name.casefold() for name in preferences["merchants"]}
+        restricted = preferences.get("restrict_merchants", bool(allowed))
+        offers = []
+        for row in data["prices"]:
+            if not isinstance(row, dict) or not cls._aks_observed_time(row.get("end")):
+                continue
+            region = data["regions"].get(str(row.get("region")), {})
+            edition = data["editions"].get(str(row.get("edition")), {})
+            merchant = data["merchants"].get(str(row.get("merchant_id")), {})
+            if not all(isinstance(item, dict) for item in (region, edition, merchant)):
+                continue
+            region_name = " ".join(str(region.get("name", "")).casefold().split())
+            name = merchant.get("name")
+            if (region_name not in regions or edition.get("name") not in ("Standard", "Standard Edition")
+                    or not isinstance(name, str) or not name or len(name) > 80
+                    or (restricted and name.casefold() not in allowed)
+                    or ("gift" in region_name and not preferences["allow_gifts"])):
+                continue
+            candidates = [(row.get(field), kind) for field, kind in
+                          (("last_price", "regular"), ("min_discount_price", "discount"))]
+            candidates = [(price, kind) for price, kind in candidates
+                          if type(price) in (int, float) and 0.02 < price < 100000]
+            if not candidates:
+                continue
+            price, kind = min(candidates, key=lambda item: (item[0], item[1] != "regular"))
+            coupon = row.get("best_discount_code") if kind == "discount" else ""
+            offers.append({"merchant": name, "price": price, "kind": regions[region_name], "edition": "Standard",
+                           "coupon": coupon[:80] if isinstance(coupon, str) else "", "price_kind": kind,
+                           "source_updated_at": row["end"]})
+        return sorted(offers, key=lambda offer: (offer["price"], offer["merchant"]))
+
     def _fetch_aks_game(self, app_id: str) -> Dict[str, Any]:
         metadata = self._fetch_price_metadata(app_id)
         title = metadata["title"]
@@ -1301,52 +1442,40 @@ class Plugin:
         if skipped:
             return {"title": title, "skipped": skipped, "checked_at": time.time()}
         match = self._aks_matches.get(app_id)
-        if not self._valid_aks_match(app_id, match, time.time()) or match["title"] != title:
+        if (not self._valid_aks_match(app_id, match, time.time()) or not match.get("product_id")
+                or self._aks_title(match["title"]) != self._aks_title(title)):
             self._aks_matches.pop(app_id, None)
             match = None
-        # A broken cached link gets exactly one fresh search, never a retry loop.
+        # New catalog data can invalidate an existing match before its seven-day TTL.
+        if match and self._aks_catalog and self._aks_catalog.get(self._aks_title(title)) != match["product_id"]:
+            self._aks_matches.pop(app_id, None)
+            match = None
         for attempt in range(2):
-            reused = match is not None
-            if match:
-                url = match["url"]
-            else:
-                query = urllib.parse.urlencode({"action": "quicksearch", "search_name": self._aks_search_name(title), "currency": "eur",
-                                                "locale": "en", "platform": "pc", "activation_country": "HU"})
-                search = json.loads(self._aks_read("https://www.allkeyshop.com/blog/wp-admin/admin-ajax.php?" + query))
-                fragment = search.get("resultsGames", search.get("results", "")) if isinstance(search, dict) else ""
-                if not isinstance(fragment, str):
-                    raise ValueError("Az AllKeyShop keresője nem válaszolt megfelelően.")
-                url = self._aks_search_match(fragment, title)
+            if match is None:
+                catalog = self._load_aks_catalog(force=attempt > 0)
+                product_id = catalog.get(self._aks_title(title))
+                if not product_id:
+                    raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
+                match = {"title": title, "product_id": product_id, "checked_at": time.time()}
                 if len(self._aks_matches) >= 10000:
                     self._aks_matches.pop(next(iter(self._aks_matches)))
-                self._aks_matches[app_id] = {"title": title, "url": url, "checked_at": time.time()}
+                self._aks_matches[app_id] = match
+            query = urllib.parse.urlencode({"normalised_name": match["product_id"], "currency": "EUR",
+                                            "database": "allkeyshop.com", "v2": "1"})
             try:
-                page = self._aks_read(url + "?currency=eur")
-                matches = self._aks_page_matches(page, title, app_id)
+                payload = json.loads(self._aks_read("https://www.allkeyshop.com/api/price_history_api.php?" + query))
             except urllib.error.HTTPError as error:
                 if error.code not in (404, 410):
                     raise
                 self._aks_matches.pop(app_id, None)
                 match = None
-                if reused and attempt == 0:
+                if attempt == 0:
                     continue
                 raise
-            if not matches:
-                self._aks_matches.pop(app_id, None)
-                match = None
-                if reused and attempt == 0:
-                    continue
-                raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
-            currency = re.search(r'"currency"\s*:\s*"([a-zA-Z]+)"', page)
-            if not currency or currency.group(1).lower() != "eur":
-                raise ValueError("Az AllKeyShop pénzneme nem ellenőrizhető.")
-            data = self._aks_parse(page)
-            if len(self._aks_matches) >= 10000:
-                self._aks_matches.pop(next(iter(self._aks_matches)))
-            # Reusing a page must not indefinitely extend the search verification TTL.
-            self._aks_matches[app_id] = {"title": title, "url": url,
-                                        "checked_at": match["checked_at"] if match else time.time()}
-            return {"title": title, "url": url, "data": data, "checked_at": time.time()}
+            data = self._aks_history_data(payload)
+            return {"title": title, "url": "https://www.allkeyshop.com/", "data": data,
+                    "source": "aks_history", "source_updated_at": max((row["end"] for row in data["prices"]), default=""),
+                    "checked_at": time.time()}
         raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
 
     @staticmethod

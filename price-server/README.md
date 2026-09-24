@@ -19,8 +19,8 @@ Ez a szerver **nem IP-forgató és nem tiltásmegkerülő szolgáltatás**. A Du
 Az Ubuntu termináljában:
 
 ```bash
-curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.87/DeckPriceServer-v1.0.87.tar.gz
-tar -xzf DeckPriceServer-v1.0.87.tar.gz
+curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.88/DeckPriceServer-v1.0.88.tar.gz
+tar -xzf DeckPriceServer-v1.0.88.tar.gz
 cd DeckPriceServer
 sudo bash install.sh sajat-szerver.duckdns.org
 ```
@@ -122,3 +122,11 @@ Személyes szervercím, token, kliens-IP és nyers szolgáltatói hiba nem kerü
 HA dokumentáció: [RESTful integráció](https://www.home-assistant.io/integrations/rest/).
 
 Források: [DuckDNS API](https://www.duckdns.org/spec.jsp), [Caddy automatikus HTTPS](https://caddyserver.com/docs/automatic-https).
+
+## AKS adatforrás 1.0.88-tól
+
+A szerver az `allkeyshop-api` projekt által használt nyilvános JSON-katalógust és árhistorika-végpontot kérdezi. A közös katalógus 24 órás, a pontos név → termékazonosító kapcsolat 7 napos, az árak és Steam-metaadatok 24 órás tartós cache-t kapnak. Egy ismert játék árfrissítése egyetlen AKS-kérést igényel; friss ár esetén nincs kérés. A HTML-kereső és termékoldal nem része az árlekérési útvonalnak. A boltlista külön, korábbi módon frissíthető.
+
+Ajánlatonként a legutóbbi megfigyelést választjuk. A legújabb megfigyelésnél több mint 24 órával régebbi termékajánlatok kimaradnak. Ezután a Decky a saját megbízhatóbolt-listája, Standard kiadás, Steam-kulcs/Gift és EU/Global/ROW besorolás szerint szűr, és a minimumot mutatja. A historika nem igazol aktuális készletet vagy minden fizetési díjat; külön látszik a forrás megfigyelési ideje és a lekérésünk ideje. A régi abszolút minimumokat nem használjuk.
+
+Ehhez mindkét oldalt 1.0.88-ra kell frissíteni. A meglevő beállítások és érvényes korábbi cache megmaradnak; lejáratkor már az új végpontot használjuk. A Decky árgyorsítótár-törlése csak a helyi cache-t üríti; a szerver érvényes cache-e a lejáratáig megmarad. A GG.deals tartalék működés megmarad.

@@ -1,25 +1,28 @@
-# A sergioalmela/allkeyshop-api vizsgálata
+# AllKeyShop JSON-adapter, 1.0.88
 
-Vizsgálat: 2026-09-24, a projekt 2.0.0-s forrása. A könyvtárat nem telepítettük és a kódját nem vettük át.
+Forrásvizsgálat: 2026-09-24, [sergioalmela/allkeyshop-api 2.0.0](https://github.com/sergioalmela/allkeyshop-api). A nyilvános adatvégpontokhoz saját Python-illesztés készült; a könyvtár kódját nem másoltuk és nem telepítjük. Az Ubuntu és Decky ugyanazt a backendet használja.
 
-Forrás: https://github.com/sergioalmela/allkeyshop-api
+## Adatút és gyorsítótár
 
-## Használt adatforrások
+- `https://www.allkeyshop.com/api/v2/vaks.php?action=gameNames&currency=eur`: közös játéknév-katalógus, külön fájlban és memóriában, 24 órás TTL. Nincs játékonkénti keresőkérés. A nagy katalógus nem kerül minden ármentéskor újraírásra.
+- Pontos normalizált címillesztés (™/® nélkül), több eltérő termékazonosítóra illeszkedő cím elutasítása. Nincs fuzzy elsőtalálat-választás. A konzolos és Steam Account utótagokat nem töröljük.
+- Steam AppID → katalógus-termékazonosító: 7 napos tartós cache. A Steam-metaadatok 24 órásak. Címeltérés vagy új katalógusban megváltozott párosítás érvényteleníti a találatot. HTTP 404/410 után legfeljebb egy friss katalógusos újrakeresés történik.
+- `https://www.allkeyshop.com/api/price_history_api.php?normalised_name=<ID>&currency=EUR&database=allkeyshop.com&v2=1`: ismert játék esetén egyetlen AKS-lekérés. A válaszokat 24 óráig használjuk. A friss ár olvasása teljesen hálózatmentes, a lejárt mentett ár azonnal látható a háttérfrissítés alatt.
+- Megmarad az egyetlen AKS HTTP-lock, 1,5 másodperces pacing, Retry-After, backoff, AppID single-flight és deduplikált háttérmentés. A boltlista külön, korábbi napi/frissítés gombos útvonalon érhető el.
 
-- `src/fetch.ts`: az AKS `api/v2/vaks.php?action=gameNames&currency=eur` katalógusát tölti le, helyben cache-eli.
-- `src/gather.ts`: az `api/price_history_api.php` végpontot használja; a visszaadott `history` sorokat ajánlatokká alakítja.
-- `src/filter.ts`: hasonlósági névkeresés. A feldolgozó az első találatot választja. A `store` szűrő a kereskedő nevét vizsgálja, nem a termék aktiválási platformját.
+## A legutóbbi megfelelő minimum kiválasztása
 
-## Egyetlen Solarpunk-próba eredménye
+1. A `history` nem feltétlenül csak objektumokat tartalmaz: a hibás sorok kimaradnak.
+2. Kereskedő + termék + kiadás + régió szerint az `end`, majd `start` időponttal legújabb sort vesszük. Érvénytelen új ár nem hozza vissza a régi olcsó árat. Egyező időpontú, ellentmondásos sorok kizárva.
+3. A teljes játék legújabb megfigyelésénél több mint 24 órával régebbi ajánlatokat kizárjuk, hogy rég eltűnt termékek ne legyenek tartós minimumok. Ez a forrásadatok közötti időablak, nem készletigazolás és nem a helyi cache TTL-je.
+4. A kiválasztott boltok listája és az üres explicit kiválasztás működése megmarad. Csak Standard / Standard Edition, Steam-kulcs és engedélyezett Gift: EU, Global vagy ROW régió. Az egyszerű `Steam` / `Steam Gift` az AKS általános, régiómegkötés nélküli csoportja; a felület az eredeti jelölést is kiírja. Ez és a ROW nem garantál magyarországi aktiválhatóságot.
+5. A legutóbbi sor `last_price` / `min_discount_price` értékei közül választunk. Nincs régi rekordból átvett kupon. Hiányzó kupon esetén a kedvezményes árat ezzel a megjegyzéssel jelenítjük meg. A `lower_keyshops_price` és `lower_official_price` történeti minimumokat nem használjuk.
+6. A szűrés után legalacsonyabb ár jelenik meg. A kiválasztott ajánlat `end` dátuma külön látszik a saját `checked_at` lekérési időpontunktól. A forrás nem ad időzónát, ezért a dátumát nem alakítjuk át kitalált UTC-idővé.
 
-A fejlesztői hálózaton a katalógus kb. 1,06 másodperc, 11,2 MB és 209373 bejegyzés volt. Külön Solarpunk, konzolos és Steam Account termék is szerepel benne. Az árhistorika kb. 0,36 másodperc alatt érkezett, 3381 történeti sorral.
+A végpont nem ad megbízható jelenlegi készlet- vagy teljes fizetésidíj-adatot. Nem gyártunk hozzá `dispo`, `account` vagy `priceCard` mezőket. A terméktípus szűrése a pontos katalógusillesztés és a régió/kiadás engedélylistája alapján történik. A katalógus nem tartalmaz ellenőrzött boltoldal-URL-t, ezért az új eredmény AllKeyShop-főoldali forráshivatkozást kap.
 
-A `lower_keyshops_price` 9,02 EUR értékéhez 2026-07-29-es időpont tartozott, a `lower_official_price` 13,10 EUR értékéhez 2026-08-09-es. Ezekből nem állítható, hogy ma ennyiért megvásárolható a játék. A régi történeti sorok közül a könyvtár nem csak egy bizonyítottan aktuális és elérhető ajánlatot választ ki.
+## Ellenőrzés
 
-## Döntés
+A 2026-09-24-én letöltött Solarpunk-mintában 3381 történeti sorból 40 legutóbbi, időablakon belüli sor maradt. A felsorolt hét bolt (YUPLAY, GAMESEAL, GAMIVO, G2A, Kinguin, Eneba, HRK) szűrésével 16 ajánlatból a Kinguin EU kedvezményes 10,05 EUR volt a minimum; forrásidő 2026-09-24 09:52:39, kuponkód nélkül. Ez rögzített tesztminta, nem folyamatosan frissülő árígéret. Célzott tesztek ellenőrzik a sorrendfüggetlenséget, régi minimumok kizárását, boltokat, Gift-kapcsolót, EU/Global/ROW besorolást, hibás adatokat, cache-visszatöltést és szerveres továbbítást.
 
-Nem cseréljük erre a jelenlegi élőajánlat-lekérést. A felhasználó kérése szerint a pontos játék, engedélyezett kereskedő, Steam-kulcs vagy engedélyezett Gift és aktuális ár ellenőrzése megmarad. A történeti válasz nem tartalmazza a jelenlegi szűrésünk által megkövetelt account/aktiválási platform/elérhetőség mezőket. Ezeket nem helyettesítjük kitalált értékekkel.
-
-A katalógus későbbi névfeloldáshoz, a historika külön jelölt ár-előzmény funkcióhoz hasznos lehet. Egyik sem garantálja a szolgáltatói IP-korlátozás megszűnését, mert továbbra is az AllKeyShop kiszolgálóit kérdezi.
-
-Az ettől független, már kért AKS → GG.deals tartalék működés elkészült: kapcsolat/hozzáférés/rate limit hibák esetén külön, GG.deals jelölésű összesített ár jelenik meg. A GG-ár nem lesz AKS boltszűrésnek megfelelő ajánlatként feltüntetve.
+A régi HTML-árak érvényes cache-e lejáratig megmarad; utána már az új JSON-adapter fut. A GG.deals kapcsolati hiba esetére meglévő tartalék működés változatlan, külön jelölt összesített árat ad. Az új végpont ugyanazon szolgáltatóé, ezért IP-korlátozás továbbra is előfordulhat.

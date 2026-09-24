@@ -484,7 +484,7 @@ function AllKeyShopSettings({ openMerchants }) {
                                 finally {
                                     setBusy(false);
                                 }
-                            }, children: "Mentett szerverkapcsolat tesztel\u00E9se" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU Steam-kulcsok és opcionálisan Gift. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 24 óráig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás." }) })] });
+                            }, children: "Mentett szerverkapcsolat tesztel\u00E9se" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard kiadás · Global/EU/ROW Steam-kulcsok és opcionálisan Gift. A legutóbbi AKS-adatokból választja a legolcsóbbat; forrásdátum a részletekben. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 24 óráig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás." }) })] });
 }
 function AllKeyShopMerchants({ onBack }) {
     const [names, setNames] = SP_REACT.useState([]);
@@ -644,13 +644,19 @@ function buildPricePanelScript(appId, result) {
       for (const [index, offer] of (data.offers || []).entries()) {
         line(offer.price.toFixed(2) + ' € · ' + offer.merchant, index === 0);
         line(offer.kind + ' · ' + offer.edition + (offer.coupon ? ' · Kupon: ' + offer.coupon : ''));
+        if (offer.source_updated_at) line('Ajánlat utolsó AKS-megfigyelése: ' + offer.source_updated_at + ' (a forrás időzónája nincs megadva)');
+        if (offer.price_kind === 'discount') line(offer.coupon ? 'Kedvezményes ár a jelzett kuponnal.' : 'AKS kedvezményes ár; a forrás nem adott kuponkódot.');
       }
-      line('AKS szerinti, kártyadíjat tartalmazó ár; kupon esetén annak feltételeivel.');
-      line('Global/EU besorolás. A végösszeget és a magyarországi aktiválhatóságot az eladónál ellenőrizd.');
+      if (data.source === 'aks_history') {
+        line('Az API legutóbbi ármegfigyeléseiből. A régi minimumokat és a legújabb adatnál több mint 24 órával régebbi ajánlatokat kizárjuk.');
+        if (data.source_updated_at) line('Játék áradatai eddig frissültek az AKS-nél: ' + data.source_updated_at);
+        line('A forrás nem igazolja az aktuális készletet és az összes fizetési díjat.');
+      } else line('AKS szerinti, kártyadíjat tartalmazó ár; kupon esetén annak feltételeivel.');
+      line('EU/Global/ROW szűrés. Az egyszerű Steam jelölés nem igazolja az összes országot; a ROW sem garantál magyarországi aktiválást. A végösszeget és a régiót az eladónál ellenőrizd.');
       if (data.stale) line("Korábban mentett ár · frissítés folyamatban vagy kapcsolatra vár.");
       if (data.checked_at) line('Utoljára ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
-      if (/^https:\\/\\/www\\.allkeyshop\\.com\\/blog\\/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+\\/$/.test(data.url || '')) {
-        const link = document.createElement('a'); link.href = data.url; link.textContent = 'AllKeyShop adatlap megnyitása (az ottani lista külön szűrhető)';
+      if (/^https:\\/\\/www\\.allkeyshop\\.com\\/blog\\/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+\\/$/.test(data.url || '') || (data.source === 'aks_history' && data.url === 'https://www.allkeyshop.com/')) {
+        const link = document.createElement('a'); link.href = data.url; link.textContent = data.source === 'aks_history' ? 'AllKeyShop megnyitása' : 'AllKeyShop adatlap megnyitása (az ottani lista külön szűrhető)';
         link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; content.appendChild(link);
       }
     }
