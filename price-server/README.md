@@ -19,8 +19,8 @@ Ez a szerver **nem IP-forgató és nem tiltásmegkerülő szolgáltatás**. A Du
 Az Ubuntu termináljában:
 
 ```bash
-curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.89/DeckPriceServer-v1.0.89.tar.gz
-tar -xzf DeckPriceServer-v1.0.89.tar.gz
+curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.90/DeckPriceServer-v1.0.90.tar.gz
+tar -xzf DeckPriceServer-v1.0.90.tar.gz
 cd DeckPriceServer
 sudo bash install.sh sajat-szerver.duckdns.org
 ```
@@ -132,3 +132,5 @@ Ajánlatonként a legutóbbi megfigyelést választjuk. A legújabb megfigyelés
 Ehhez mindkét oldalt 1.0.88-ra kell frissíteni. A meglevő beállítások és érvényes korábbi cache megmaradnak; lejáratkor már az új végpontot használjuk. A Decky árgyorsítótár-törlése csak a helyi cache-t üríti; a szerver érvényes cache-e a lejáratáig megmarad. A GG.deals tartalék működés megmarad.
 
 1.0.89-től a megnyitott játék cache nélküli szerverkérése legfeljebb 2,5 másodpercig megvárja a közös feldolgozás eredményét, és elkészüléskor azonnal visszaadja. Nincs kötelező plusz 3 másodperces visszakérdezés. Hosszabb feldolgozásnál 1 másodperces előtérbeli visszakérdezési időt ad; a háttérsor és az AKS-kérésköz változatlan.
+
+1.0.90: a Steam AppDetails válasz eltérő külső kulcsánál az egyértelmű belső `steam_appid` alapján azonosítjuk a játékot. A más AppID-hez tartozó adat továbbra is kizárt. Egy hiányzó játékadat nem szünetelteti a teljes AKS-sort. Az API-katalógusból hiányzó név és a többértelmű név külön jelzést, 24 órás tartós negatív cache-t kap; nem kapcsolati hibaként ismétlődik. A szerver státusza és az új Home Assistant kártyaminta tartalmazza a konkrét hibaokot; a már bemásolt kártyát az új mintára kell cserélni.

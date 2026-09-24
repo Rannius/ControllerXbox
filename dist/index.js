@@ -608,7 +608,7 @@ function buildPricePanelScript(appId, result) {
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
     const gg = data?.provider === 'gg';
-    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
+    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : data.not_found ? (data.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: ezen a néven nincs a katalógusban') : best ? 'AllKeyShop · Standard: ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
     if (data?.retry_at && !data.success) { summary.dataset.dpbRetryAt = String(data.retry_at); summary.dataset.dpbLabel = summary.textContent; }
     const ggRetailCheaper = data?.retail_price != null && (data?.keyshop_price == null || data.retail_price <= data.keyshop_price);
     if (gg) summary.textContent = !data.success ? 'GG.deals: ' + (data.pending ? 'szerveres lekérés folyamatban' : data.error_code === 'rate_limit' ? 'várakozás' : 'hiba')
@@ -640,7 +640,8 @@ function buildPricePanelScript(appId, result) {
     }
     else {
       line(data.preferred_only ? 'Legalacsonyabb ár a kiválasztott boltokból' : 'Legalacsonyabb megfelelő ajánlat');
-      if (!data.offers?.length) line('Nincs megfelelő Steam-kulcs vagy Gift az aktuális szűrőkkel.');
+      if (data.not_found) line(data.match_status === 'ambiguous' ? 'Több azonos nevű API-termék van; bizonytalan árat nem párosítunk. Új ellenőrzés a 24 órás cache lejárata után.' : 'A játék ezen a néven nem található az AKS API katalógusában. Ez nem kapcsolati hiba. Új ellenőrzés a 24 órás cache lejárata után.');
+      else if (!data.offers?.length) line('Nincs megfelelő Steam-kulcs vagy Gift az aktuális szűrőkkel.');
       for (const [index, offer] of (data.offers || []).entries()) {
         line(offer.price.toFixed(2) + ' € · ' + offer.merchant, index === 0);
         line(offer.kind + ' · ' + offer.edition + (offer.coupon ? ' · Kupon: ' + offer.coupon : ''));
@@ -693,7 +694,7 @@ function buildTilePricesScript(url, values) {
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
       row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
-      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
+      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {
         const amount = value.keyshop_price ?? value.retail_price;

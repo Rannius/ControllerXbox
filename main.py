@@ -440,6 +440,7 @@ class Plugin:
         history = entry.get("source") == "aks_history"
         offers = (self._aks_history_filter if history else self._aks_filter)(entry["data"], self._price_preferences)
         return {"success": True, "provider": "aks", "offers": offers[:1], "matched_offers": len(offers),
+                "not_found": entry.get("not_found") is True, "match_status": entry.get("match_status", ""),
                 "source": entry.get("source", "aks_page"), "source_updated_at": entry.get("source_updated_at", ""),
                 "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
                 "currency": "EUR", "preferred_only": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
@@ -1228,6 +1229,21 @@ class Plugin:
                            "coupon": coupon[:80] if isinstance(coupon, str) else ""})
         return sorted(offers, key=lambda offer: (offer["price"], offer["merchant"]))
 
+    @staticmethod
+    def _steam_price_data(payload: Any, app_id: str) -> Dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid Steam metadata response")
+        item = payload.get(app_id, {})
+        data = item.get("data") if isinstance(item, dict) and item.get("success") is True else None
+        if isinstance(data, dict) and str(data.get("steam_appid", app_id)) == app_id:
+            return data
+        # Steam can put the base game's data under a DLC key. Only its explicit
+        # inner AppID can identify it; never accept the first unrelated result.
+        matches = [item["data"] for item in payload.values() if isinstance(item, dict)
+                   and item.get("success") is True and isinstance(item.get("data"), dict)
+                   and str(item["data"].get("steam_appid", "")) == app_id]
+        return matches[0] if len(matches) == 1 else {}
+
     def _fetch_price_metadata(self, app_id: str) -> Dict[str, Any]:
         cached = self._price_metadata.get(app_id)
         if self._valid_price_metadata(app_id, cached, time.time()):
@@ -1238,11 +1254,12 @@ class Plugin:
         try:
             with self._open_request(request, timeout=10) as response:
                 payload = json.load(response)
-            item = payload.get(app_id, {})
-            data = item.get("data", {}) if item.get("success") else {}
+            data = self._steam_price_data(payload, app_id)
             title = str(data.get("name", "")).strip()[:200]
             if not title:
-                raise ValueError("Missing Steam title")
+                missing = ValueError("Missing Steam title")
+                missing.price_local_error = True
+                raise missing
             release = data.get("release_date")
             coming_soon = release.get("coming_soon") if isinstance(release, dict) else None
             result = {"app_id": app_id, "title": title, "is_free": data.get("is_free") is True,
@@ -1251,6 +1268,7 @@ class Plugin:
             failure = ValueError("A Steam-játék neve most nem kérdezhető le.")
             failure.price_stage = "Steam-adatok"
             failure.price_elapsed = round(time.monotonic() - started, 1)
+            failure.price_local_error = getattr(error, "price_local_error", False)
             raise failure from error
         if len(self._price_metadata) >= 10000:
             self._price_metadata.pop(next(iter(self._price_metadata)))
@@ -1428,7 +1446,10 @@ class Plugin:
                 catalog = self._load_aks_catalog(force=attempt > 0)
                 product_id = catalog.get(self._aks_title(title))
                 if not product_id:
-                    raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
+                    return {"title": title, "url": "https://www.allkeyshop.com/", "source": "aks_history",
+                            "not_found": True, "match_status": "ambiguous" if self._aks_title(title) in catalog else "missing",
+                            "data": {"prices": [], "merchants": {}, "regions": {}, "editions": {}},
+                            "checked_at": time.time()}
                 match = {"title": title, "product_id": product_id, "checked_at": time.time()}
                 if len(self._aks_matches) >= 10000:
                     self._aks_matches.pop(next(iter(self._aks_matches)))
@@ -1477,7 +1498,7 @@ class Plugin:
             if str(error) in safe_messages:
                 message = str(error)
             if message == safe_messages[0]:
-                code, shared = "steam", True
+                code, shared = "steam", not getattr(error, "price_local_error", False)
             elif message == safe_messages[1]:
                 code = "match"
             else:

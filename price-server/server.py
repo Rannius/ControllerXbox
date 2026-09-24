@@ -129,6 +129,7 @@ class PriceBroker:
             if entry and "error" not in entry:
                 continue
             missing.append({**self.describe(key), **observation,
+                            "error": self.failures.get(key, (0, {}))[1].get("error", ""),
                             "state": "running" if key == self.current else "queued" if key in self.pending else observation["state"],
                             "retry_after": max(0, round(observation["retry_at"] - now))})
         current = None
@@ -226,6 +227,7 @@ class PriceBroker:
             self.current_started_at = time.time()
             provider, app_id = key
             outcome, retry_at, actual_provider = "failed", 0, provider
+            error_message, error_code = "", ""
             LOG.info("Price job started provider=%s app_id=%s waiting=%d", provider, app_id, len(self.pending) - 1)
             try:
                 # One worker means this provider selection cannot race another lookup.
@@ -235,17 +237,23 @@ class PriceBroker:
                 if result.get("success"):
                     outcome = "skipped" if result.get("skipped") else "not_found" if result.get("not_found") else "completed"
                 if not result.get("success"):
+                    error_message = str(result.get("error", "Az árlekérés sikertelen."))[:500]
+                    error_code = str(result.get("error_code", "lookup"))[:40]
+                    if error_code == "match":
+                        outcome = "not_found"
                     delay = max(1, result.get("retry_after", 30))
                     retry_at = time.time() + delay
                     self.failures[key] = (time.time() + delay, {
                         "provider": actual_provider,
+                        "error_code": error_code,
                         "global_error": result.get("global_error") is True,
-                        "error": str(result.get("error", "Az árlekérés sikertelen."))[:500]})
+                        "error": error_message})
                     while len(self.failures) > 512:
                         self.failures.pop(next(iter(self.failures)))
             except Exception:
                 # No request headers, URLs, provider credentials or exception body in logs.
                 LOG.error("Price job failed")
+                error_message, error_code = "Szerveroldali feldolgozási hiba.", "server"
                 retry_at = time.time() + 30
                 self.failures[key] = (time.time() + 30, {"global_error": False, "error": "Szerveroldali feldolgozási hiba."})
             finally:
@@ -256,6 +264,7 @@ class PriceBroker:
                 self.observe(key, outcome, retry_at)
                 self.recent.append({**self.describe(key), "provider": actual_provider, "requested_provider": provider,
                                     "outcome": outcome, "finished_at": finished_at,
+                                    "error": error_message, "error_code": error_code,
                                     "duration_seconds": duration, "retry_at": retry_at})
                 LOG.info("Price job finished provider=%s app_id=%s outcome=%s seconds=%.2f", actual_provider, app_id, outcome, duration)
                 self.pending.pop(key, None)

@@ -651,6 +651,41 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 self.plugin._aks_history_data(value)
 
+    def test_price_metadata_identifies_inner_appid_without_accepting_other_games(self):
+        data = {"name": "Blue Prince", "steam_appid": 1569580, "is_free": False, "release_date": {"coming_soon": False}}
+        payload = {"3711820": {"success": True, "data": data}}
+        with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(payload))):
+            result = self.plugin._fetch_price_metadata("1569580")
+        self.assertEqual(result["title"], "Blue Prince")
+        self.assertEqual(result["app_id"], "1569580")
+        for invalid in ({"999": {"success": True, "data": {**data, "steam_appid": 999}}},
+                        {"1569580": {"success": True, "data": {**data, "steam_appid": 999}}},
+                        {"1": payload["3711820"], "2": payload["3711820"]}):
+            self.plugin._price_metadata.clear()
+            with patch.object(self.plugin, "_open_request", return_value=io.StringIO(json.dumps(invalid))):
+                with self.assertRaises(ValueError) as caught:
+                    self.plugin._fetch_price_metadata("1569580")
+            self.assertFalse(self.plugin._aks_error_details(caught.exception)["global_error"])
+
+    async def test_missing_catalog_game_is_cached_without_pausing_other_games(self):
+        self.plugin._price_metadata["10"] = self.price_metadata(title="Not in API")
+        self.plugin._price_metadata["20"] = self.price_metadata("20")
+        with patch.object(self.plugin, "_aks_read", side_effect=self.history_response) as network:
+            result = await self.plugin.get_allkeyshop_price("10")
+            self.assertTrue(result["success"])
+            self.assertTrue(result["not_found"])
+            self.assertEqual(result["match_status"], "missing")
+            await self.plugin.get_allkeyshop_price("10")
+            self.assertEqual(network.call_count, 1)
+            found = await self.plugin.get_allkeyshop_price("20")
+            self.assertTrue(found["success"])
+            self.assertFalse(found["not_found"])
+            self.assertEqual(network.call_count, 2)
+        await self.plugin._price_save_task
+        restarted = self.plugin_type()
+        await restarted._load_price_cache()
+        self.assertTrue((await restarted.get_cached_allkeyshop_price("10"))["not_found"])
+
     def price_metadata(self, app_id="10", title="Example"):
         return {"app_id": app_id, "title": title, "is_free": False, "coming_soon": False, "checked_at": time.time()}
 

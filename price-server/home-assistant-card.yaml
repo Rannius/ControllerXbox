@@ -36,14 +36,14 @@ cards:
 
       **Legutóbbi feldolgozások:**
       {% for item in (state_attr('sensor.deck_price_server', 'recent') or [])[:10] %}
-      - {{ item.title or ('Steam ' ~ item.app_id) }} · {{ item.provider | upper }} · {{ labels.get(item.outcome, item.outcome) }} · {{ item.duration_seconds }} mp · {{ item.finished_at | timestamp_custom('%H:%M:%S') }}
+      - {{ item.title or ('Steam ' ~ item.app_id) }} · {{ item.provider | upper }} · {{ labels.get(item.outcome, item.outcome) }} · {{ item.duration_seconds }} mp · {{ item.finished_at | timestamp_custom('%H:%M:%S') }}{% if item.error | default('') %} · {{ item.error }}{% endif %}
       {% else %}
       A szerver indulása óta még nincs eredmény.
       {% endfor %}
 
       **Még nincs tárolt eredmény:** {{ state_attr('sensor.deck_price_server', 'missing_count') }}
       {% for item in (state_attr('sensor.deck_price_server', 'missing') or [])[:10] %}
-      - Steam {{ item.app_id }} · {{ item.provider | upper }} · {{ labels.get(item.state, item.state) }}{% if item.retry_after %} · újrapróbálható: {{ item.retry_after }} mp múlva{% endif %}
+      - Steam {{ item.app_id }} · {{ item.provider | upper }} · {{ labels.get(item.state, item.state) }}{% if item.retry_after %} · újrapróbálható: {{ item.retry_after }} mp múlva{% endif %}{% if item.error | default('') %} · {{ item.error }}{% endif %}
       {% endfor %}
 
       Az ismert kérésekre vonatkozik; a szerver nem ismeri a teljes kívánságlistát. A lejárt cache frissítését új klienskérés indítja.
