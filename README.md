@@ -178,3 +178,7 @@ A DLC-csempéknél a Steam címsávja miatt a borító fölött nincs elég hely
 ## 1.0.104: ársáv a többi áruházi csempe alatt is
 
 A normál áruházi csempék, keresési találatok és kívánságlista-sorok AKS/GG ársávja is a teljes kártya alá kerül, fenntartott hellyel. A kiemelt ajánlatok Steam-ár melletti, már képet nem takaró elhelyezése megmarad. Csak a Decky plugint kell frissíteni.
+
+## 1.0.105: további főoldali ársávok
+
+A „Kiemelt ajánlatok”, „Leárazások és események”, „Személyes naptárad” és az alsó listás csempék felismerése bővült. A pontosan egy játékhoz rendelhető kártyák AKS/GG ársávja a teljes kártya alatt jelenik meg. Csak a Decky plugint kell frissíteni.

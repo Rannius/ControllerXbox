@@ -300,7 +300,7 @@ const storePriceTilesScript = `
   function collectPriceTiles() {
     if (!(${allowsStoreTilePrices.toString()})(location.href)) return [];
     const found = new Map();
-    const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,.wishlist_row,[data-ds-appid],[data-app-id]';
+    const cardSelector = '.store_capsule,.tab_item,.tab_row_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,.wishlist_row,.home_area_spotlight,[data-ds-appid],[data-app-id]';
     for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid],.wishlist_row[data-app-id]')) {
       if (node.closest('#global_header,#store_header,.game_area_purchase,.game_area_purchase_game,#deck-play-badges-price,.dpb-tile-price,[data-ds-bundleid],[data-ds-packageid]')) continue;
       const link = node.matches('a[href*="/app/"]') ? node : node.querySelector('a[href*="/app/"]');
@@ -693,8 +693,7 @@ function buildPricePanelScript(appId, result) {
     ${priceCountdownScript}
   })();`;
 }
-// Featured offers use the free space beside Steam's price; ordinary cards
-// reserve a short strip below themselves for the price label.
+// Store cards reserve a short strip below themselves for the price label.
 const tilePriceCleanupScript = `
   for (const [host, original] of window.__dpbPriceTiles || []) {
     host.querySelector(':scope > .dpb-tile-price')?.remove();
@@ -711,43 +710,41 @@ function buildTilePricesScript(url, values) {
     const values = ${JSON.stringify(values).replace(/</g, "\\u003c")};
     const saved = window.__dpbPriceTiles = new Map();
     ${storePriceTilesScript}
+    function findSingleAppCard(host, id) {
+      const calendar = host.closest('.personal_calendar_ctn');
+      let calendarCard = null;
+      for (let card = host; card && card !== document.body && card !== calendar; card = card.parentElement) {
+        const otherApp = Array.from(card.querySelectorAll('[data-ds-appid],[data-app-id],a[href*="/app/"]'))
+          .some(node => {
+            const raw = node.getAttribute('data-ds-appid') || node.getAttribute('data-app-id') || '';
+            const match = (node.getAttribute('href') || '').match(/\\/app\\/(\\d+)/);
+            return (raw && raw !== id) || (match && match[1] !== id);
+          });
+        if (otherApp) break;
+        if (!card.querySelector('img,picture,video,[style*="background-image"]')) continue;
+        const rect = card.getBoundingClientRect();
+        if (rect.width < 80 || rect.width > Math.max(1200, innerWidth) || rect.height < 40) continue;
+        if (card.querySelector('.discount_block[data-price-final],.discount_final_price,.game_purchase_price,.price,[class*="SalePrice"],[class*="sale_price"]')) return card;
+        if (calendar) calendarCard = card;
+      }
+      return calendarCard && calendarCard !== host ? calendarCard : null;
+    }
     for (const {host, id} of collectPriceTiles()) {
       if (!(id in values) || values[id]?.disabled || values[id]?.skipped) continue;
-      const hostRect = host.getBoundingClientRect();
-      const scale = host.offsetWidth ? hostRect.width / host.offsetWidth : 1;
-      const home = /^\\/(?:|home\\/|index\\.php)$/.test(location.pathname || '/');
-      const featured = home && !!host.closest('.home_special_offers_group');
-      const tileCard = host.closest('.wishlist_row,.search_result_row,.sale_capsule,.store_capsule,.tab_item,.dailydeal,.small_cap,.large_cap');
-      const belowCard = !featured && !!tileCard;
-      let anchor = host;
-      let left, width, top;
-      if (belowCard) {
-        // Image links can be shorter than the card containing Steam's price.
-        // A CSS-relative bottom edge follows late content and scrolling.
-        anchor = tileCard;
-        if (!anchor || anchor.getBoundingClientRect().width < 80) continue;
-        left = 0; width = anchor.offsetWidth; top = 0;
-      } else if (featured) {
-        const steamPrice = host.querySelector('.discount_block[data-price-final]');
-        const priceRect = steamPrice?.getBoundingClientRect();
-        // An unpriced promotion has no Steam price row to align with.
-        if (!priceRect?.width || !priceRect.height) continue;
-        left = 0;
-        width = (priceRect.left - hostRect.left - 4) / scale;
-        top = ((priceRect.top + priceRect.bottom) / 2 - hostRect.top) / scale - 13;
-        if (width < 120 || top < 0) continue;
-      } else continue;
+      // Prefer Steam's complete card. Dynamic calendar/featured cards may lack
+      // these classes, so accept a one-game wrapper with cover and Steam price.
+      const anchor = host.closest('.wishlist_row,.search_result_row,.sale_capsule,.store_capsule,.tab_item,.tab_row_item,.dailydeal,.small_cap,.large_cap,.home_area_spotlight')
+        || findSingleAppCard(host, id);
+      if (!anchor || anchor.getBoundingClientRect().width < 80) continue;
       if (saved.has(anchor)) continue;
-      saved.set(anchor, (belowCard ? ['position', 'overflow', 'margin-bottom'] : ['position'])
+      saved.set(anchor, ['position', 'overflow', 'margin-bottom']
         .map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
       if (getComputedStyle(anchor).position === 'static') anchor.style.setProperty('position', 'relative');
-      if (belowCard) {
-        if (getComputedStyle(anchor).overflow === 'hidden') anchor.style.setProperty('overflow', 'visible');
-        if ((parseFloat(getComputedStyle(anchor).marginBottom) || 0) < 32) anchor.style.setProperty('margin-bottom', '32px');
-      }
+      if (getComputedStyle(anchor).overflow === 'hidden') anchor.style.setProperty('overflow', 'visible');
+      if ((parseFloat(getComputedStyle(anchor).marginBottom) || 0) < 32) anchor.style.setProperty('margin-bottom', '32px');
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
-      row.style.cssText = 'position:absolute;top:' + (belowCard ? 'calc(100% + 3px)' : top + 'px') + ';left:' + left + 'px;width:' + (belowCard ? '100%' : width + 'px') + ';height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
+      row.style.cssText = 'position:absolute;top:calc(100% + 3px);left:0;width:100%;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
       row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {

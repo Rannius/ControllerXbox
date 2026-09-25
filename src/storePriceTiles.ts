@@ -10,7 +10,7 @@ export const storePriceTilesScript = `
   function collectPriceTiles() {
     if (!(${allowsStoreTilePrices.toString()})(location.href)) return [];
     const found = new Map();
-    const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,.wishlist_row,[data-ds-appid],[data-app-id]';
+    const cardSelector = '.store_capsule,.tab_item,.tab_row_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,.wishlist_row,.home_area_spotlight,[data-ds-appid],[data-app-id]';
     for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid],.wishlist_row[data-app-id]')) {
       if (node.closest('#global_header,#store_header,.game_area_purchase,.game_area_purchase_game,#deck-play-badges-price,.dpb-tile-price,[data-ds-bundleid],[data-ds-packageid]')) continue;
       const link = node.matches('a[href*="/app/"]') ? node : node.querySelector('a[href*="/app/"]');
