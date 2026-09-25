@@ -446,7 +446,7 @@ class Plugin:
         history = entry.get("source") == "aks_history"
         filtering: Dict[str, int] = {}
         offers = (self._aks_history_filter(entry["data"], self._price_preferences, filtering,
-                                          entry.get("steam_type") == "dlc") if history
+                                          entry.get("steam_type") == "dlc", entry.get("edition_filter", "")) if history
                   else self._aks_filter(entry["data"], self._price_preferences))
         return {"success": True, "provider": "aks", "offers": offers[:1], "matched_offers": len(offers),
                 "history_unavailable": entry.get("history_unavailable") is True,
@@ -464,6 +464,11 @@ class Plugin:
             return False
         if "skipped" in entry:
             return entry["skipped"] in ("free", "unreleased", "release_unknown")
+        if entry.get("source") == "aks_history":
+            edition = cls._aks_edition_suffix(entry["title"])[1]
+            if ((edition and entry.get("edition_filter") not in ("", edition))
+                    or (not edition and entry.get("edition_filter", "") != "")):
+                return False
         # Recheck older negative matches with sequel numerals or punctuation once.
         if (entry.get("not_found") is True and entry.get("title_variants_checked") is not True
                 and (cls._aks_roman_variant(entry["title"]) != entry["title"]
@@ -532,7 +537,7 @@ class Plugin:
                 candidates = {k: v for k, v in self._price_cache.items() if v.get("url")}
             if not isinstance(candidates, dict):
                 candidates = {}
-            self._aks_matches = {k: {f: v[f] for f in ("title", "url", "checked_at", "product_id") if f in v}
+            self._aks_matches = {k: {f: v[f] for f in ("title", "url", "checked_at", "product_id", "edition_filter") if f in v}
                                  for k, v in list(candidates.items())[-10000:] if self._valid_aks_match(k, v, now)}
             metadata = payload.get("metadata", {})
             if isinstance(metadata, dict):
@@ -898,6 +903,13 @@ class Plugin:
                     and isinstance(entry, dict) and entry.get("fallback_from") == "aks"):
                 raise ValueError("Invalid fallback source")
             if entry is not None:
+                if (entry_provider == "aks" and isinstance(entry, dict)
+                        and entry.get("source") == "aks_history"
+                        and isinstance(entry.get("title"), str)
+                        and self._aks_edition_suffix(entry["title"])[1]
+                        and "edition_filter" not in entry):
+                    return {"success": False, "provider": provider, "error_code": "server_version", "retry_after": 60,
+                            "error": "Az árszerver még nem kezeli az Enhanced/Deluxe kiadásokat. Frissítsd az Ubuntu árszervert 1.0.112-re."}
                 if not (self._valid_gg_entry(entry) if entry_provider == "gg" else self._valid_price_entry(entry)):
                     raise ValueError("Invalid price data")
                 if entry.get("source") == "aks_history" and entry.get("history_version") != AKS_HISTORY_VERSION:
@@ -1262,17 +1274,52 @@ class Plugin:
 
     @classmethod
     def _aks_catalog_match(cls, catalog: Dict[str, Optional[str]], title: str) -> Tuple[Optional[str], bool]:
+        product_id, found, _ = cls._aks_catalog_choice(catalog, title)
+        return product_id, found
+
+    @staticmethod
+    def _aks_edition_suffix(title: str) -> Tuple[str, str]:
+        match = re.search(r"\s+(?:[-–—:]\s*)?((?:enhanced(?:\s+edition)?\s+deluxe|"
+                          r"enhanced|(?:digital\s+)?deluxe)(?:\s+edition)?)$", title, re.IGNORECASE)
+        if not match:
+            return title, ""
+        base = title[:match.start()].rstrip(" -–—:")
+        if not base:
+            return title, ""
+        suffix = match.group(1).casefold()
+        edition = "Enhanced Deluxe" if "enhanced" in suffix and "deluxe" in suffix else (
+            "Enhanced" if "enhanced" in suffix else "Deluxe")
+        return base, edition
+
+    @classmethod
+    def _aks_catalog_choice(cls, catalog: Dict[str, Optional[str]], title: str) -> Tuple[Optional[str], bool, str]:
+        def keys(name: str) -> Set[str]:
+            exact = cls._aks_title(name)
+            roman = cls._aks_title(cls._aks_roman_variant(name))
+            # Python treats underscores as word characters; Steam's URL titles may contain them.
+            return {exact, roman, exact.replace("_", ""), roman.replace("_", "")}
+
         exact = cls._aks_title(title)
         if exact in catalog:
-            return catalog[exact], True
-        roman = cls._aks_title(cls._aks_roman_variant(title))
-        # Python considers underscore a word character, unlike other punctuation.
-        # Try it only after the exact key, without changing the stored catalog.
-        alternatives = {roman, exact.replace("_", ""), roman.replace("_", "")}
-        candidates = {catalog[key] for key in alternatives - {exact} if key in catalog}
-        if candidates:
-            return (candidates.pop() if len(candidates) == 1 else None), True
-        return None, False
+            return catalog[exact], True, ""
+        variants = keys(title) - {exact}
+        base, edition = cls._aks_edition_suffix(title)
+        if edition:
+            spellings = {"Enhanced": ("Enhanced", "Enhanced Edition"),
+                         "Deluxe": ("Deluxe", "Deluxe Edition", "Digital Deluxe Edition"),
+                         "Enhanced Deluxe": ("Enhanced Deluxe", "Enhanced Deluxe Edition",
+                                             "Enhanced Edition Deluxe")}[edition]
+            for spelling in spellings:
+                variants.update(keys(base + " " + spelling))
+            variants -= {exact}
+        matches = {catalog[key] for key in variants if key in catalog}
+        if matches:
+            return (matches.pop() if len(matches) == 1 else None), True, ""
+        if edition:
+            matches = {catalog[key] for key in keys(base) if key in catalog}
+            if matches:
+                return (matches.pop() if len(matches) == 1 else None), True, edition
+        return None, False, ""
 
     @staticmethod
     def _retry_after(headers: Any) -> float:
@@ -1553,7 +1600,7 @@ class Plugin:
     @classmethod
     def _aks_history_filter(cls, data: Dict[str, Any], preferences: Dict[str, Any],
                             filtering: Optional[Dict[str, int]] = None,
-                            is_dlc: bool = False) -> List[Dict[str, Any]]:
+                            is_dlc: bool = False, edition_filter: str = "") -> List[Dict[str, Any]]:
         # Labels come from the API's region map, not from the merchant name.
         # Bare Steam is the unqualified/global group, not a per-country activation guarantee.
         regions = {"steam": "Steam-kulcs · Global (AKS: Steam)", "steam global": "Steam-kulcs · Global",
@@ -1565,7 +1612,11 @@ class Plugin:
         allowed = {name.casefold() for name in preferences["merchants"]}
         restricted = preferences.get("restrict_merchants", bool(allowed))
         allowed_editions = ("Standard", "Standard Edition", "Early Access", "DLC") if is_dlc else (
+            "Enhanced", "Enhanced Edition") if edition_filter == "Enhanced" else (
+            "Deluxe", "Deluxe Edition", "Digital Deluxe", "Digital Deluxe Edition") if edition_filter == "Deluxe" else (
+            "Enhanced Deluxe", "Enhanced Deluxe Edition", "Enhanced Edition Deluxe") if edition_filter == "Enhanced Deluxe" else (
             "Standard", "Standard Edition", "Early Access")
+        allowed_editions = {cls._aks_title(name) for name in allowed_editions}
         counts = {key: 0 for key in ("invalid", "region", "edition", "merchant", "gift", "price", "steam", "accepted")}
         counts["total"] = len(data["prices"])
         offers = []
@@ -1583,7 +1634,8 @@ class Plugin:
             name = merchant.get("name")
             reason = ("steam" if isinstance(name, str) and name.strip().casefold() == "steam" else
                       "region" if region_name not in regions else
-                      "edition" if edition.get("name") not in allowed_editions else
+                      "edition" if not isinstance(edition.get("name"), str) or
+                          cls._aks_title(edition["name"]) not in allowed_editions else
                       "invalid" if not isinstance(name, str) or not name or len(name) > 80 else
                       "gift" if "gift" in region_name and not preferences["allow_gifts"] else
                       "merchant" if restricted and name.casefold() not in allowed else "")
@@ -1601,7 +1653,7 @@ class Plugin:
             price = round(price, 2)
             coupon = row.get("best_discount_code") if kind == "discount" else ""
             offers.append({"merchant": name, "price": price, "kind": regions[region_name],
-                           "edition": edition["name"] if edition["name"] in ("Early Access", "DLC") else "Standard",
+                           "edition": edition_filter or (edition["name"] if edition["name"] in ("Early Access", "DLC") else "Standard"),
                            "coupon": coupon[:80] if isinstance(coupon, str) else "", "price_kind": kind,
                            "source_updated_at": row["end"]})
         counts["accepted"] = len(offers)
@@ -1617,25 +1669,30 @@ class Plugin:
             return {"title": title, "skipped": skipped, "checked_at": time.time()}
         match = self._aks_matches.get(app_id)
         if (not self._valid_aks_match(app_id, match, time.time()) or not match.get("product_id")
-                or self._aks_title(match["title"]) != self._aks_title(title)):
+                or self._aks_title(match["title"]) != self._aks_title(title)
+                or (self._aks_edition_suffix(title)[1] and "edition_filter" not in match)):
             self._aks_matches.pop(app_id, None)
             match = None
         # New catalog data can invalidate an existing match before its seven-day TTL.
-        if match and self._aks_catalog and self._aks_catalog_match(self._aks_catalog, title)[0] != match["product_id"]:
-            self._aks_matches.pop(app_id, None)
-            match = None
+        if match and self._aks_catalog:
+            product_id, _, edition_filter = self._aks_catalog_choice(self._aks_catalog, title)
+            if (product_id, edition_filter) != (match["product_id"], match.get("edition_filter", "")):
+                self._aks_matches.pop(app_id, None)
+                match = None
         for attempt in range(2):
             if match is None:
                 catalog = self._load_aks_catalog(force=attempt > 0)
-                product_id, catalog_has_title = self._aks_catalog_match(catalog, title)
+                product_id, catalog_has_title, edition_filter = self._aks_catalog_choice(catalog, title)
                 if not product_id:
                     return {"title": title, "url": "https://www.allkeyshop.com/", "source": "aks_history",
                             "history_version": AKS_HISTORY_VERSION,
+                            "edition_filter": "",
                             "not_found": True, "title_variants_checked": True,
                             "match_status": "ambiguous" if catalog_has_title else "missing",
                             "data": {"prices": [], "merchants": {}, "regions": {}, "editions": {}},
                             "checked_at": time.time()}
-                match = {"title": title, "product_id": product_id, "checked_at": time.time()}
+                match = {"title": title, "product_id": product_id, "edition_filter": edition_filter,
+                         "checked_at": time.time()}
                 if len(self._aks_matches) >= 10000:
                     self._aks_matches.pop(next(iter(self._aks_matches)))
                 self._aks_matches[app_id] = match
@@ -1660,6 +1717,7 @@ class Plugin:
                     raise ValueError("A Steam-cím megváltozott; az AKS-párosítást újra kell ellenőrizni.")
             return {"title": title, "url": "https://www.allkeyshop.com/", "data": data,
                     "history_version": AKS_HISTORY_VERSION,
+                    "edition_filter": match.get("edition_filter", ""),
                     "history_unavailable": payload.get("history") == [],
                     "steam_type": metadata.get("type", ""),
                     "source": "aks_history", "source_updated_at": max((row["end"] for row in data["prices"]), default=""),

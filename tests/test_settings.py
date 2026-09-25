@@ -909,6 +909,48 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("normalised_name=128119", fetch.call_args.args[0])
         self.assertEqual(self.plugin._aks_matches["10"]["product_id"], "128119")
 
+    def test_enhanced_and_deluxe_fallback_preserves_edition_and_shop_filters(self):
+        base = self.plugin._aks_title("Crimson Desert")
+        catalog = {base: "140254"}
+        self.assertEqual(self.plugin._aks_catalog_choice(catalog, "Crimson Desert Enhanced"),
+                         ("140254", True, "Enhanced"))
+        self.assertEqual(self.plugin._aks_catalog_choice(catalog, "Crimson Desert Deluxe Edition"),
+                         ("140254", True, "Deluxe"))
+        self.assertEqual(self.plugin._aks_catalog_choice(catalog, "Crimson Desert Enhanced Deluxe Edition"),
+                         ("140254", True, "Enhanced Deluxe"))
+        self.assertEqual(self.plugin._aks_catalog_choice(catalog, "Crimson Desert Enhanced Voyage"),
+                         (None, False, ""))
+        catalog[self.plugin._aks_title("Crimson Desert Enhanced Edition")] = "222"
+        self.assertEqual(self.plugin._aks_catalog_choice(catalog, "Crimson Desert Enhanced"),
+                         ("222", True, ""))
+
+        payload = self.history_fixture()
+        payload["editions"].update({"3": {"name": "Enhanced"}, "4": {"name": "Enhanced Edition Deluxe"}})
+        row = payload["history"][1]
+        payload["history"] += [
+            {**row, "product_id": 101, "edition": "3", "min_discount_price": 20},
+            {**row, "product_id": 102, "edition": "3", "merchant_id": 2, "min_discount_price": 19},
+            {**row, "product_id": 103, "edition": "2", "min_discount_price": 30},
+            {**row, "product_id": 104, "edition": "4", "min_discount_price": 40}]
+        data = self.plugin._aks_history_data(payload)
+        prefs = {"merchants": ["Kinguin"], "restrict_merchants": True, "allow_gifts": True}
+        enhanced = self.plugin._aks_history_filter(data, prefs, edition_filter="Enhanced")
+        self.assertEqual([(offer["merchant"], offer["price"], offer["edition"]) for offer in enhanced],
+                         [("Kinguin", 20, "Enhanced")])
+        self.assertEqual(self.plugin._aks_history_filter(data, prefs, edition_filter="Deluxe")[0]["price"], 30)
+        self.assertEqual(self.plugin._aks_history_filter(data, prefs, edition_filter="Enhanced Deluxe")[0]["price"], 40)
+        self.plugin._price_metadata["3321460"] = self.price_metadata("3321460", "Crimson Desert Enhanced")
+        self.plugin._aks_catalog = {base: "140254"}
+        self.plugin._aks_catalog_checked_at = time.time()
+        with patch.object(self.plugin, "_aks_read", return_value=json.dumps(payload)) as request:
+            entry = self.plugin._fetch_aks_game("3321460")
+        self.assertEqual(entry["edition_filter"], "Enhanced")
+        self.assertIn("normalised_name=140254", request.call_args.args[0])
+        self.plugin._price_preferences.update(prefs)
+        self.assertEqual(self.plugin._price_result(entry)["offers"][0]["price"], 20)
+        self.assertFalse(self.plugin._valid_price_entry({key: value for key, value in entry.items()
+                                                        if key != "edition_filter"}))
+
     def test_old_roman_title_catalog_miss_is_rechecked(self):
         entry = {"title": "Hades II", "url": "https://www.allkeyshop.com/", "source": "aks_history",
                  "history_version": 2, "not_found": True, "checked_at": time.time(),

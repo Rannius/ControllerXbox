@@ -202,3 +202,7 @@ A mentett ár a kötegelt cache beolvasása után jelenik meg, indokolatlan bet�
 ## 1.0.111: telepített játékok buildszáma
 
 A „Jelvények és méret” beállítások között külön kapcsolóval megjeleníthető a helyben telepített Steam-játék buildazonosítója a könyvtári csempe alatt. Az érték a Deck helyi Steam-telepítési jegyzékéből származik, internetes lekérés nélkül; külső Steam-könyvtárakat is kezel. A Steam nem tárol egységes, például „1.2.3” alakú verziószámot minden játékhoz, ezért a felirat egyértelműen „Build” jelölést használ. A funkció alapból ki van kapcsolva. Csak a Decky plugint kell frissíteni.
+
+## 1.0.112: Enhanced és Deluxe árak
+
+Az AKS-keresés a pontos Steam-cím után az Enhanced és Deluxe névváltozatokat is ellenőrzi. Ha csak az alapjáték AKS-oldala található, kizárólag a címben jelölt kiadás árát mutatja; a Standard, Enhanced és Deluxe ajánlatok nem keverednek. A korábban elmentett negatív találatokat ezeknél a címeknél újraellenőrzi. A Decky plugint és az Ubuntu árszervert is frissíteni kell.
