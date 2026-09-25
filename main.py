@@ -10,6 +10,7 @@ import asyncio
 import concurrent.futures
 import email.utils
 import functools
+import hashlib
 import html
 import json
 import os
@@ -63,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 1
+INSTALLED_VERSION_CACHE_SCHEMA = 2
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -220,170 +221,210 @@ class InstalledGameVersionScanner:
                 version = cls._clean_version(match.group(1)) if match else ""
             if version:
                 return version, "game"
-        # Unreal projects may ship this text file beside their packed assets.
-        for relative in ("Config/DefaultGame.ini", "DefaultGame.ini"):
-            contents = cls._small_text(root, relative)
-            match = re.search(r"(?im)^\s*ProjectVersion\s*=\s*([^\r\n;]+)", contents)
-            version = cls._clean_version(match.group(1).strip().strip('"')) if match else ""
-            if version:
-                return version, "project"
         return "", ""
 
     @staticmethod
-    def _pe_product_version(path: Path) -> str:
-        """Read the fixed PRODUCTVERSION in a PE VERSIONINFO resource."""
+    def _pak_config(path: Path, wanted: str) -> Optional[bytes]:
+        """Read one INI from a modern, unencrypted PAK; never unpack game assets.
+
+        PAK v10/v11: footer -> directory index -> encoded entry -> file header.
+        None means unsupported/invalid; b"" means the file is absent.
+        Limits apply to both indexes and decompressed configuration data.
+        """
+        class Cursor:
+            def __init__(self, data: bytes, offset: int = 0) -> None:
+                self.data, self.offset = data, offset
+
+            def take(self, size: int) -> bytes:
+                if size < 0 or self.offset < 0 or self.offset + size > len(self.data):
+                    raise ValueError("Truncated PAK index")
+                result = self.data[self.offset:self.offset + size]
+                self.offset += size
+                return result
+
+            def number(self, fmt: str) -> int:
+                return struct.unpack("<" + fmt, self.take(struct.calcsize("<" + fmt)))[0]
+
+            def string(self) -> str:
+                length = self.number("i")
+                if not -1024 <= length <= 1024:
+                    raise ValueError("Invalid PAK string")
+                raw = self.take(abs(length) * (2 if length < 0 else 1))
+                value = raw.decode("utf-16le" if length < 0 else "utf-8")
+                if value and not value.endswith("\0"):
+                    raise ValueError("Unterminated PAK string")
+                return value.rstrip("\0")
+
         try:
             with path.open("rb") as stream:
-                size = stream.seek(0, os.SEEK_END)
-                if size < 512 or size > 256 * 1024 * 1024:
-                    return ""
+                file_size = stream.seek(0, os.SEEK_END)
+                footer_start = file_size - 221
 
-                def read_at(offset: int, count: int) -> bytes:
-                    if offset < 0 or count < 0 or count > 64 * 1024 or offset + count > size:
-                        return b""
+                def read_at(offset: int, size: int) -> bytes:
+                    if offset < 0 or size < 0 or size > 8 * 1024 * 1024 or offset + size > file_size:
+                        raise ValueError("Invalid PAK bounds")
                     stream.seek(offset)
-                    return stream.read(count)
+                    data = stream.read(size)
+                    if len(data) != size:
+                        raise ValueError("Truncated PAK")
+                    return data
 
-                dos = read_at(0, 64)
-                if dos[:2] != b"MZ":
-                    return ""
-                pe = struct.unpack_from("<I", dos, 0x3c)[0]
-                header = read_at(pe, 24)
-                if len(header) != 24 or header[:4] != b"PE\0\0":
-                    return ""
-                sections = struct.unpack_from("<H", header, 6)[0]
-                optional_size = struct.unpack_from("<H", header, 20)[0]
-                if not 1 <= sections <= 96 or not 96 <= optional_size <= 1024:
-                    return ""
-                optional = read_at(pe + 24, optional_size)
-                magic = struct.unpack_from("<H", optional, 0)[0]
-                directory_offset = 96 if magic == 0x10b else 112 if magic == 0x20b else -1
-                if directory_offset < 0 or directory_offset + 24 > len(optional):
-                    return ""
-                resource_rva, resource_size = struct.unpack_from("<II", optional, directory_offset + 16)
-                if not resource_rva or not 0 < resource_size <= 16 * 1024 * 1024:
-                    return ""
-                table = read_at(pe + 24 + optional_size, sections * 40)
-                if len(table) != sections * 40:
-                    return ""
+                footer = read_at(footer_start, 221)
+                magic, version, index_offset, index_size = struct.unpack_from("<IIQQ", footer, 17)
+                if magic != 0x5a6f12e1 or version not in (10, 11) or footer[16] != 0:
+                    return None
+                if index_offset + index_size > footer_start:
+                    return None
+                index_bytes = read_at(index_offset, index_size)
+                if hashlib.sha1(index_bytes).digest() != footer[41:61]:
+                    return None
+                index = Cursor(index_bytes)
+                mount = index.string()
+                count = index.number("I")
+                if count > 200000:
+                    return None
+                index.take(8)  # path-hash seed
+                if index.number("I"):
+                    index.take(36)  # path-hash index descriptor; exact names are used below
+                if not index.number("I"):
+                    return None
+                directory_offset = index.number("Q")
+                directory_size = index.number("Q")
+                directory_hash = index.take(20)
+                if directory_offset + directory_size > footer_start:
+                    return None
+                encoded = index.take(index.number("I"))
+                directory_bytes = read_at(directory_offset, directory_size)
+                if hashlib.sha1(directory_bytes).digest() != directory_hash:
+                    return None
+                directory = Cursor(directory_bytes)
+                directory_count = directory.number("I")
+                if directory_count > 50000:
+                    return None
+                location = None
+                seen = 0
+                for _ in range(directory_count):
+                    folder = directory.string()
+                    files = directory.number("I")
+                    seen += files
+                    if seen > 200000:
+                        return None
+                    for _ in range(files):
+                        name, entry_location = directory.string(), directory.number("i")
+                        full_path = (mount.rstrip("/") + "/" + folder.lstrip("/") + name).replace("\\", "/")
+                        while full_path.startswith("../"):
+                            full_path = full_path[3:]
+                        if full_path.lower() == wanted.lower():
+                            if location is not None:
+                                return None
+                            location = entry_location
+                if location is None or location == -2147483648:
+                    return b""
+                if location < 0:  # Unencoded records are intentionally unsupported.
+                    return None
+                entry = Cursor(encoded, location)
+                flags = entry.number("I")
+                if flags & (1 << 22):  # encrypted payload
+                    return None
+                if flags & 0x3f == 0x3f:
+                    entry.take(4)
+                offset = entry.number("I" if flags & (1 << 31) else "Q")
+                expected_size = entry.number("I" if flags & (1 << 30) else "Q")
+                compression = (flags >> 23) & 0x3f
+                expected_compressed = entry.number("I" if flags & (1 << 29) else "Q") if compression else expected_size
+                if not 0 < expected_size <= 64 * 1024 or not 0 < expected_compressed <= 128 * 1024:
+                    return None
+                # The on-disk entry header is small even when the archive is huge.
+                header = Cursor(read_at(offset, min(1024, file_size - offset)))
+                header.take(8)
+                compressed, uncompressed, method = header.number("Q"), header.number("Q"), header.number("I")
+                if (compressed, uncompressed, method) != (expected_compressed, expected_size, compression):
+                    return None
+                header.take(20)  # content hash
+                blocks = []
+                if method:
+                    block_count = header.number("I")
+                    if not 1 <= block_count <= 32:
+                        return None
+                    blocks = [(header.number("Q"), header.number("Q")) for _ in range(block_count)]
+                if header.number("B") != 0:  # encrypted or deleted
+                    return None
+                header.take(4)
+                if offset + header.offset + compressed > index_offset:
+                    return None
+                if not method:
+                    return read_at(offset + header.offset, uncompressed)
+                if not 1 <= method <= 5:
+                    return None
+                algorithm = footer[61 + (method - 1) * 32:61 + method * 32].rstrip(b"\0").lower()
+                if algorithm not in (b"zlib", b"gzip") or zipfile.zlib is None:
+                    return None
+                output = bytearray()
+                previous_end = header.offset
+                for block_start, block_end in blocks:
+                    if block_start != previous_end or not block_start < block_end <= header.offset + compressed:
+                        return None
+                    decoder = zipfile.zlib.decompressobj(31 if algorithm == b"gzip" else 15)
+                    output.extend(decoder.decompress(read_at(offset + block_start, block_end - block_start),
+                                                     uncompressed - len(output) + 1))
+                    if len(output) > uncompressed or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+                        return None
+                    previous_end = block_end
+                return bytes(output) if len(output) == uncompressed and previous_end == header.offset + compressed else None
+        except (OSError, ValueError, struct.error, AttributeError):
+            return None
+        except Exception:
+            # A malformed compressed block must never break Decky's backend.
+            return None
 
-                def file_offset(rva: int) -> int:
-                    for index in range(sections):
-                        _, address, raw_size, raw_offset = struct.unpack_from("<IIII", table, index * 40 + 8)
-                        if address <= rva < address + raw_size:
-                            return raw_offset + rva - address
-                    return -1
-
-                base = file_offset(resource_rva)
-                if base < 0:
-                    return ""
-
-                def resource_at(relative: int, count: int) -> bytes:
-                    if relative < 0 or relative + count > resource_size:
-                        return b""
-                    return read_at(base + relative, count)
-
-                directory = 0
-                for depth in range(3):
-                    descriptor = resource_at(directory, 16)
-                    if len(descriptor) != 16:
+    @classmethod
+    def _palworld_version(cls, root: Path) -> str:
+        # PalworldRandomizer reads this same project field from Pal-Windows.pak:
+        # https://github.com/ComplexRobot/PalworldRandomizer/blob/main/UAssetData.cs
+        folder = root / "Pal/Content/Paks"
+        configs: List[bytes] = []
+        packs = []
+        if folder.is_dir() and cls._inside(root, folder):
+            try:
+                for path in folder.iterdir():
+                    match = re.fullmatch(r"Pal-Windows(?:_(\d+)_P)?\.pak", path.name, re.IGNORECASE)
+                    if match and cls._inside(root, path) and path.is_file():
+                        packs.append((int(match.group(1)) if match.group(1) else -1, path))
+                    if len(packs) > 16:
                         return ""
-                    named, numbered = struct.unpack_from("<HH", descriptor, 12)
-                    if named + numbered > 256:
-                        return ""
-                    selected = None
-                    for index in range(named + numbered):
-                        entry = resource_at(directory + 16 + index * 8, 8)
-                        if len(entry) != 8:
-                            return ""
-                        name, target = struct.unpack("<II", entry)
-                        if depth == 0 and name != 16:
-                            continue
-                        selected = target
-                        break
-                    if selected is None:
-                        return ""
-                    if depth < 2:
-                        if not selected & 0x80000000:
-                            return ""
-                        directory = selected & 0x7fffffff
-                    else:
-                        if selected & 0x80000000:
-                            return ""
-                        data_entry = resource_at(selected, 16)
-                        if len(data_entry) != 16:
-                            return ""
-                        data_rva, data_size = struct.unpack_from("<II", data_entry)
-                        if not 0 < data_size <= 64 * 1024:
-                            return ""
-                        data = read_at(file_offset(data_rva), data_size)
-                        key = "VS_VERSION_INFO".encode("utf-16le") + b"\0\0"
-                        if len(data) < 6 + len(key) + 24 or data[6:6 + len(key)] != key:
-                            return ""
-                        value_at = (6 + len(key) + 3) & ~3
-                        if struct.unpack_from("<I", data, value_at)[0] != 0xfeef04bd:
-                            return ""
-                        high, low = struct.unpack_from("<II", data, value_at + 16)
-                        parts = [high >> 16, high & 0xffff, low >> 16, low & 0xffff]
-                        if not any(parts):
-                            return ""
-                        while len(parts) > 2 and parts[-1] == 0:
-                            parts.pop()
-                        return ".".join(str(part) for part in parts)
-        except (OSError, ValueError, struct.error):
-            pass
+            except OSError:
+                return ""
+            for _, path in sorted(packs, reverse=True):
+                content = cls._pak_config(path, "Pal/Config/DefaultGame.ini")
+                if content is None:
+                    return ""  # Don't substitute an older base config for an unreadable patch.
+                if content:
+                    configs.append(content)
+                    break
+        if not configs and not packs:
+            loose = cls._small_text(root, "Pal/Config/DefaultGame.ini")
+            if loose:
+                configs.append(loose.encode("utf-8"))
+        for content in configs:
+            try:
+                text = content.decode("utf-16") if content.startswith((b"\xff\xfe", b"\xfe\xff")) else content.decode("utf-8-sig", errors="replace")
+            except UnicodeError:
+                return ""
+            section = re.search(r"(?ims)^\s*\[/Script/EngineSettings\.GeneralProjectSettings\]\s*\r?\n(.*?)(?=^\s*\[|\Z)", text)
+            match = re.search(r'(?im)^\s*ProjectVersion\s*=\s*"?([^"\r\n;]+)', section.group(1)) if section else None
+            version = cls._clean_version(match.group(1).strip()) if match else ""
+            if version:
+                return version
         return ""
 
     @classmethod
-    def scan(cls, root: Path, title: str) -> Tuple[str, str]:
-        version, source = cls._declared_version(root)
-        if version:
-            return version, source
-        try:
-            children = []
-            for child in root.iterdir():
-                children.append(child)
-                if len(children) >= 100:
-                    break
-        except OSError:
-            return "", ""
-        for child in children[:16]:
-            if child.is_dir() and cls._inside(root, child) and re.search(r"[a-z0-9]", child.name, re.IGNORECASE):
-                # Packaged Unreal projects commonly have Project/Config beside the launcher.
-                contents = cls._small_text(child, "Config/DefaultGame.ini")
-                match = re.search(r"(?im)^\s*ProjectVersion\s*=\s*([^\r\n;]+)", contents)
-                nested = cls._clean_version(match.group(1).strip().strip('"')) if match else ""
-                if nested:
-                    return nested, "project"
-        executables = [path for path in children if path.suffix.lower() == ".exe" and path.is_file()]
-        for child in children[:16]:
-            folder = child / "Binaries" / "Win64"
-            if child.is_dir() and cls._inside(root, folder) and folder.is_dir():
-                try:
-                    executables.extend(path for path in folder.iterdir() if path.name.lower().endswith("-win64-shipping.exe"))
-                except OSError:
-                    pass
-        ignored = ("unitycrashhandler", "crashreport", "ue4prereq", "vc_redist", "redist", "unins", "setup")
-        executables = [path for path in executables[:32] if cls._inside(root, path)
-                       and not any(path.stem.lower().startswith(word) for word in ignored)
-                       and not path.stem.lower().endswith("launcher")]
-        title_key = re.sub(r"[^a-z0-9]", "", title.lower())
-        root_key = re.sub(r"[^a-z0-9]", "", root.name.lower())
-        candidates = []
-        for path in executables:
-            stem = path.stem.lower()
-            if stem.endswith("-win64-shipping"):
-                stem = stem[:-len("-win64-shipping")]
-            stem = re.sub(r"[^a-z0-9]", "", stem)
-            if len(stem) >= 5 and any(key and (key in stem or stem in key) for key in (title_key, root_key)):
-                candidates.append(path)
-        if not candidates and len(executables) == 1:
-            candidates = executables
-        for path in candidates[:3]:
-            version = cls._pe_product_version(path)
-            if version:
-                return version, "file"
-        return "", ""
+    def scan(cls, root: Path, title: str, app_id: str = "") -> Tuple[str, str]:
+        if app_id == "1623730":
+            version = cls._palworld_version(root)
+            return (version, "game") if version else ("", "")
+        # Generic executable and Unreal project versions may identify the engine.
+        # Only explicit game version files are eligible for the generic path.
+        return cls._declared_version(root)
 
 
 class Plugin:
@@ -2417,7 +2458,7 @@ class Plugin:
                     if isinstance(app_id, str) and re.fullmatch(r"[1-9]\d{0,9}", app_id)
                     and isinstance(entry, dict) and re.fullmatch(r"[1-9]\d{0,19}", str(entry.get("build", "")))
                     and isinstance(entry.get("version"), str) and len(entry["version"]) <= 40
-                    and entry.get("source") in ("", "game", "project", "file")}
+                    and entry.get("source") in ("", "game")}
 
         self._installed_version_cache = await self._run_blocking(read)
 
@@ -2512,7 +2553,7 @@ class Plugin:
                         common = library / "steamapps" / "common"
                         game_dir = common / installed.group(1)
                         if InstalledGameVersionScanner._inside(common, game_dir) and game_dir.is_dir():
-                            version, source = InstalledGameVersionScanner.scan(game_dir, title.group(1) if title else installed.group(1))
+                            version, source = InstalledGameVersionScanner.scan(game_dir, title.group(1) if title else installed.group(1), app_id)
                             updates[app_id] = {"build": build.group(1), "version": version, "source": source}
                     if version:
                         versions[app_id] = {"version": version, "source": source}

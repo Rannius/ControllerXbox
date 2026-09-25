@@ -1469,17 +1469,17 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             if reloaded._installed_version_save_task:
                 await reloaded._installed_version_save_task
 
-    async def test_unreal_project_version_and_unrelated_executable_are_distinguished(self):
+    async def test_unverified_unreal_project_version_is_not_a_game_version(self):
         scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
         game = Path(self.directory.name) / "Game"
         (game / "Config").mkdir(parents=True)
         (game / "Config" / "DefaultGame.ini").write_text("[GeneralProjectSettings]\nProjectVersion=3.4.5\n", encoding="utf-8")
-        self.assertEqual(scanner.scan(game, "Game"), ("3.4.5", "project"))
+        self.assertEqual(scanner.scan(game, "Game"), ("", ""))
         (game / "Config" / "DefaultGame.ini").unlink()
         (game / "UnityCrashHandler64.exe").write_bytes(b"MZ" + b"\0" * 510)
         self.assertEqual(scanner.scan(game, "Game"), ("", ""))
 
-    async def test_proton_executable_product_version_is_labeled_as_file_version(self):
+    async def test_proton_executable_product_version_is_not_a_game_version(self):
         scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
         game = Path(self.directory.name) / "Example Game"
         game.mkdir()
@@ -1503,7 +1503,61 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         struct.pack_into("<I", image, fixed, 0xfeef04bd)
         struct.pack_into("<II", image, fixed + 16, (2 << 16) | 4, 7 << 16)
         (game / "ExampleGame.exe").write_bytes(image)
-        self.assertEqual(scanner.scan(game, "Example Game"), ("2.4.7", "file"))
+        self.assertEqual(scanner.scan(game, "Example Game"), ("", ""))
+
+    @staticmethod
+    def palworld_config_pak(version, compressed=False):
+        # A minimal PAK v11 with a full directory index and a real config entry.
+        # The entry is indexed by its exact path, not located by searching bytes.
+        import hashlib
+        import zlib
+        def string(value):
+            raw = value.encode("utf-8") + b"\0"
+            return struct.pack("<i", len(raw)) + raw
+
+        content = ("[/Script/EngineSettings.GeneralProjectSettings]\nProjectVersion=" + version + "\n").encode("utf-8")
+        payload = zlib.compress(content) if compressed else content
+        header = struct.pack("<QQQI", 0, len(payload), len(content), int(compressed)) + hashlib.sha1(content).digest()
+        if compressed:
+            header += struct.pack("<IQQ", 1, 73, 73 + len(payload))
+        header += struct.pack("<BI", 0, 65536 if compressed else 0)
+        body = header + payload
+        bits = (1 << 31) | (1 << 30)
+        if compressed:
+            bits |= (1 << 29) | (1 << 23) | (1 << 6) | 32
+        encoded = struct.pack("<III", bits, 0, len(content))
+        if compressed:
+            encoded += struct.pack("<I", len(payload))
+        directory = struct.pack("<I", 1) + string("Pal/Config/") + struct.pack("<I", 1) + string("DefaultGame.ini") + struct.pack("<i", 0)
+        index_prefix = string("../../../") + struct.pack("<IQII", 1, 0, 0, 1)
+        index_suffix = struct.pack("<I", len(encoded)) + encoded + struct.pack("<I", 0)
+        index_size = len(index_prefix) + 36 + len(index_suffix)
+        index = index_prefix + struct.pack("<QQ", len(body) + index_size, len(directory)) + hashlib.sha1(directory).digest() + index_suffix
+        footer = bytes(17) + struct.pack("<IIQQ", 0x5a6f12e1, 11, len(body), len(index)) + hashlib.sha1(index).digest()
+        footer += b"Zlib" + bytes(156)
+        return body + index + directory + footer
+
+    async def test_palworld_version_comes_from_packed_config_and_respects_patches(self):
+        scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
+        game = Path(self.directory.name) / "Palworld"
+        packs = game / "Pal/Content/Paks"
+        packs.mkdir(parents=True)
+        base = packs / "Pal-Windows.pak"
+        base.write_bytes(self.palworld_config_pak("v1.0.0.100427"))
+        self.assertEqual(scanner.scan(game, "Palworld", "1623730"), ("1.0.0.100427", "game"))
+        patch_file = packs / "Pal-Windows_1_P.pak"
+        patch_file.write_bytes(self.palworld_config_pak("v1.0.1.100619", compressed=True))
+        self.assertEqual(scanner.scan(game, "Palworld", "1623730"), ("1.0.1.100619", "game"))
+        bad_patch = bytearray(patch_file.read_bytes())
+        bad_patch[-221 + 16] = 1  # Encrypted index: never silently use the older base version.
+        patch_file.write_bytes(bad_patch)
+        self.assertEqual(scanner.scan(game, "Palworld", "1623730"), ("", ""))
+
+    async def test_installed_version_cache_discards_old_engine_versions(self):
+        self.plugin._installed_version_cache_path.write_text(json.dumps({"schema_version": 1, "entries": {
+            "1623730": {"build": "123", "version": "5.1.1", "source": "file"}}}), encoding="utf-8")
+        await self.plugin._load_installed_version_cache()
+        self.assertEqual(self.plugin._installed_version_cache, {})
 
     def prepare_boosteroid_watch(self):
         self.plugin._gfn_app_ids = {"1"}

@@ -2335,7 +2335,7 @@ function Content() {
     /></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Telepített játékok verziója"
-      description="A könyvtári csempe alatt a helyi játék-, projekt-, fájlverzió vagy Steam-build látszik."
+      description="A helyben azonosítható játékverziót mutatja; ha nincs ilyen adat, a Steam-build marad."
       checked={visibility.show_installed_builds}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_installed_builds: checked })}

@@ -210,3 +210,9 @@ Az AKS-keresés a pontos Steam-cím után az Enhanced és Deluxe névváltozatok
 ## 1.0.113: helyi játékverzió SteamOS-on
 
 A telepített játékok kapcsolható könyvtári sora először a játék saját kis méretű verziófájljait és az Unreal `ProjectVersion` mezőjét keresi. Ezeket „Játékverzió”, illetve „Projektverzió” felirattal különbözteti meg. Protonos játékoknál a megfelelő futtatható fájl beágyazott verzióját külön „Fájlverzió” jelöléssel mutatja; ha nincs egyértelmű találat, a Steam BuildID marad. A vizsgálat a Deck helyi fájljain történik, hálózati kérés nélkül, és az eredmény a BuildID megváltozásáig gyorsítótárban marad. Nem minden játék tárolja a menüben látható verziót kiolvasható formában. Csak a Decky plugint kell frissíteni.
+
+## 1.0.114: játékverzió helyett ne motorverzió jelenjen meg
+
+A plugin többé nem helyettesíti a játékverziót általános EXE- vagy Unreal-projektverzióval. Ezek például a Palworldnél a motor 5.1.1-es számát adhatják vissza. A korábbi verziócache automatikusan érvénytelen lesz.
+
+A Palworld (Steam AppID 1623730) külön kiolvasót kapott: a telepített `Pal-Windows.pak` csomag fájljegyzékéből megkeresi a `Pal/Config/DefaultGame.ini` fájlt, és annak `/Script/EngineSettings.GeneralProjectSettings` szakaszából olvassa a `ProjectVersion` értékét. Ezt a forrást használja a [PalworldRandomizer](https://github.com/ComplexRobot/PalworldRandomizer/blob/main/UAssetData.cs) is. A kiolvasó PAK 10/11, titkosítatlan index és tömörítetlen/Zlib/Gzip konfiguráció esetén működik; az indexeket és az egyetlen kis konfigurációt olvassa, a teljes játékot nem csomagolja ki. Nem támogatott formátumnál vagy bizonytalan eredménynél a Steam BuildID marad. Más játékoknál csak a saját verziófájlok maradnak használatban. Csak a Decky plugint kell frissíteni.
