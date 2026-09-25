@@ -53,12 +53,13 @@ test('DLC card uses its own wrapper when the Steam price is next to the image li
 });
 
 test('native Store cards share one visible-only timer, hide skipped prices and clean up',()=>{
- const exports={},effects=[],refs=[],calls=[],observers=[];let tick,started=0,stopped=0,cleared=0;
+ const exports={},effects=[],refs=[],calls=[],observers=[];let tick,started=0,stopped=0,cleared=0,listener;
  class Observer {constructor(fn){this.fn=fn;observers.push(this);}observe(){}disconnect(){this.done=true;}}
  const results=new Map([['10',{success:true,offers:[{price:4.37,merchant:'Eneba'}]}],['20',{success:true,skipped:'unreleased'}]]);
  const context={exports,setInterval:fn=>{tick=fn;started++;return 1;},clearInterval:()=>stopped++,
   require:name=>name==='react'?{useRef:()=>{const r={current:null};refs.push(r);return r;},useEffect:fn=>effects.push(fn)}:
-   {clearNativePriceView:()=>cleared++,nativePriceUrl:'native',updatePriceView:(url,send,ids)=>calls.push(ids),visiblePrice:id=>results.get(id)},
+   {clearNativePriceView:()=>cleared++,nativePriceUrl:'native',updatePriceView:(url,send,ids)=>calls.push(ids),visiblePrice:id=>results.get(id),
+    subscribePriceResults:fn=>{listener=fn;return ()=>{listener=undefined;}}},
   React:{createElement:()=>({})}};
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/NativeTilePrice.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.React}}).outputText,context);
  const nodes=[];
@@ -72,6 +73,8 @@ test('native Store cards share one visible-only timer, hide skipped prices and c
  observers[0].fn([{isIntersecting:true}]);tick();
  assert.deepEqual(Array.from(calls.at(-1)),['10']);assert.equal(nodes[0].textContent,'AKS: 4.37 € ∙ Eneba');
  observers[1].fn([{isIntersecting:true}]);tick();assert.equal(nodes[1].style.visibility,'hidden');
+ results.set('10',{success:true,offers:[{price:3.25,merchant:'Kinguin'}]});listener();
+ assert.equal(nodes[0].textContent,'AKS: 3.25 € ∙ Kinguin');
  observers[0].fn([{isIntersecting:false}]);tick();assert.deepEqual(Array.from(calls.at(-1)),['20']);
- cleanup.forEach(fn=>fn());assert.equal(stopped,1);assert.equal(cleared,1);assert.ok(observers.every(o=>o.done));
+ cleanup.forEach(fn=>fn());assert.equal(stopped,1);assert.equal(cleared,1);assert.ok(observers.every(o=>o.done));assert.equal(listener,undefined);
 });

@@ -12,7 +12,9 @@ const getPreferences = callable<[], Preferences>("get_price_preferences");
 const setPreferences = callable<[boolean, boolean, string[], boolean], Preferences>("set_price_preferences");
 const setProvider = callable<[string, string | null], Preferences>("set_price_provider");
 const getMerchants = callable<[boolean], { success: boolean; merchants: string[]; error?: string }>("get_price_merchants");
-const getCachedPrice = callable<[string], PriceResult>("get_cached_allkeyshop_price");
+type PriceBatch = { success: boolean; prices: Record<string, PriceResult> };
+const getCachedPrices = callable<[string[]], PriceBatch>("get_cached_allkeyshop_prices");
+const getRemotePricePreviews = callable<[string[]], PriceBatch>("get_remote_price_previews");
 const getPrice = callable<[string], PriceResult>("get_allkeyshop_price");
 
 async function timed<T>(request: Promise<T>): Promise<T> {
@@ -53,7 +55,7 @@ export function PriceCacheStatus() {
   return <>
     <PanelSectionRow><div role="status" style={{ fontSize: "12px", lineHeight: 1.5 }}>
       {stats ? <>
-        <div>{stats.price_provider === "gg" ? "GG.deals" : "AKS"} árgyorsítótár: {stats.price_fresh_entries}/{stats.price_entries} friss · 24 óra · lemezre mentve</div>
+        <div>{stats.price_provider === "gg" ? "GG.deals" : "AKS"} árgyorsítótár: {stats.price_fresh_entries}/{stats.price_entries} friss · 24 óra (üres AKS-adat: 1 óra) · lemezre mentve</div>
         {stats.price_connection === "server" && <div>Saját szerver · sorban: {stats.price_server_queue} · helyi ármentés aktív</div>}
         <div>Steam-adatok: {stats.price_metadata_entries} · AKS-hivatkozások: {stats.price_match_entries}</div>
         <div>Kívánságlista: {stats.price_wishlist_ready}/{stats.price_wishlist_total} ellenőrizve
@@ -413,6 +415,7 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
 
 const prices = new Map<string, { value: PriceResult; expires: number }>();
 let fetching = false;
+let hydrating = false;
 let serviceFailure: { value: PriceResult; expires: number } | undefined;
 let revision = 0;
 let currentApp = "";
@@ -420,12 +423,20 @@ let tileUrl = "";
 let tileIds: string[] = [];
 let visibleApps = new Set<string>();
 const refreshQueue = new Set<string>();
+const cacheChecked = new Set<string>();
+const priceListeners = new Set<() => void>();
+export function subscribePriceResults(listener: () => void): () => void {
+  priceListeners.add(listener);
+  return () => priceListeners.delete(listener);
+}
+const notifyPriceResults = () => { for (const listener of priceListeners) listener(); };
+const priceTtlMs = (value: PriceResult) => value.history_unavailable ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
 export function visiblePrice(id: string): PriceResult | undefined {
   const cached = prices.get(id);
   if (cached) return cached.value;
   return serviceFailure && serviceFailure.expires > Date.now() ? serviceFailure.value : undefined;
 }
-export function resetPriceView(): void { prices.clear(); serviceFailure = undefined; revision++; currentApp = ""; tileIds = []; tileUrl = ""; visibleApps.clear(); refreshQueue.clear(); }
+export function resetPriceView(): void { prices.clear(); serviceFailure = undefined; revision++; fetching = false; hydrating = false; currentApp = ""; tileIds = []; tileUrl = ""; visibleApps.clear(); refreshQueue.clear(); cacheChecked.clear(); }
 export function updatePriceView(url: string, send: (script: string) => Promise<unknown>, visibleTileIds: string[] = []): void {
   let id = "";
   try { const parsed = new URL(url); if (parsed.hostname === "store.steampowered.com") id = parsed.pathname.match(/^\/app\/(\d+)/)?.[1] ?? ""; } catch { /* no game */ }
@@ -450,6 +461,43 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   };
   renderTiles();
   void send(buildPricePanelScript(id, visiblePrice(id))).catch(() => {});
+  const batch = [...new Set([...(id ? [id] : []), ...tileIds])].filter(app => !cacheChecked.has(app)).slice(0, 24);
+  if (batch.length && !hydrating) {
+    for (const app of batch) cacheChecked.add(app);
+    hydrating = true;
+    const batchRevision = revision, batchUrl = tileUrl;
+    const applyBatch = (values: Record<string, PriceResult>) => {
+      if (batchRevision !== revision) return;
+      for (const app of batch) {
+        const value = values?.[app];
+        if (!value?.success || !value.checked_at) continue;
+        if (!prices.has(app) && prices.size >= 500) prices.delete(prices.keys().next().value!);
+        prices.set(app, { value, expires: value.checked_at * 1000 + priceTtlMs(value) });
+        if (!value.stale && prices.get(app)!.expires > Date.now()) refreshQueue.delete(app);
+      }
+      if (batchUrl === tileUrl) {
+        renderTiles();
+        if (currentApp) void send(buildPricePanelScript(currentApp, visiblePrice(currentApp))).catch(() => {});
+        notifyPriceResults();
+      }
+    };
+    void (async () => {
+      const local = await timed(getCachedPrices(batch));
+      applyBatch(local.prices);
+      if (batchRevision !== revision) return;
+      const absent = batch.filter(app => !prices.has(app) || prices.get(app)!.value.stale);
+      if (absent.length) {
+        const remote = await timed(getRemotePricePreviews(absent));
+        applyBatch(remote.prices);
+      }
+    })().catch(() => {}).finally(() => {
+      if (batchRevision !== revision) return;
+      hydrating = false;
+      if (batchUrl === tileUrl) updatePriceView(tileUrl, send, tileIds);
+    });
+    return;
+  }
+  if (hydrating) return;
   // Expiry alone never refreshes a successful visible price. Failed requests retain
   // the existing retry countdown; stale successful prices wait for a new appearance.
   const needsRequest = (app: string) => refreshQueue.has(app) ||
@@ -461,14 +509,6 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   fetching = true;
   const requestRevision = revision;
   void (async () => {
-    const cached = await timed(getCachedPrice(requestId));
-    if (requestRevision !== revision) return { success: true, disabled: true } as PriceResult;
-    if (cached.disabled) return cached;
-    if (cached.success && cached.checked_at) {
-      prices.set(requestId, { value: cached, expires: cached.checked_at * 1000 + (24 * 60 * 60 * 1000) });
-      if (currentApp === requestId) void send(buildPricePanelScript(requestId, cached)).catch(() => {});
-      if (!cached.stale) return cached;
-    }
     if (!visibleApps.has(requestId)) return { success: true, missing: true } as PriceResult;
     if (serviceFailure && serviceFailure.expires > Date.now())
       return { ...serviceFailure.value, retry_after: (serviceFailure.expires - Date.now()) / 1000 };
@@ -480,6 +520,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
       serviceFailure = { value: { ...value, retry_at: expires }, expires };
       if (currentApp) void send(buildPricePanelScript(currentApp, visiblePrice(currentApp) ?? value)).catch(() => {});
       if (tileIds.length) renderTiles();
+      notifyPriceResults();
       return;
     }
     serviceFailure = undefined;
@@ -489,12 +530,13 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     }
     if (prices.size >= 500) prices.delete(prices.keys().next().value!);
     const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-    const expires = Date.now() + (value.pending ? Math.max(1, value.retry_after ?? 3) * 1000 : value.success && !value.disabled ? Math.max(0, (24 * 60 * 60 * 1000) - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
+    const expires = Date.now() + (value.pending ? Math.max(1, value.retry_after ?? 3) * 1000 : value.success && !value.disabled ? Math.max(0, priceTtlMs(value) - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
     if (!value.success) value = { ...value, retry_at: expires };
     prices.set(requestId, { value, expires });
     if (currentApp === requestId) void send(buildPricePanelScript(requestId, value)).catch(() => {});
     if (tileIds.length) renderTiles();
-  }).finally(() => { fetching = false; });
+    notifyPriceResults();
+  }).finally(() => { if (requestRevision === revision) fetching = false; });
 }
 
 export const nativePriceUrl = 'https://store.steampowered.com/?dpb_native=1';

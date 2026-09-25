@@ -1,12 +1,14 @@
 import { useEffect, useRef } from "react";
-import { clearNativePriceView, nativePriceUrl, PriceResult, updatePriceView, visiblePrice } from "./AllKeyShop";
+import { clearNativePriceView, nativePriceUrl, PriceResult, subscribePriceResults, updatePriceView, visiblePrice } from "./AllKeyShop";
 
 // One shared queue/timer for native Store cards, never one network loop per card.
 const cards = new Map<HTMLSpanElement, { id: string; intersects: boolean }>();
 let timer: ReturnType<typeof setInterval> | undefined;
+let unsubscribe: (() => void) | undefined;
 
 export function stopNativePriceTiles(): void {
   clearInterval(timer); timer = undefined;
+  unsubscribe?.(); unsubscribe = undefined;
   for (const node of cards.keys()) { node.textContent = ""; node.style.visibility = "hidden"; }
   cards.clear(); clearNativePriceView();
 }
@@ -29,14 +31,17 @@ export function tilePriceLabel(value?: PriceResult): string {
     : value.history_unavailable ? "AKS: áradat még nincs" : "AKS: nincs ajánlat";
 }
 
-function tick(): void {
-  const visible = Array.from(cards).filter(([node, card]) => {
+function visibleCards() {
+  return Array.from(cards).filter(([node, card]) => {
     const rect = node.getBoundingClientRect();
     return node.isConnected && card.intersects && rect.width > 0 && rect.height > 0
       && rect.bottom > 0 && rect.top < node.ownerDocument.defaultView!.innerHeight
       && rect.right > 0 && rect.left < node.ownerDocument.defaultView!.innerWidth;
   });
-  updatePriceView(nativePriceUrl, async () => {}, visible.map(([, card]) => card.id));
+}
+
+function renderNativePrices(): void {
+  const visible = visibleCards();
   for (const [node, card] of visible) {
     const value = visiblePrice(card.id);
     const text = tilePriceLabel(value);
@@ -44,6 +49,12 @@ function tick(): void {
     node.style.visibility = text ? "visible" : "hidden";
     node.title = text + (value?.offers?.[0]?.source_updated_at ? " · AKS-adat: " + value.offers[0].source_updated_at : "");
   }
+}
+
+function tick(): void {
+  const visible = visibleCards();
+  updatePriceView(nativePriceUrl, async () => {}, visible.map(([, card]) => card.id));
+  renderNativePrices();
 }
 
 export function NativeTilePrice({ appId, enabled }: { appId: string; enabled: boolean }) {
@@ -54,9 +65,9 @@ export function NativeTilePrice({ appId, enabled }: { appId: string; enabled: bo
     const Observer = node.ownerDocument.defaultView?.IntersectionObserver;
     const card = { id: appId, intersects: !Observer };
     cards.set(node, card);
-    const observer = Observer ? new Observer(entries => { card.intersects = entries.some(entry => entry.isIntersecting); }) : undefined;
+    const observer = Observer ? new Observer(entries => { card.intersects = entries.some(entry => entry.isIntersecting); tick(); }) : undefined;
     observer?.observe(node);
-    if (!timer) { tick(); timer = setInterval(tick, 1500); }
+    if (!timer) { unsubscribe = subscribePriceResults(renderNativePrices); tick(); timer = setInterval(tick, 1500); }
     return () => {
       observer?.disconnect(); cards.delete(node);
       if (!cards.size) stopNativePriceTiles();

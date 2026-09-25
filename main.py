@@ -614,6 +614,68 @@ class Plugin:
             return {"success": True, "missing": True}
         return {**self._active_price_result(entry), "stale": time.time() - entry["checked_at"] >= self._price_entry_ttl(entry)}
 
+    async def get_cached_allkeyshop_prices(self, app_ids: Any) -> Dict[str, Any]:
+        # One Decky RPC for the visible cards. This path is strictly offline.
+        if (not isinstance(app_ids, list) or len(app_ids) > 80 or any(
+                not isinstance(key, str) or not key.isascii() or not key.isdigit()
+                or not 0 < int(key) < 10000000000 for key in app_ids)):
+            return {"success": False, "prices": {}}
+        prices = {}
+        if self._price_preferences["enabled"]:
+            for app_id in dict.fromkeys(app_ids):
+                entry = self._effective_price_entry(app_id)
+                if entry and "error" not in entry:
+                    prices[app_id] = {**self._active_price_result(entry),
+                        "stale": time.time() - entry["checked_at"] >= self._price_entry_ttl(entry)}
+        return {"success": True, "prices": prices}
+
+    async def get_remote_price_previews(self, app_ids: Any) -> Dict[str, Any]:
+        # Explicitly separate from cache-only calls: this may perform one request
+        # to the user's own server, but never asks an upstream price provider.
+        if (not isinstance(app_ids, list) or len(app_ids) > 24 or any(
+                not isinstance(key, str) or not key.isascii() or not key.isdigit()
+                or not 0 < int(key) < 10000000000 for key in app_ids)):
+            return {"success": False, "prices": {}}
+        if self._price_connection["mode"] != "server" or not self._price_preferences["enabled"] or not app_ids:
+            return {"success": True, "prices": {}}
+        provider = self._price_preferences.get("provider", "aks")
+        epoch = self._price_epoch
+        try:
+            response = await self._run_blocking(self._price_server_request, self._price_connection["url"],
+                self._price_server_token, "/v1/cached-prices", {"provider": provider, "app_ids": list(dict.fromkeys(app_ids))}, 4)
+            if epoch != self._price_epoch or provider != self._price_preferences.get("provider", "aks"):
+                return {"success": True, "prices": {}}
+            entries = response.get("entries")
+            if response.get("provider") != provider or not isinstance(entries, dict) or len(entries) > len(app_ids):
+                raise ValueError("Invalid server price previews")
+            prices = {}
+            changed = False
+            for app_id, entry in entries.items():
+                if app_id not in app_ids or not isinstance(entry, dict):
+                    raise ValueError("Invalid server price preview")
+                entry_provider = "gg" if entry.get("provider") == "gg" else provider
+                if entry_provider != provider and not (provider == "aks" and entry_provider == "gg"
+                        and entry.get("fallback_from") == "aks"):
+                    continue
+                valid = self._valid_gg_entry(entry) if entry_provider == "gg" else self._valid_price_entry(entry)
+                if not valid or (entry.get("source") == "aks_history" and entry.get("history_version") != AKS_HISTORY_VERSION):
+                    continue
+                cache = self._gg_cache if entry_provider == "gg" else self._price_cache
+                if cache.get(app_id) != entry:
+                    if app_id not in cache and len(cache) >= 10000:
+                        cache.pop(next(iter(cache)))
+                    cache[app_id] = entry
+                    changed = True
+                prices[app_id] = {**self._active_price_result(entry),
+                    "stale": time.time() - entry["checked_at"] >= self._price_entry_ttl(entry)}
+            if changed:
+                self._schedule_price_save()
+            return {"success": True, "prices": prices}
+        except (OSError, ValueError, TypeError):
+            # Older servers and temporary connection failures fall back to the
+            # existing per-game lookup, without hiding local cached prices.
+            return {"success": False, "prices": {}}
+
     async def clear_price_cache(self) -> Dict[str, Any]:
         self._price_epoch += 1
         self._price_cache.clear()
@@ -762,8 +824,9 @@ class Plugin:
         self._price_wishlist_retry.clear()
         return await self.get_price_connection()
 
-    def _price_server_request(self, address: str, token: str, path: str, data: Any = None) -> Dict[str, Any]:
-        if path not in ("/v1/price", "/v1/status", "/v1/merchants"):
+    def _price_server_request(self, address: str, token: str, path: str, data: Any = None,
+                              timeout: int = 10) -> Dict[str, Any]:
+        if path not in ("/v1/price", "/v1/status", "/v1/merchants", "/v1/cached-prices"):
             raise ValueError("Invalid server endpoint")
         address = self._valid_price_server_url(address)
         class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -774,7 +837,7 @@ class Plugin:
         request = urllib.request.Request(address + path, data=json.dumps(data).encode("utf-8") if data is not None else None,
             headers={"Authorization": "Bearer " + token, "Content-Type": "application/json", "Accept": "application/json",
                      "User-Agent": "Deck Play Badges/1.0"})
-        with opener.open(request, timeout=10) as response:
+        with opener.open(request, timeout=timeout) as response:
             body = response.read(8000001)
         if len(body) > 8000000:
             raise ValueError("Oversized response")
@@ -1624,6 +1687,10 @@ class Plugin:
             else:
                 code, shared = "format", True
         cause = error.__cause__ or error
+        # One appdetails failure must not turn every other game's price into the
+        # same Steam error. Only an explicit Steam rate limit is shared.
+        if code == "steam":
+            shared = isinstance(cause, urllib.error.HTTPError) and cause.code == 429
         reason = getattr(cause, "reason", cause)
         network = ""
         if isinstance(reason, TimeoutError) or getattr(reason, "errno", None) in (110, 10060):

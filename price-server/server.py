@@ -212,6 +212,22 @@ class PriceBroker:
         return {**response, "pending": True, "queue": len(self.pending),
                 "retry_after": 1 if priority == 0 else min(30, max(3, ahead * 2))}
 
+    async def cached_prices(self, request):
+        # Read-only batch: no queueing or upstream HTTP, even for stale entries.
+        if not isinstance(request, dict) or set(request) != {"provider", "app_ids"}:
+            raise ValueError("Invalid request")
+        provider, app_ids = request["provider"], request["app_ids"]
+        if (provider not in ("aks", "gg") or not isinstance(app_ids, list) or len(app_ids) > 24
+                or any(not isinstance(key, str) or not key.isascii() or not key.isdigit()
+                       or not 0 < int(key) < 10000000000 for key in app_ids)):
+            raise ValueError("Invalid products")
+        entries = {}
+        for app_id in dict.fromkeys(app_ids):
+            entry = self.entry_copy(self.engine._effective_price_entry(app_id, provider))
+            if entry is not None:
+                entries[app_id] = entry
+        return {"provider": provider, "entries": entries}
+
     async def run(self):
         while not self.stopping:
             ready = [key for key in self.pending if self.work_cooldown(key[0]) <= time.time()]
@@ -392,7 +408,7 @@ class APIHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.authorized():
             return
-        if self.path not in ("/v1/price", "/v1/merchants"):
+        if self.path not in ("/v1/price", "/v1/merchants", "/v1/cached-prices"):
             self.reply(404, {"error": "Not found"})
             return
         length = self.headers.get("Content-Length", "")
@@ -408,7 +424,9 @@ class APIHandler(BaseHTTPRequestHandler):
         except (ValueError, OSError):
             self.reply(400, {"error": "Invalid JSON"})
             return
-        handler = self.server.broker.price if self.path == "/v1/price" else self.server.broker.merchants
+        handler = {"/v1/price": self.server.broker.price,
+                   "/v1/merchants": self.server.broker.merchants,
+                   "/v1/cached-prices": self.server.broker.cached_prices}[self.path]
         self.dispatch(handler(data))
 
     def dispatch(self, coroutine):

@@ -101,6 +101,16 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.request("/v1/price", {"padding": "x" * 3000}))[0], 413)
         self.assertEqual(self.broker.pending, {})
 
+    async def test_cached_price_batch_is_read_only(self):
+        self.engine._price_cache["10"] = self.entry()
+        with patch.object(self.engine, "_get_allkeyshop_price", side_effect=AssertionError("upstream")) as fetch:
+            status, result = await self.request("/v1/cached-prices", {"provider": "aks", "app_ids": ["10", "20"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(set(result["entries"]), {"10"})
+        self.assertEqual(self.broker.pending, {})
+        fetch.assert_not_called()
+        self.assertEqual((await self.request("/v1/cached-prices", {"provider": "aks", "app_ids": ["10"]}, token=False))[0], 401)
+
     async def test_two_clients_share_one_job_and_fresh_price_never_fetches_again(self):
         started, release = asyncio.Event(), asyncio.Event()
         self.release_events.append(release)

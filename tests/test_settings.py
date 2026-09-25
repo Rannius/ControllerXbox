@@ -852,6 +852,41 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(refreshed["not_found"])
         await self.plugin._price_save_task
 
+    async def test_visible_price_batch_is_offline_and_steam_failure_stays_per_game(self):
+        self.plugin._price_cache["10"] = {"title": "Free", "skipped": "free", "checked_at": time.time()}
+        with patch.object(self.plugin, "_open_request", side_effect=AssertionError("network")), \
+             patch.object(self.plugin, "_price_server_request", side_effect=AssertionError("network")):
+            cached = await self.plugin.get_cached_allkeyshop_prices(["10", "20"])
+        self.assertEqual(set(cached["prices"]), {"10"})
+        self.assertEqual(cached["prices"]["10"]["skipped"], "free")
+        try:
+            raise ValueError("A Steam-játék neve most nem kérdezhető le.") from urllib.error.URLError("temporary")
+        except ValueError as caught:
+            failure = caught
+            details = self.plugin._aks_error_details(failure)
+        self.assertEqual(details["error_code"], "steam")
+        self.assertFalse(details["global_error"])
+        self.plugin._price_cache.clear()
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=[failure,
+                {"title": "Free", "skipped": "free", "checked_at": time.time()}]) as fetch:
+            first = await self.plugin.get_allkeyshop_price("10")
+            second = await self.plugin.get_allkeyshop_price("20")
+        self.assertFalse(first["success"])
+        self.assertTrue(second["success"])
+        self.assertEqual(fetch.call_count, 2)
+        self.assertIsNone(self.plugin._price_service_error)
+
+    async def test_server_price_previews_fill_local_cache_in_one_request(self):
+        await self.plugin.set_price_connection("server", "https://example.duckdns.org", "test_server_token_1234567890")
+        entry = {"title": "Free", "skipped": "free", "checked_at": time.time()}
+        response = {"protocol": 1, "provider": "aks", "entries": {"10": entry}}
+        with patch.object(self.plugin, "_price_server_request", return_value=response) as remote:
+            result = await self.plugin.get_remote_price_previews(["10", "20"])
+        self.assertEqual(set(result["prices"]), {"10"})
+        self.assertEqual(self.plugin._price_cache["10"], entry)
+        self.assertEqual(remote.call_args.args[2], "/v1/cached-prices")
+        await self.plugin._price_save_task
+
     def test_roman_sequel_uses_exact_title_first_then_numeric_catalog_title(self):
         title = "Hades II"
         catalog = {self.plugin._aks_title("Hades 2"): "128119"}

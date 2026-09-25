@@ -348,7 +348,8 @@ const getPreferences = callable("get_price_preferences");
 const setPreferences = callable("set_price_preferences");
 const setProvider = callable("set_price_provider");
 const getMerchants = callable("get_price_merchants");
-const getCachedPrice = callable("get_cached_allkeyshop_price");
+const getCachedPrices = callable("get_cached_allkeyshop_prices");
+const getRemotePricePreviews = callable("get_remote_price_previews");
 const getPrice = callable("get_allkeyshop_price");
 async function timed(request) {
     let timer;
@@ -393,7 +394,7 @@ function PriceCacheStatus() {
         void poll();
         return () => { active = false; clearTimeout(timer); };
     }, []);
-    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { role: "status", style: { fontSize: "12px", lineHeight: 1.5 }, children: [stats ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { children: [stats.price_provider === "gg" ? "GG.deals" : "AKS", " \u00E1rgyors\u00EDt\u00F3t\u00E1r: ", stats.price_fresh_entries, "/", stats.price_entries, " friss \u00B7 24 \u00F3ra \u00B7 lemezre mentve"] }), stats.price_connection === "server" && SP_JSX.jsxs("div", { children: ["Saj\u00E1t szerver \u00B7 sorban: ", stats.price_server_queue, " \u00B7 helyi \u00E1rment\u00E9s akt\u00EDv"] }), SP_JSX.jsxs("div", { children: ["Steam-adatok: ", stats.price_metadata_entries, " \u00B7 AKS-hivatkoz\u00E1sok: ", stats.price_match_entries] }), SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_ready, "/", stats.price_wishlist_total, " ellen\u0151rizve", stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""] }), stats.price_wishlist_deferred > 0 && SP_JSX.jsxs("div", { children: [stats.price_wishlist_deferred, " t\u00E9tel v\u00E1rakozik a k\u00F6vetkez\u0151 h\u00E1tt\u00E9rpr\u00F3b\u00E1ra."] }), SP_JSX.jsx("div", { children: stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
+    return SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { role: "status", style: { fontSize: "12px", lineHeight: 1.5 }, children: [stats ? SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsxs("div", { children: [stats.price_provider === "gg" ? "GG.deals" : "AKS", " \u00E1rgyors\u00EDt\u00F3t\u00E1r: ", stats.price_fresh_entries, "/", stats.price_entries, " friss \u00B7 24 \u00F3ra (\u00FCres AKS-adat: 1 \u00F3ra) \u00B7 lemezre mentve"] }), stats.price_connection === "server" && SP_JSX.jsxs("div", { children: ["Saj\u00E1t szerver \u00B7 sorban: ", stats.price_server_queue, " \u00B7 helyi \u00E1rment\u00E9s akt\u00EDv"] }), SP_JSX.jsxs("div", { children: ["Steam-adatok: ", stats.price_metadata_entries, " \u00B7 AKS-hivatkoz\u00E1sok: ", stats.price_match_entries] }), SP_JSX.jsxs("div", { children: ["K\u00EDv\u00E1ns\u00E1glista: ", stats.price_wishlist_ready, "/", stats.price_wishlist_total, " ellen\u0151rizve", stats.price_wishlist_skipped > 0 ? ` · ebből ${stats.price_wishlist_skipped} kihagyva (ingyenes / megjelenés)` : ""] }), stats.price_wishlist_deferred > 0 && SP_JSX.jsxs("div", { children: [stats.price_wishlist_deferred, " t\u00E9tel v\u00E1rakozik a k\u00F6vetkez\u0151 h\u00E1tt\u00E9rpr\u00F3b\u00E1ra."] }), SP_JSX.jsx("div", { children: stats.price_retry_after > 0 ? `Kapcsolati szünet: ${stats.price_retry_after} mp`
                                         : !stats.price_wishlist_active ? "Előtöltés szünetel. Az áruház megnyitásakor indul."
                                             : stats.price_wishlist_current ? `Ellenőrzés: Steam ${stats.price_wishlist_current}`
                                                 : stats.price_wishlist_ready === stats.price_wishlist_total ? "Naprakész. Csak a 24 óránál régebbi adatok frissülnek."
@@ -761,6 +762,7 @@ function buildTilePricesScript(url, values) {
 }
 const prices = new Map();
 let fetching = false;
+let hydrating = false;
 let serviceFailure;
 let revision = 0;
 let currentApp = "";
@@ -768,13 +770,22 @@ let tileUrl = "";
 let tileIds = [];
 let visibleApps = new Set();
 const refreshQueue = new Set();
+const cacheChecked = new Set();
+const priceListeners = new Set();
+function subscribePriceResults(listener) {
+    priceListeners.add(listener);
+    return () => priceListeners.delete(listener);
+}
+const notifyPriceResults = () => { for (const listener of priceListeners)
+    listener(); };
+const priceTtlMs = (value) => value.history_unavailable ? 60 * 60 * 1000 : 24 * 60 * 60 * 1000;
 function visiblePrice(id) {
     const cached = prices.get(id);
     if (cached)
         return cached.value;
     return serviceFailure && serviceFailure.expires > Date.now() ? serviceFailure.value : undefined;
 }
-function resetPriceView() { prices.clear(); serviceFailure = undefined; revision++; currentApp = ""; tileIds = []; tileUrl = ""; visibleApps.clear(); refreshQueue.clear(); }
+function resetPriceView() { prices.clear(); serviceFailure = undefined; revision++; fetching = false; hydrating = false; currentApp = ""; tileIds = []; tileUrl = ""; visibleApps.clear(); refreshQueue.clear(); cacheChecked.clear(); }
 function updatePriceView(url, send, visibleTileIds = []) {
     let id = "";
     try {
@@ -807,6 +818,53 @@ function updatePriceView(url, send, visibleTileIds = []) {
     };
     renderTiles();
     void send(buildPricePanelScript(id, visiblePrice(id))).catch(() => { });
+    const batch = [...new Set([...(id ? [id] : []), ...tileIds])].filter(app => !cacheChecked.has(app)).slice(0, 24);
+    if (batch.length && !hydrating) {
+        for (const app of batch)
+            cacheChecked.add(app);
+        hydrating = true;
+        const batchRevision = revision, batchUrl = tileUrl;
+        const applyBatch = (values) => {
+            if (batchRevision !== revision)
+                return;
+            for (const app of batch) {
+                const value = values?.[app];
+                if (!value?.success || !value.checked_at)
+                    continue;
+                if (!prices.has(app) && prices.size >= 500)
+                    prices.delete(prices.keys().next().value);
+                prices.set(app, { value, expires: value.checked_at * 1000 + priceTtlMs(value) });
+                if (!value.stale && prices.get(app).expires > Date.now())
+                    refreshQueue.delete(app);
+            }
+            if (batchUrl === tileUrl) {
+                renderTiles();
+                if (currentApp)
+                    void send(buildPricePanelScript(currentApp, visiblePrice(currentApp))).catch(() => { });
+                notifyPriceResults();
+            }
+        };
+        void (async () => {
+            const local = await timed(getCachedPrices(batch));
+            applyBatch(local.prices);
+            if (batchRevision !== revision)
+                return;
+            const absent = batch.filter(app => !prices.has(app) || prices.get(app).value.stale);
+            if (absent.length) {
+                const remote = await timed(getRemotePricePreviews(absent));
+                applyBatch(remote.prices);
+            }
+        })().catch(() => { }).finally(() => {
+            if (batchRevision !== revision)
+                return;
+            hydrating = false;
+            if (batchUrl === tileUrl)
+                updatePriceView(tileUrl, send, tileIds);
+        });
+        return;
+    }
+    if (hydrating)
+        return;
     // Expiry alone never refreshes a successful visible price. Failed requests retain
     // the existing retry countdown; stale successful prices wait for a new appearance.
     const needsRequest = (app) => refreshQueue.has(app) ||
@@ -819,18 +877,6 @@ function updatePriceView(url, send, visibleTileIds = []) {
     fetching = true;
     const requestRevision = revision;
     void (async () => {
-        const cached = await timed(getCachedPrice(requestId));
-        if (requestRevision !== revision)
-            return { success: true, disabled: true };
-        if (cached.disabled)
-            return cached;
-        if (cached.success && cached.checked_at) {
-            prices.set(requestId, { value: cached, expires: cached.checked_at * 1000 + (24 * 60 * 60 * 1000) });
-            if (currentApp === requestId)
-                void send(buildPricePanelScript(requestId, cached)).catch(() => { });
-            if (!cached.stale)
-                return cached;
-        }
         if (!visibleApps.has(requestId))
             return { success: true, missing: true };
         if (serviceFailure && serviceFailure.expires > Date.now())
@@ -846,6 +892,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
                 void send(buildPricePanelScript(currentApp, visiblePrice(currentApp) ?? value)).catch(() => { });
             if (tileIds.length)
                 renderTiles();
+            notifyPriceResults();
             return;
         }
         serviceFailure = undefined;
@@ -856,7 +903,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
         if (prices.size >= 500)
             prices.delete(prices.keys().next().value);
         const age = value.checked_at ? Math.max(0, Date.now() - value.checked_at * 1000) : 0;
-        const expires = Date.now() + (value.pending ? Math.max(1, value.retry_after ?? 3) * 1000 : value.success && !value.disabled ? Math.max(0, (24 * 60 * 60 * 1000) - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
+        const expires = Date.now() + (value.pending ? Math.max(1, value.retry_after ?? 3) * 1000 : value.success && !value.disabled ? Math.max(0, priceTtlMs(value) - age) : Math.max(1, (value.retry_after ?? 30)) * 1000);
         if (!value.success)
             value = { ...value, retry_at: expires };
         prices.set(requestId, { value, expires });
@@ -864,7 +911,9 @@ function updatePriceView(url, send, visibleTileIds = []) {
             void send(buildPricePanelScript(requestId, value)).catch(() => { });
         if (tileIds.length)
             renderTiles();
-    }).finally(() => { fetching = false; });
+        notifyPriceResults();
+    }).finally(() => { if (requestRevision === revision)
+        fetching = false; });
 }
 const nativePriceUrl = 'https://store.steampowered.com/?dpb_native=1';
 function clearNativePriceView() {
@@ -917,9 +966,12 @@ const storeBadgeDockCleanupScript = `
 // One shared queue/timer for native Store cards, never one network loop per card.
 const cards = new Map();
 let timer;
+let unsubscribe;
 function stopNativePriceTiles() {
     clearInterval(timer);
     timer = undefined;
+    unsubscribe?.();
+    unsubscribe = undefined;
     for (const node of cards.keys()) {
         node.textContent = "";
         node.style.visibility = "hidden";
@@ -946,14 +998,16 @@ function tilePriceLabel(value) {
         : value.not_found ? "AKS: nincs a katalógusban"
             : value.history_unavailable ? "AKS: áradat még nincs" : "AKS: nincs ajánlat";
 }
-function tick() {
-    const visible = Array.from(cards).filter(([node, card]) => {
+function visibleCards() {
+    return Array.from(cards).filter(([node, card]) => {
         const rect = node.getBoundingClientRect();
         return node.isConnected && card.intersects && rect.width > 0 && rect.height > 0
             && rect.bottom > 0 && rect.top < node.ownerDocument.defaultView.innerHeight
             && rect.right > 0 && rect.left < node.ownerDocument.defaultView.innerWidth;
     });
-    updatePriceView(nativePriceUrl, async () => { }, visible.map(([, card]) => card.id));
+}
+function renderNativePrices() {
+    const visible = visibleCards();
     for (const [node, card] of visible) {
         const value = visiblePrice(card.id);
         const text = tilePriceLabel(value);
@@ -961,6 +1015,11 @@ function tick() {
         node.style.visibility = text ? "visible" : "hidden";
         node.title = text + (value?.offers?.[0]?.source_updated_at ? " · AKS-adat: " + value.offers[0].source_updated_at : "");
     }
+}
+function tick() {
+    const visible = visibleCards();
+    updatePriceView(nativePriceUrl, async () => { }, visible.map(([, card]) => card.id));
+    renderNativePrices();
 }
 function NativeTilePrice({ appId, enabled }) {
     const ref = SP_REACT.useRef(null);
@@ -971,9 +1030,10 @@ function NativeTilePrice({ appId, enabled }) {
         const Observer = node.ownerDocument.defaultView?.IntersectionObserver;
         const card = { id: appId, intersects: !Observer };
         cards.set(node, card);
-        const observer = Observer ? new Observer(entries => { card.intersects = entries.some(entry => entry.isIntersecting); }) : undefined;
+        const observer = Observer ? new Observer(entries => { card.intersects = entries.some(entry => entry.isIntersecting); tick(); }) : undefined;
         observer?.observe(node);
         if (!timer) {
+            unsubscribe = subscribePriceResults(renderNativePrices);
             tick();
             timer = setInterval(tick, 1500);
         }

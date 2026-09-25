@@ -186,3 +186,7 @@ A „Kiemelt ajánlatok”, „Leárazások és események”, „Személyes nap
 ## 1.0.106: díszítő jelölések és hiányzó AKS-árhistória
 
 A ™, ®, ℠ és hasonló jogi jelölések nem akadályozzák a pontos címpárosítást; az eltérő sorszámú játékok továbbra sem keverednek. Ha egy játék szerepel az AKS-katalógusban, de az árhistória-API még üres választ ad, a felület ezt jelzi a „nincs ajánlat” helyett, és egy óra múlva újraellenőrzi. Ez az API által még nem szolgáltatott árakat nem tudja pótolni. A Decky plugint és az Ubuntu árszervert is frissíteni kell.
+
+## 1.0.107: gyorsabb mentett árak és külön kezelt Steam-hibák
+
+Egyetlen játék átmeneti Steam-adatlekérési hibája nem állítja le a többi játék árát; a Steam kifejezett 429-es korlátozása továbbra is közös várakozást kér. Az áruház látható csempéi a Decken mentett árakat egyetlen kötegelt, hálózatmentes hívással kapják meg. A saját árszerveren már tárolt árak egy külön, csak olvasó kötegelt kérésben érkeznek, új Steam- vagy AKS-lekérés nélkül. A natív csempék a megérkező mentett árat a következő időzített ellenőrzés bevárása nélkül kirajzolják. A Decky plugint és az Ubuntu árszervert is frissíteni kell.

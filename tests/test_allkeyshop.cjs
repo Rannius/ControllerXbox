@@ -1,17 +1,28 @@
 const {test}=require('node:test'), assert=require('node:assert/strict');
 const fs=require('node:fs'),vm=require('node:vm'),ts=require('typescript');
 function fixture() {
- const requests=[],scripts=[],exports={},cached=new Map();
+ const requests=[],scripts=[],exports={},cached=new Map(),remoteCached=new Map(),batchCalls=[],remoteBatchCalls=[];
  const clock={now:Date.now()};class ClockDate extends Date {static now(){return clock.now;}}
  const dock={};vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/storeBadgeDock.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports:dock});
  const tiles={};vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/storePriceTiles.ts','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS}}).outputText,{exports:tiles,URL});
- const requireMock=name=>name==='./storePriceTiles'?tiles:name==='./storeBadgeDock'?dock:name==='@decky/api'?{callable:method=>id=>method==='get_cached_allkeyshop_price'?Promise.resolve(cached.get(id)||{success:true,missing:true}):new Promise(resolve=>requests.push({method,id,resolve}))}:{};
+ const requireMock=name=>name==='./storePriceTiles'?tiles:name==='./storeBadgeDock'?dock:name==='@decky/api'?{callable:method=>id=>method==='get_cached_allkeyshop_prices'?(batchCalls.push(id),Promise.resolve({success:true,prices:Object.fromEntries(id.filter(key=>cached.has(key)).map(key=>[key,cached.get(key)]))})):method==='get_remote_price_previews'?(remoteBatchCalls.push(id),Promise.resolve({success:true,prices:Object.fromEntries(id.filter(key=>remoteCached.has(key)).map(key=>[key,remoteCached.get(key)]))})):new Promise(resolve=>requests.push({method,id,resolve}))}:{};
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/AllKeyShop.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.React}}).outputText,
   {exports,require:requireMock,setTimeout,clearTimeout,URL,Date:ClockDate});
  const send=async s=>{scripts.push(s);};
  const drain=async()=>{for(let i=0;i<20;i++)await Promise.resolve();};
- return {api:exports,requests,scripts,send,drain,clock,cached};
+ return {api:exports,requests,scripts,send,drain,clock,cached,remoteCached,batchCalls,remoteBatchCalls};
 }
+test('visible local and server cached prices hydrate in batches before individual lookups',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/';
+ const entry=(price)=>({success:true,checked_at:f.clock.now/1000,offers:[{price,merchant:'Eneba'}]});
+ f.cached.set('10',entry(4));f.cached.set('20',entry(5));f.remoteCached.set('30',entry(6));
+ f.api.updatePriceView(url,f.send,['10','20','30']);await f.drain();
+ assert.equal(f.batchCalls.length,1);assert.deepEqual(Array.from(f.batchCalls[0]),['10','20','30']);
+ assert.equal(f.remoteBatchCalls.length,1);assert.deepEqual(Array.from(f.remoteBatchCalls[0]),['30']);
+ assert.equal(f.requests.length,0);
+ assert.equal(f.api.visiblePrice('10').offers[0].price,4);
+ assert.equal(f.api.visiblePrice('30').offers[0].price,6);
+});
 test('price lookup only on opened Steam games, single flight, cached, navigation-safe',async()=>{
  const f=fixture();f.api.updatePriceView('https://store.steampowered.com/',f.send);await f.drain();assert.equal(f.requests.length,0);
  f.api.updatePriceView('https://store.steampowered.com/app/10/',f.send);await f.drain();
