@@ -803,7 +803,7 @@ class Plugin:
                     raise ValueError("Invalid price data")
                 if entry.get("source") == "aks_history" and entry.get("history_version") != AKS_HISTORY_VERSION:
                     return {"success": False, "provider": provider, "error_code": "server_version", "retry_after": 60,
-                            "error": "Az árszerver régi, hiányosan szűrt árakat küld. Frissítsd az Ubuntu árszervert is 1.0.93 vagy újabb verzióra."}
+                            "error": "Az árszerver régi, hiányosan szűrt árakat küld. Frissítsd az Ubuntu árszervert is 1.0.94 vagy újabb verzióra."}
                 cache = self._gg_cache if entry_provider == "gg" else self._price_cache
                 if app_id not in cache and len(cache) >= 10000:
                     cache.pop(next(iter(cache)))

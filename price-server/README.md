@@ -19,8 +19,8 @@ Ez a szerver **nem IP-forgató és nem tiltásmegkerülő szolgáltatás**. A Du
 Az Ubuntu termináljában:
 
 ```bash
-curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.93/DeckPriceServer-v1.0.93.tar.gz
-tar -xzf DeckPriceServer-v1.0.93.tar.gz
+curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.94/DeckPriceServer-v1.0.94.tar.gz
+tar -xzf DeckPriceServer-v1.0.94.tar.gz
 cd DeckPriceServer
 sudo bash install.sh sajat-szerver.duckdns.org
 ```
@@ -127,7 +127,7 @@ Források: [DuckDNS API](https://www.duckdns.org/spec.jsp), [Caddy automatikus H
 
 A szerver az `allkeyshop-api` projekt által használt nyilvános JSON-katalógust és árhistorika-végpontot kérdezi. A közös katalógus 24 órás, a pontos név → termékazonosító kapcsolat 7 napos, az árak és Steam-metaadatok 24 órás tartós cache-t kapnak. Egy ismert játék árfrissítése egyetlen AKS-kérést igényel; friss ár esetén nincs kérés. A HTML-kereső és termékoldal nem része az árlekérési útvonalnak. 1.0.89-től a boltlista is kizárólag az API-válaszokban talált és korábban mentett boltnevekből épül, HTML-lekérés nélkül.
 
-Ajánlatonként a legutóbbi megfigyelést választjuk. 1.0.93-tól nem zárjuk ki az egyik bolt utolsó árát pusztán azért, mert egy másik bolt frissebb dátumot küld. Ezután a Decky a saját megbízhatóbolt-listája, Standard / Early Access kiadás, Steam-kulcs/Gift és EU/Global/ROW besorolás szerint szűr, és a minimumot mutatja. A historika nem igazol aktuális készletet vagy minden fizetési díjat; külön látszik a forrás megfigyelési ideje és a lekérésünk ideje. A régi abszolút minimumokat nem használjuk.
+Ajánlatonként a legutóbbi megfigyelést választjuk. 1.0.94-tól nem zárjuk ki az egyik bolt utolsó árát pusztán azért, mert egy másik bolt frissebb dátumot küld. Ezután a Decky a saját megbízhatóbolt-listája, Standard / Early Access kiadás, Steam-kulcs/Gift és EU/Global/ROW besorolás szerint szűr, és a minimumot mutatja. A historika nem igazol aktuális készletet vagy minden fizetési díjat; külön látszik a forrás megfigyelési ideje és a lekérésünk ideje. A régi abszolút minimumokat nem használjuk.
 
 Ehhez mindkét oldalt 1.0.88-ra kell frissíteni. A meglevő beállítások és érvényes korábbi cache megmaradnak; lejáratkor már az új végpontot használjuk. A Decky árgyorsítótár-törlése csak a helyi cache-t üríti; a szerver érvényes cache-e a lejáratáig megmarad. A GG.deals tartalék működés megmarad.
 
@@ -137,7 +137,7 @@ Ehhez mindkét oldalt 1.0.88-ra kell frissíteni. A meglevő beállítások és 
 
 1.0.92: az alapjáték-szűrés a Standard mellett az explicit Early Access kiadást is elfogadja. A WARDOGS friss ajánlatait korábban ez a túl szűk kiadásszűrés kizárta. Az EU-t is tartalmazó Steam EU/US besorolás engedélyezett, saját címkével. A Supporter/Deluxe/bundle, account és más platform változatlanul kizárt. A mentett API-áradatokra is azonnal az új szűrés érvényes; nem kell cache-t törölni.
 
-## Árjavítás és boltszűrés (1.0.93)
+## Árjavítás és boltszűrés (1.0.94)
 
 A Portal 1,95 EUR összege az AKS történeti Steam-sorából származott, nem kuponszámításból. Ezt a Steam-sort kizárjuk. A megnyitott Steam-oldalon az ott látható EUR végösszeg az összehasonlítás alapja (személyes/bundle kedvezmény is eltérhet a nyilvános Steam API árától). Más pénznemet nem hasonlítunk az EUR ajánlatokhoz.
 

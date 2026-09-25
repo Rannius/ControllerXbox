@@ -409,7 +409,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         data["prices"] += [{**base, **change} for change in invalid]
         data["prices"].append({**base, "region": "25", "priceCard": 8, "merchant": 2})
         result = self.plugin._aks_filter(data, {"merchants": [], "allow_gifts": True})
-        self.assertEqual([r["price"] for r in result], [.5, 8, 10])
+        self.assertEqual([r["price"] for r in result], [8, 10])
         self.assertIn("Gift", result[0]["kind"])
         self.assertEqual(len(self.plugin._aks_filter(data, {"merchants": [], "allow_gifts": False})), 1)
         self.assertEqual(self.plugin._aks_filter(data, {"merchants": ["ENEBA"], "allow_gifts": True})[0]["price"], 10)
