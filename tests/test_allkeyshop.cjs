@@ -76,7 +76,7 @@ test('homepage featured prices sit beside the Steam price, below the artwork',()
  assert.equal(style.getPropertyValue('margin-bottom'),'');
 });
 
-test('home DLC tile price stays above the cover while Steam price loads and moves',()=>{
+test('home DLC tile price stays below the entire card while Steam price loads and page scrolls',()=>{
  const f=fixture(),url='https://store.steampowered.com/';
  const values=new Map(),style={cssText:'',getPropertyValue:key=>values.get(key)||'',getPropertyPriority:()=>'',
   setProperty:(key,value)=>values.set(key,value),removeProperty:key=>values.delete(key)};
@@ -85,8 +85,9 @@ test('home DLC tile price stays above the cover while Steam price loads and move
  let steam=null;
  let scroll=0;
  const section={getBoundingClientRect:()=>({top:350-scroll,bottom:755-scroll}),
-  querySelector:()=>({getBoundingClientRect:()=>({bottom:410-scroll})})};
- const host={style,offsetWidth:420,closest:selector=>selector==='#dlc_tier,.home_discounts_block.dlc_block'?section:
+  querySelector:()=>({getBoundingClientRect:()=>({bottom:475-scroll})})};
+ const host={style,offsetWidth:420,closest:selector=>selector==='.sale_capsule'?host:
+  selector==='#dlc_tier,.home_discounts_block.dlc_block'?section:
   selector==='.home_discounts_block.dlc_block'?section:null,matches:()=>true,contains:()=>false,
   getAttribute:key=>key==='href'?'https://store.steampowered.com/app/2780810/':'',
   getBoundingClientRect:()=>card,querySelector:selector=>selector==='.discount_block[data-price-final]'&&steam?
@@ -100,14 +101,15 @@ test('home DLC tile price stays above the cover while Steam price loads and move
  vm.runInNewContext(f.api.buildTilePricesScript(url,{'2780810':{success:true,
   offers:[{price:16.1,merchant:'Kinguin'}]}}),context);
  assert.equal(host.row.textContent,'AKS: 16.10 € ∙ Kinguin');
- assert.match(host.row.style.cssText,/top:-29px;left:0px;width:420px/);
+ assert.match(host.row.style.cssText,/top:calc\(100% \+ 3px\);left:0px;width:100%/);
  assert.equal(style.getPropertyValue('overflow'),'visible');
+ assert.equal(style.getPropertyValue('margin-bottom'),'32px');
  assert.equal(style.getPropertyValue('padding-bottom'),'');
  steam={left:250,top:665,right:520,bottom:720,width:270,height:55};
  scroll=100;card.top-=scroll;card.bottom-=scroll;image.top-=scroll;image.bottom-=scroll;
  vm.runInNewContext(f.api.buildTilePricesScript(url,{'2780810':{success:true,
   offers:[{price:16.1,merchant:'Kinguin'}]}}),context);
- assert.match(host.row.style.cssText,/top:-29px;left:0px;width:420px/);
+ assert.match(host.row.style.cssText,/top:calc\(100% \+ 3px\);left:0px;width:100%/);
 });
 
 test('tile prices require explicit visible IDs, share cache and stop when disabled',async()=>{

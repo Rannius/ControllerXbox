@@ -718,24 +718,15 @@ function buildTilePricesScript(url, values) {
       const home = /^\\/(?:|home\\/|index\\.php)$/.test(location.pathname || '/');
       const featured = home && !!host.closest('.home_special_offers_group');
       const homeDlc = home && !!host.closest('#dlc_tier,.home_discounts_block.dlc_block');
+      let anchor = host;
       let left, width, top;
       if (homeDlc) {
-        const section = host.closest('.home_discounts_block.dlc_block');
-        if (!section) continue;
-        const imageRect = Array.from(host.querySelectorAll('img,picture,video'))
-          .map(node => node.getBoundingClientRect())
-          .filter(rect => rect.width >= 80 && rect.height >= 52)
-          .sort((a, b) => a.top - b.top || b.width - a.width)[0];
-        if (!imageRect) continue;
-        const sectionRect = section.getBoundingClientRect();
-        left = Math.max(0, imageRect.left - hostRect.left) / scale;
-        width = Math.min(hostRect.right, imageRect.right) / scale - Math.max(hostRect.left, imageRect.left) / scale;
-        if (width < 80) continue;
-        // Steam fills/repositions DLC prices asynchronously and again on scroll.
-        // Anchor above the cover instead, which stays fixed within the card.
-        const titleBottom = section.querySelector('.title_grid')?.getBoundingClientRect().bottom || sectionRect.top;
-        if (imageRect.top - titleBottom < 26 * scale + 6) continue;
-        top = (imageRect.top - 26 * scale - 3 - hostRect.top) / scale;
+        // The cover link is shorter than its sale capsule. Use the entire card
+        // and a CSS-relative bottom edge so late Steam prices and scrolls cannot
+        // move the row into the artwork.
+        anchor = host.closest('.sale_capsule');
+        if (!anchor || anchor.getBoundingClientRect().width < 80) continue;
+        left = 0; width = anchor.offsetWidth; top = 0;
       } else if (featured) {
         const steamPrice = host.querySelector('.discount_block[data-price-final]');
         const priceRect = steamPrice?.getBoundingClientRect();
@@ -768,13 +759,17 @@ function buildTilePricesScript(url, values) {
         while (top - 28 >= imageTop && overlapsSteamPrice()) top -= 28;
         if (overlapsSteamPrice()) continue;
       }
-      saved.set(host, (homeDlc ? ['position', 'overflow'] : ['position'])
-        .map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
-      if (getComputedStyle(host).position === 'static') host.style.setProperty('position', 'relative');
-      if (homeDlc && getComputedStyle(host).overflow === 'hidden') host.style.setProperty('overflow', 'visible');
+      if (saved.has(anchor)) continue;
+      saved.set(anchor, (homeDlc ? ['position', 'overflow', 'margin-bottom'] : ['position'])
+        .map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
+      if (getComputedStyle(anchor).position === 'static') anchor.style.setProperty('position', 'relative');
+      if (homeDlc) {
+        if (getComputedStyle(anchor).overflow === 'hidden') anchor.style.setProperty('overflow', 'visible');
+        if ((parseFloat(getComputedStyle(anchor).marginBottom) || 0) < 32) anchor.style.setProperty('margin-bottom', '32px');
+      }
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
-      row.style.cssText = 'position:absolute;top:' + top + 'px;left:' + left + 'px;width:' + width + 'px;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
+      row.style.cssText = 'position:absolute;top:' + (homeDlc ? 'calc(100% + 3px)' : top + 'px') + ';left:' + left + 'px;width:' + (homeDlc ? '100%' : width + 'px') + ';height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
       row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {
@@ -783,7 +778,7 @@ function buildTilePricesScript(url, values) {
         if (row.dataset.dpbRetryAt) row.dataset.dpbLabel = row.textContent;
       }
       row.title = row.textContent;
-      host.appendChild(row);
+      anchor.appendChild(row);
     }
     ${priceCountdownScript}
   })();`;

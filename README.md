@@ -170,3 +170,7 @@ A Steam-áruház főoldalán a „DLC a játékaidhoz” kártyáin az AKS/GG á
 ## 1.0.102: stabil DLC-ársáv görgetéskor
 
 A főoldali DLC-kártyák ársávja a borító fölötti szabad helyhez igazodik, így a Steam-ár későbbi betöltése vagy a görgetés nem helyezi vissza a képre. Csak a Decky plugint kell frissíteni.
+
+## 1.0.103: DLC-ársáv a teljes kártya alatt
+
+A DLC-csempéknél a Steam címsávja miatt a borító fölött nincs elég hely. Az AKS/GG ársáv ezért a teljes csempe alá kerül, fenntartott hellyel; a Steam-ár későbbi betöltése és a görgetés nem takarja el. Csak a Decky plugint kell frissíteni.
