@@ -199,6 +199,6 @@ Az áruház külső ársávjai az oldal ismételt ellenőrzésekor helyükön ma
 
 A mentett ár a kötegelt cache beolvasása után jelenik meg, indokolatlan betöltésjelzés nélkül. Az áruházi oldal az árakhoz csak a megváltozott, rövid címkéket kapja meg; az oldalfigyelés változásra indul, 12 másodperces tartalék ellenőrzéssel. A játék adatlapján az ár részletei megmagyarázzák a hiányzó ajánlatot, és egy gombbal csak annak a játéknak az ára ellenőrizhető újra. A Decky plugint és az Ubuntu árszervert is frissíteni kell.
 
-## 1.0.110: telepített játékok buildszáma
+## 1.0.111: telepített játékok buildszáma
 
 A „Jelvények és méret” beállítások között külön kapcsolóval megjeleníthető a helyben telepített Steam-játék buildazonosítója a könyvtári csempe alatt. Az érték a Deck helyi Steam-telepítési jegyzékéből származik, internetes lekérés nélkül; külső Steam-könyvtárakat is kezel. A Steam nem tárol egységes, például „1.2.3” alakú verziószámot minden játékhoz, ezért a felirat egyértelműen „Build” jelölést használ. A funkció alapból ki van kapcsolva. Csak a Decky plugint kell frissíteni.

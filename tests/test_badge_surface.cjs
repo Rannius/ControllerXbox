@@ -7,16 +7,17 @@ const ts=require('typescript');
 
 test('native Store home and web Store use Store size; navigating back restores Library size',()=>{
   const source=fs.readFileSync(path.join(__dirname,'../src/index.tsx'),'utf8');
-  let navigate;let signals=0;let connections=0;
+  let navigate;let signals=0;let connections=0;const buildRoutes=[];
   const history={location:{pathname:'/library'},listen:fn=>{navigate=fn;return ()=>{};}};
   const context=vm.createContext({
     nativeTilesInStore:false,nativePriceTilesEnabled:false,storeMounted:false,supportListeners:new Set([()=>signals++]),
+    pluginActive:true,configureInstalledBuilds:(enabled,inStore)=>buildRoutes.push([enabled,inStore]),
     findModuleExport:()=>({m_history:history}),window:{location:{pathname:'/library'}},
     renderStoreBadges:()=>{},connectToStoreDebugger:()=>connections++,disconnectStoreDebugger:()=>{},
     console,
     React:{createElement:(type,props,...children)=>({type,props,children})},
     useState:initial=>[typeof initial==='function'?initial():initial,()=>{}],useEffect:()=>{},
-    badgeVisibility:{library_badge_percent:80,store_badge_percent:175},
+    badgeVisibility:{library_badge_percent:80,store_badge_percent:175,show_installed_builds:true},
     hungarianStates:new Map(),hungarianSources:new Map(),supportStates:new Map(),gfnStates:new Map(),boosteroidStates:new Map(),
     ControllerBadge:()=>null,GfnBadge:()=>null,BoosteroidBadge:()=>null,
   });
@@ -36,5 +37,6 @@ test('native Store home and web Store use Store size; navigating back restores L
   assert.ok(Math.abs(scale()-.88*.8)<1e-9);assert.equal(signals,3);
   navigate({pathname:'/storefront-unrelated'});
   assert.equal(context.nativeTilesInStore,false);
+  assert.deepEqual(buildRoutes,[[true,true],[true,true],[true,false]]);
   stop();
 });
