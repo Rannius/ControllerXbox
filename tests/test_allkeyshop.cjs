@@ -23,6 +23,39 @@ test('visible local and server cached prices hydrate in batches before individua
  assert.equal(f.api.visiblePrice('10').offers[0].price,4);
  assert.equal(f.api.visiblePrice('30').offers[0].price,6);
 });
+test('cached tile price appears before loading and unchanged scans send no price data',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/';
+ f.cached.set('10',{success:true,checked_at:f.clock.now/1000,offers:[{price:4,merchant:'Eneba'}]});
+ f.api.updatePriceView(url,f.send,['10']);
+ assert.equal(f.api.isPriceHydrating('10'),true);
+ assert.ok(f.scripts.every(script=>!script.includes('"text":"AKS: betöltés…"')));
+ await f.drain();
+ assert.equal(f.api.isPriceHydrating('10'),false);
+ assert.ok(f.scripts.some(script=>script.includes('"text":"AKS: 4.00 € ∙ Eneba"')));
+ const before=f.scripts.length;
+ f.api.updatePriceView(url,f.send,['10']);
+ assert.ok(f.scripts.slice(before).some(script=>script.includes('const values = {};')));
+ assert.ok(f.scripts.slice(before).every(script=>!script.includes('"text":"AKS: 4.00 € ∙ Eneba"')));
+ assert.equal(f.requests.length,0);
+});
+test('one-game refresh replaces the visible cached price',async()=>{
+ const f=fixture(),url='https://store.steampowered.com/app/10/';
+ f.cached.set('10',{success:true,checked_at:f.clock.now/1000,offers:[{price:4,merchant:'Eneba'}]});
+ f.api.updatePriceView(url,f.send);await f.drain();
+ const refresh=f.api.refreshVisiblePrice('10',url,f.send);
+ assert.equal(f.requests.length,1);
+ assert.equal(f.requests[0].method,'refresh_allkeyshop_price');
+ f.requests[0].resolve({success:true,checked_at:f.clock.now/1000,offers:[{price:3,merchant:'Kinguin'}]});
+ await refresh;
+ assert.equal(f.api.visiblePrice('10').offers[0].price,3);
+ assert.ok(f.scripts.some(script=>script.includes('Kinguin')));
+});
+test('missing price explanation identifies match and filtering causes',()=>{
+ const f=fixture();
+ assert.match(f.api.explainMissingPrice({success:true,not_found:true,match_status:'ambiguous'}),/Több azonos nevű/);
+ assert.match(f.api.explainMissingPrice({success:true,filtering:{total:5,merchant:3,region:2}}),/3 nem engedélyezett bolt/);
+ assert.match(f.api.explainMissingPrice({success:true,history_unavailable:true}),/árhistóriát/);
+});
 test('price lookup only on opened Steam games, single flight, cached, navigation-safe',async()=>{
  const f=fixture();f.api.updatePriceView('https://store.steampowered.com/',f.send);await f.drain();assert.equal(f.requests.length,0);
  f.api.updatePriceView('https://store.steampowered.com/app/10/',f.send);await f.drain();
@@ -203,10 +236,10 @@ test('service failure reaches all waiting tiles, pauses requests and recovers af
  f.requests[0].resolve({success:false,error:'Connection timed out',error_code:'connection',global_error:true,retry_after:15});await f.drain();
  for(let i=0;i<3;i++)f.api.updatePriceView(url,f.send,ids);await f.drain();
  assert.equal(f.requests.length,1);
- const last=f.scripts.findLast(s=>s.includes('const values ='));
- assert.match(last,/"10":\{"success":false/);assert.match(last,/"30":\{"success":false/);
+ assert.ok(f.scripts.some(s=>s.includes('"10":{"text":"AKS: kapcsolati hiba"')));
+ assert.ok(f.scripts.some(s=>s.includes('"30":{"text":"AKS: kapcsolati hiba"')));
  f.api.updatePriceView('https://store.steampowered.com/app/20/',f.send,ids);await f.drain();
- assert.match(f.scripts.at(-1),/"error_code":"connection"/);assert.equal(f.requests.length,1);
+ assert.ok(f.scripts.some(s=>s.includes('"error_code":"connection"')));assert.equal(f.requests.length,1);
  f.clock.now+=16000;f.api.updatePriceView(url,f.send,ids);await f.drain();assert.equal(f.requests.length,2);
  f.requests[1].resolve({success:true,offers:[]});await f.drain();
  f.api.updatePriceView(url,f.send,ids);await f.drain();assert.equal(f.requests.length,3);

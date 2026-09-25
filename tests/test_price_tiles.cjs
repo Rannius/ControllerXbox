@@ -58,7 +58,7 @@ test('native Store cards share one visible-only timer, hide skipped prices and c
  const results=new Map([['10',{success:true,offers:[{price:4.37,merchant:'Eneba'}]}],['20',{success:true,skipped:'unreleased'}]]);
  const context={exports,setInterval:fn=>{tick=fn;started++;return 1;},clearInterval:()=>stopped++,
   require:name=>name==='react'?{useRef:()=>{const r={current:null};refs.push(r);return r;},useEffect:fn=>effects.push(fn)}:
-   {clearNativePriceView:()=>cleared++,nativePriceUrl:'native',updatePriceView:(url,send,ids)=>calls.push(ids),visiblePrice:id=>results.get(id),
+   {clearNativePriceView:()=>cleared++,isPriceHydrating:()=>false,nativePriceUrl:'native',updatePriceView:(url,send,ids)=>calls.push(ids),visiblePrice:id=>results.get(id),
     subscribePriceResults:fn=>{listener=fn;return ()=>{listener=undefined;}}},
   React:{createElement:()=>({})}};
  vm.runInNewContext(ts.transpileModule(fs.readFileSync('src/NativeTilePrice.tsx','utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020,jsx:ts.JsxEmit.React}}).outputText,context);

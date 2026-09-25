@@ -53,6 +53,7 @@ class PriceBroker:
     def __init__(self, engine):
         self.engine = engine
         self.pending = {}
+        self.forced = set()
         self.finished = {}
         self.failures = {}
         self.sequence = 0
@@ -153,12 +154,13 @@ class PriceBroker:
                 "scope": "requested_since_restart", "merchant_refresh": directory_running}
 
     async def price(self, request, wait_for_result=True):
-        if not isinstance(request, dict) or set(request) - {"provider", "app_id", "priority"}:
+        if not isinstance(request, dict) or set(request) - {"provider", "app_id", "priority", "refresh"}:
             raise ValueError("Invalid request")
         provider, app_id = request.get("provider"), request.get("app_id")
         if (provider not in ("aks", "gg") or not isinstance(app_id, str) or not app_id.isascii()
                 or not app_id.isdigit() or not 0 < int(app_id) < 10000000000
-                or request.get("priority", "background") not in ("foreground", "background")):
+                or request.get("priority", "background") not in ("foreground", "background")
+                or type(request.get("refresh", False)) is not bool):
             raise ValueError("Invalid product")
         now = time.time()
         key = (provider, app_id)
@@ -167,7 +169,8 @@ class PriceBroker:
         response = {"protocol": PROTOCOL, "provider": provider, "app_id": app_id, "entry": entry,
                     "entry_provider": "gg" if entry and entry.get("provider") == "gg" else provider,
                     "pending": False, "retry_after": 3, "queue": len(self.pending)}
-        if entry and 0 <= now - entry["checked_at"] < self.engine._price_entry_ttl(entry):
+        force = request.get("refresh", False)
+        if entry and not force and key not in self.pending and 0 <= now - entry["checked_at"] < self.engine._price_entry_ttl(entry):
             self.cache_hits += 1
             self.observe(key, "cached")
             return response
@@ -175,6 +178,8 @@ class PriceBroker:
             self.observe(key, "missing_key", now + 60)
             return {**response, "failure": {"global_error": True, "error": "A szerveren nincs beállítva GG.deals API-kulcs."}, "retry_after": 60}
         self.failures = {k: v for k, v in self.failures.items() if v[0] > now}
+        if force:
+            self.failures.pop(key, None)
         failure = self.failures.get(key)
         if failure:
             self.observe(key, "failed", failure[0])
@@ -196,6 +201,8 @@ class PriceBroker:
         else:
             old_priority, sequence = self.pending[key]
             self.pending[key] = (min(priority, old_priority), sequence)
+        if force and key != self.current:
+            self.forced.add(key)
         self.wake.set()
         self.observe(key, "queued")
         # An opened game can receive a fast lookup in this HTTP response, without
@@ -207,7 +214,7 @@ class PriceBroker:
             except asyncio.TimeoutError:
                 pass
             if key not in self.pending:
-                return await self.price(request, wait_for_result=False)
+                return await self.price({**request, "refresh": False}, wait_for_result=False)
         ahead = sum(value < self.pending[key] for value in self.pending.values())
         return {**response, "pending": True, "queue": len(self.pending),
                 "retry_after": 1 if priority == 0 else min(30, max(3, ahead * 2))}
@@ -248,7 +255,8 @@ class PriceBroker:
             try:
                 # One worker means this provider selection cannot race another lookup.
                 self.engine._price_preferences["provider"] = provider
-                result = await self.engine._get_allkeyshop_price(app_id)
+                result = (await self.engine._get_allkeyshop_price(app_id, force=True) if key in self.forced
+                          else await self.engine._get_allkeyshop_price(app_id))
                 actual_provider = result.get("provider", provider)
                 if result.get("success"):
                     outcome = "skipped" if result.get("skipped") else "not_found" if result.get("not_found") else "completed"
@@ -294,6 +302,7 @@ class PriceBroker:
                                     "duration_seconds": duration, "retry_at": retry_at})
                 LOG.info("Price job finished provider=%s app_id=%s outcome=%s seconds=%.2f", actual_provider, app_id, outcome, duration)
                 self.pending.pop(key, None)
+                self.forced.discard(key)
                 finished = self.finished.pop(key, None)
                 if finished:
                     finished.set()

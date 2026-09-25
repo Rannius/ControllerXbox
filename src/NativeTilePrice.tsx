@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { clearNativePriceView, nativePriceUrl, PriceResult, subscribePriceResults, updatePriceView, visiblePrice } from "./AllKeyShop";
+import { clearNativePriceView, isPriceHydrating, nativePriceUrl, PriceResult, subscribePriceResults, updatePriceView, visiblePrice } from "./AllKeyShop";
 
 // One shared queue/timer for native Store cards, never one network loop per card.
 const cards = new Map<HTMLSpanElement, { id: string; intersects: boolean }>();
@@ -44,7 +44,7 @@ function renderNativePrices(): void {
   const visible = visibleCards();
   for (const [node, card] of visible) {
     const value = visiblePrice(card.id);
-    const text = tilePriceLabel(value);
+    const text = isPriceHydrating(card.id) ? "" : tilePriceLabel(value);
     node.textContent = text;
     node.style.visibility = text ? "visible" : "hidden";
     node.title = text + (value?.offers?.[0]?.source_updated_at ? " · AKS-adat: " + value.offers[0].source_updated_at : "");
@@ -74,7 +74,7 @@ export function NativeTilePrice({ appId, enabled }: { appId: string; enabled: bo
     };
   }, [appId, enabled]);
   if (!enabled) return null;
-  const label = tilePriceLabel(visiblePrice(appId));
+  const label = isPriceHydrating(appId) ? "" : tilePriceLabel(visiblePrice(appId));
   return <span ref={ref} style={{ position: "absolute", bottom: 0, left: 0, right: 0,
     height: "25px", zIndex: 101, boxSizing: "border-box", padding: "3px 6px",
     background: "#162634", color: "#dce6ed", font: "11px/19px Arial,sans-serif",

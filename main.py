@@ -187,6 +187,7 @@ class Plugin:
         self._aks_catalog_checked_at = 0.0
         self._price_metadata: Dict[str, Dict[str, Any]] = {}
         self._price_tasks: Dict[str, asyncio.Task] = {}
+        self._price_force_pending: Set[str] = set()
         self._price_save_task: Optional[asyncio.Task] = None
         self._price_save_dirty = False
         self._price_lock = asyncio.Lock()
@@ -678,6 +679,7 @@ class Plugin:
 
     async def clear_price_cache(self) -> Dict[str, Any]:
         self._price_epoch += 1
+        self._price_force_pending.clear()
         self._price_cache.clear()
         self._gg_cache.clear()
         self._aks_matches.clear()
@@ -817,6 +819,7 @@ class Plugin:
         self._price_connection = {"mode": mode, "url": address}
         self._price_server_token = key
         self._price_epoch += 1
+        self._price_force_pending.clear()
         self._price_server_retry_at = 0
         self._price_server_failures = 0
         self._price_server_error = ""
@@ -868,7 +871,7 @@ class Plugin:
         except (OSError, ValueError, TypeError):
             return {"success": False, "error": "A szerverkapcsolat ellenőrzése sikertelen. Ellenőrizd a HTTPS címet, tokent és porttovábbítást."}
 
-    async def _lookup_remote_price(self, app_id: str, epoch: int) -> Dict[str, Any]:
+    async def _lookup_remote_price(self, app_id: str, epoch: int, force: bool = False) -> Dict[str, Any]:
         provider = self._price_preferences.get("provider", "aks")
         if epoch != self._price_epoch:
             return {"success": True, "disabled": True}
@@ -878,7 +881,8 @@ class Plugin:
                     "error": self._price_server_error, "retry_after": self._price_server_retry_at - now}
         try:
             response = await self._run_blocking(self._price_server_request, self._price_connection["url"], self._price_server_token,
-                "/v1/price", {"provider": provider, "app_id": app_id, "priority": "foreground" if self._price_foreground_waiters else "background"})
+                "/v1/price", {"provider": provider, "app_id": app_id, "priority": "foreground" if self._price_foreground_waiters else "background",
+                              **({"refresh": True} if force else {})})
             if epoch != self._price_epoch:
                 return {"success": True, "disabled": True}
             if response.get("provider") != provider or response.get("app_id") != app_id:
@@ -909,6 +913,7 @@ class Plugin:
                     self._schedule_price_save()
             failure = response.get("failure")
             if failure:
+                self._price_force_pending.discard(app_id)
                 if not isinstance(failure, dict):
                     raise ValueError("Invalid failure")
                 message = str(failure.get("error", "A szerver árlekérése sikertelen."))[:500]
@@ -924,6 +929,10 @@ class Plugin:
             self._price_server_failures = 0
             self._price_server_error = ""
             pending = response.get("pending") is True
+            if pending and force:
+                self._price_force_pending.add(app_id)
+            elif not pending:
+                self._price_force_pending.discard(app_id)
             if entry:
                 return {**self._active_price_result(entry),
                         "stale": time.time() - entry["checked_at"] >= self._price_entry_ttl(entry),
@@ -1005,6 +1014,7 @@ class Plugin:
         self._gg_api_key = key
         self._price_preferences = value
         self._price_epoch += 1
+        self._price_force_pending.clear()
         self._price_server_retry_at = 0
         self._price_server_error = ""
         self._price_wishlist_retry.clear()
@@ -1112,12 +1122,12 @@ class Plugin:
             raise ValueError("Invalid API product")
         return result
 
-    async def _lookup_gg_price(self, app_id: str, epoch: int) -> Dict[str, Any]:
+    async def _lookup_gg_price(self, app_id: str, epoch: int, force: bool = False) -> Dict[str, Any]:
         async with self._price_lock:
             if epoch != self._price_epoch or self._price_stopping or not self._price_preferences["enabled"]:
                 return {"success": True, "disabled": True, "provider": "gg"}
             entry = self._gg_cache.get(app_id)
-            if entry and time.time() - entry["checked_at"] < PRICE_TTL_SECONDS:
+            if entry and not force and time.time() - entry["checked_at"] < PRICE_TTL_SECONDS:
                 return dict(entry)
             if time.time() < self._gg_retry_at:
                 return {"success": False, "provider": "gg", "global_error": True, "error_code": "rate_limit",
@@ -1723,19 +1733,27 @@ class Plugin:
         finally:
             self._price_foreground_waiters -= 1
 
-    async def _get_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
+    async def refresh_allkeyshop_price(self, app_id: Any) -> Dict[str, Any]:
+        self._price_foreground_waiters += 1
+        try:
+            return await self._get_allkeyshop_price(app_id, force=True)
+        finally:
+            self._price_foreground_waiters -= 1
+
+    async def _get_allkeyshop_price(self, app_id: Any, force: bool = False) -> Dict[str, Any]:
         normalized = str(app_id)
         if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
             return {"success": False, "error": "Érvénytelen Steam AppID."}
         if not self._price_preferences["enabled"] or self._price_stopping:
             return {"success": True, "disabled": True}
         entry = self._effective_price_entry(normalized)
-        if entry and "error" not in entry and 0 <= time.time() - entry["checked_at"] < self._price_entry_ttl(entry):
+        if (entry and not force and normalized not in self._price_force_pending
+                and "error" not in entry and 0 <= time.time() - entry["checked_at"] < self._price_entry_ttl(entry)):
             return self._active_price_result(entry)
         task_key = str(self._price_epoch) + ":" + normalized
         task = self._price_tasks.get(task_key)
         if task is None:
-            task = asyncio.create_task(self._lookup_price_with_fallback(normalized, self._price_epoch))
+            task = asyncio.create_task(self._lookup_price_with_fallback(normalized, self._price_epoch, force))
             self._price_tasks[task_key] = task
             def completed(done: asyncio.Task) -> None:
                 if self._price_tasks.get(task_key) is done:
@@ -1745,13 +1763,13 @@ class Plugin:
             task.add_done_callback(completed)
         return await asyncio.shield(task)
 
-    async def _lookup_price_with_fallback(self, app_id: str, epoch: int) -> Dict[str, Any]:
+    async def _lookup_price_with_fallback(self, app_id: str, epoch: int, force: bool = False) -> Dict[str, Any]:
         # Server mode delegates fallback to that server; never bypass it locally.
         if self._price_connection["mode"] == "server":
-            return await self._lookup_remote_price(app_id, epoch)
+            return await self._lookup_remote_price(app_id, epoch, force)
         if self._price_preferences.get("provider") == "gg":
-            return await self._lookup_gg_price(app_id, epoch)
-        result = await self._lookup_allkeyshop_price(app_id, epoch)
+            return await self._lookup_gg_price(app_id, epoch, force)
+        result = await self._lookup_allkeyshop_price(app_id, epoch, force)
         if (epoch != self._price_epoch or self._price_stopping or not self._price_preferences["enabled"]
                 or not self._gg_api_key or not self._aks_fallback_allowed(result)):
             return result
@@ -1767,7 +1785,7 @@ class Plugin:
             self._schedule_price_save()
         return fallback
 
-    async def _lookup_allkeyshop_price(self, app_id: Any, request_epoch: int) -> Dict[str, Any]:
+    async def _lookup_allkeyshop_price(self, app_id: Any, request_epoch: int, force: bool = False) -> Dict[str, Any]:
         normalized = str(app_id)
         if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
             return {"success": False, "error": "Érvénytelen Steam AppID."}
@@ -1779,7 +1797,7 @@ class Plugin:
             entry = self._price_cache.get(normalized)
             previous = entry
             epoch = self._price_epoch
-            if not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else self._price_entry_ttl(entry)):
+            if force or not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else self._price_entry_ttl(entry)):
                 if self._price_service_error and time.time() < self._price_service_retry_at:
                     return {"success": False, **self._price_service_error,
                             "retry_after": max(1, int(self._price_service_retry_at - time.time()))}

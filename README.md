@@ -194,3 +194,7 @@ Egyetlen játék átmeneti Steam-adatlekérési hibája nem állítja le a több
 ## 1.0.108: stabil kijelölés az áruházi áraknál
 
 Az áruház külső ársávjai az oldal ismételt ellenőrzésekor helyükön maradnak. A plugin csak a szövegüket frissíti; nem távolítja el és helyezi vissza őket, így nem változtatja meg újra meg újra a csempék térközét és a Steam kijelölését. Csak a Decky plugint kell frissíteni.
+
+## 1.0.109: gyorsabb áruházi ármegjelenítés
+
+A mentett ár a kötegelt cache beolvasása után jelenik meg, indokolatlan betöltésjelzés nélkül. Az áruházi oldal az árakhoz csak a megváltozott, rövid címkéket kapja meg; az oldalfigyelés változásra indul, 12 másodperces tartalék ellenőrzéssel. A játék adatlapján az ár részletei megmagyarázzák a hiányzó ajánlatot, és egy gombbal csak annak a játéknak az ára ellenőrizhető újra. A Decky plugint és az Ubuntu árszervert is frissíteni kell.

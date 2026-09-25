@@ -16,6 +16,7 @@ type PriceBatch = { success: boolean; prices: Record<string, PriceResult> };
 const getCachedPrices = callable<[string[]], PriceBatch>("get_cached_allkeyshop_prices");
 const getRemotePricePreviews = callable<[string[]], PriceBatch>("get_remote_price_previews");
 const getPrice = callable<[string], PriceResult>("get_allkeyshop_price");
+const refreshPrice = callable<[string], PriceResult>("refresh_allkeyshop_price");
 
 async function timed<T>(request: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -254,6 +255,27 @@ export function readSteamEuroPrice(text: string): number | null {
   return Number.isFinite(value) && value > 0 ? value : null;
 }
 
+export function explainMissingPrice(data?: PriceResult): string {
+  if (!data || !data.success || data.disabled || data.skipped || data.offers?.length) return "";
+  if (data.provider === "gg") return "A GG.deals jelenleg nem közöl EU/EUR irányárat ehhez a játékhoz.";
+  if (data.not_found) return data.match_status === "ambiguous"
+    ? "Több azonos nevű játék van a katalógusban; bizonytalan találathoz nem mutatunk árat."
+    : "Ehhez a Steam-játékhoz nem találtunk egyértelmű AKS-katalógustételt.";
+  if (data.history_unavailable) return "Az AKS ismeri a játékot, de még nem közöl hozzá árhistóriát.";
+  const f = data.filtering || {};
+  const total = f.total || 0;
+  if (!total) return "Az AKS jelenleg nem közöl ellenőrizhető ajánlatot ehhez a játékhoz.";
+  const reasons = [
+    ["merchant", "nem engedélyezett bolt"], ["region", "nem megfelelő régió vagy platform"],
+    ["edition", "más kiadás"], ["gift", "tiltott Gift"],
+    ["steam", "Steam közvetlen ajánlata"], ["price", "érvénytelen ár"], ["invalid", "hiányos adat"],
+  ] as const;
+  const excluded = reasons.filter(([key]) => (f[key] || 0) > 0)
+    .map(([key, label]) => `${f[key]} ${label}`);
+  return excluded.length ? `${total} AKS-bejegyzésből nincs megfelelő ajánlat: ${excluded.join(", ")}.`
+    : "Az AKS bejegyzései közül egyik sem felel meg az aktuális szűrésnek.";
+}
+
 export function buildPricePanelScript(appId: string, result?: PriceResult): string {
   return `(() => {
     const appId = ${JSON.stringify(appId)};
@@ -309,6 +331,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
       if (data.fallback_from === 'aks') line('Tartalék forrás: AKS-hiba.');
       line('Kulcsboltok: ' + (data.keyshop_price != null ? data.keyshop_price.toFixed(2) + ' €' : 'nincs ár'));
       line('Hivatalos boltok: ' + (data.retail_price != null ? data.retail_price.toFixed(2) + ' €' : 'nincs ár'));
+      if (data.keyshop_price == null && data.retail_price == null) line((${explainMissingPrice.toString()})(data), true);
       line('Irányár; bolt és terméktípus szerint nem szűrhető.');
       if (data.stale) line('Mentett ár; frissítésre vár.');
       if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
@@ -319,19 +342,12 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     }
     else {
       if (steamPrice !== null) line('Steam: ' + steamPrice.toFixed(2) + ' €' + (steamCheaper ? ' · itt olcsóbb' : ''));
-      if (data.not_found) line(data.match_status === 'ambiguous' ? 'Több azonos nevű játék; bizonytalan árat nem mutatunk.' : 'A játék nincs ezen a néven az AKS-katalógusban.');
-      else if (data.history_unavailable) line('Az AKS API még nem ad árhistóriát ehhez a játékhoz; később újraellenőrizzük.');
-      else if (!data.offers?.length) line('Nincs megfelelő ajánlat az aktuális szűrőkkel.');
-      else for (const [index, offer] of data.offers.entries()) {
+      if (data.offers?.length) for (const [index, offer] of data.offers.entries()) {
         line(offer.price.toFixed(2) + ' € · ' + offer.merchant + ' · ' + offer.kind
           + (offer.coupon ? ' · Kupon: ' + offer.coupon : ''), index === 0);
       }
-      if (!data.not_found && !data.offers?.length && data.filtering) {
-        const f = data.filtering;
-        const labels = {edition:'más kiadás',region:'régió/platform',gift:'Gift tiltva',merchant:'bolt tiltva',price:'hibás ár',invalid:'hiányos',steam:'Steam kizárva'};
-        const excluded = Object.entries(labels).filter(([key]) => f[key]).map(([key, label]) => label + ': ' + f[key]);
-        if (excluded.length) line('Kihagyva: ' + excluded.join(' · '));
-      }
+      const explanation = (${explainMissingPrice.toString()})(data);
+      if (explanation) line(explanation, true);
       if (data.offers?.[0]?.source_updated_at) line('AKS-adat: ' + data.offers[0].source_updated_at);
       if (data.stale) line('Mentett ár; frissítésre vár.');
       if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
@@ -340,6 +356,17 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
         link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; content.appendChild(link);
       }
     }
+    const refresh = document.createElement('button');
+    refresh.type = 'button'; refresh.textContent = 'E játék árának újraellenőrzése';
+    refresh.disabled = data?.pending === true;
+    refresh.style.cssText = 'display:block;margin-top:10px;padding:6px 9px;border:1px solid #67c1f5;border-radius:4px;background:#25455c;color:#fff;cursor:pointer';
+    refresh.addEventListener('click', () => {
+      const queue = window.__controllerXboxPriceRefreshActions ||= [];
+      if (!queue.includes(appId)) queue.push(appId);
+      refresh.disabled = true; refresh.textContent = 'Újraellenőrzés indítva…';
+      window.__dpbStoreMonitor?.signal();
+    });
+    content.appendChild(refresh);
     panel.addEventListener('keydown', event => { if (event.key === 'Escape') { panel.open = false; summary.focus(); } });
     anchor.insertAdjacentElement('afterend', panel);
     ${priceCountdownScript}
@@ -358,16 +385,43 @@ export const tilePriceCleanupScript = `
   }
   delete window.__dpbPriceTiles;
   delete window.__dpbPriceTilesUrl;
+  delete window.__dpbPriceTileLabels;
 `;
 
-export function buildTilePricesScript(url: string, values: Record<string, PriceResult | null>): string {
+type TilePriceModel = { text: string; retryAt?: number; hidden?: boolean };
+
+function tilePriceModel(value: PriceResult | null | undefined): TilePriceModel {
+  if (value === undefined || value?.disabled || value?.skipped) return { text: "", hidden: true };
+  if (!value) return { text: "AKS: betöltés…" };
+  if (value.provider === "gg") {
+    const amount = value.keyshop_price ?? value.retail_price;
+    return { text: !value.success ? "GG.deals: várakozás / hiba"
+      : amount != null ? "GG.deals: tájékoztató ár: " + amount.toFixed(2) + " €" : "GG.deals: nincs ár",
+      retryAt: !value.success ? value.retry_at : undefined };
+  }
+  const offer = value.offers?.[0];
+  const error = ({ pending: "szerveres lekérés folyamatban", server: "szerverkapcsolati hiba",
+    server_version: "árszerver-frissítés szükséges", backend: "Decky-kapcsolati hiba",
+    connection: "kapcsolati hiba", rate_limit: "várakozás", http: "szerverhiba",
+    steam: "Steam-adathiba", match: "nem azonosítható", format: "adatformátum-hiba" } as Record<string, string>)[value.error_code || ""];
+  return { text: !value.success ? "AKS: " + (error || "nem elérhető")
+    : value.not_found ? value.match_status === "ambiguous" ? "AKS: több azonos nevű találat" : "AKS: nincs a katalógusban"
+    : offer ? "AKS: " + offer.price.toFixed(2) + " € ∙ " + offer.merchant
+    : value.history_unavailable ? "AKS: áradat még nincs" : "AKS: nincs ajánlat",
+    retryAt: !value.success ? value.retry_at : undefined };
+}
+
+export function buildTilePricesScript(url: string, values: Record<string, PriceResult | null | undefined>): string {
+  const compact = Object.fromEntries(Object.entries(values).map(([id, value]) => [id, tilePriceModel(value)]));
   return `(() => {
     if (location.href !== ${JSON.stringify(url).replace(/</g, "\\u003c")}) return;
     if (window.__dpbPriceTilesUrl && window.__dpbPriceTilesUrl !== location.href) {
       ${tilePriceCleanupScript}
     }
     window.__dpbPriceTilesUrl = location.href;
-    const values = ${JSON.stringify(values).replace(/</g, "\\u003c")};
+    const values = ${JSON.stringify(compact).replace(/</g, "\\u003c")};
+    const labels = window.__dpbPriceTileLabels ||= new Map();
+    for (const [id, value] of Object.entries(values)) labels.set(id, value);
     const saved = window.__dpbPriceTiles ||= new Map();
     for (const [host] of saved) if (host.isConnected === false) saved.delete(host);
     ${storePriceTilesScript}
@@ -391,14 +445,15 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
       return calendarCard && calendarCard !== host ? calendarCard : null;
     }
     for (const {host, id} of collectPriceTiles()) {
-      if (!(id in values)) continue;
+      const value = labels.get(id);
+      if (!value) continue;
       // Prefer Steam's complete card. Dynamic calendar/featured cards may lack
       // these classes, so accept a one-game wrapper with cover and Steam price.
       const anchor = host.closest('.wishlist_row,.search_result_row,.sale_capsule,.store_capsule,.tab_item,.tab_row_item,.dailydeal,.small_cap,.large_cap,.home_area_spotlight')
         || findSingleAppCard(host, id);
       if (!anchor || anchor.getBoundingClientRect().width < 80) continue;
       let entry = saved.get(anchor);
-      if (values[id]?.disabled || values[id]?.skipped) {
+      if (value.hidden) {
         if (entry) {
           entry.row?.remove();
           for (const [key, value, priority] of entry.original || entry) {
@@ -416,24 +471,26 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
         if (getComputedStyle(anchor).overflow === 'hidden') anchor.style.setProperty('overflow', 'visible');
         if ((parseFloat(getComputedStyle(anchor).marginBottom) || 0) < 32) anchor.style.setProperty('margin-bottom', '32px');
       }
-      const value = values[id], offer = value?.offers?.[0];
       let row = entry.row;
       if (!row || row.isConnected === false) {
         row = document.createElement('span'); row.className = 'dpb-tile-price';
         row.style.cssText = 'position:absolute;top:calc(100% + 3px);left:0;width:100%;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
         anchor.appendChild(row);
         entry.row = row;
+        entry.stateKey = '';
       }
-      delete row.dataset.dpbRetryAt;
-      delete row.dataset.dpbLabel;
-      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : value.history_unavailable ? 'AKS: áradat még nincs' : 'AKS: nincs ajánlat';
-      if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
-      if (value?.provider === 'gg') {
-        const amount = value.keyshop_price ?? value.retail_price;
-        row.textContent = !value.success ? 'GG.deals: várakozás / hiba' : amount != null ? 'GG.deals: tájékoztató ár: ' + amount.toFixed(2) + ' €' : 'GG.deals: nincs ár';
-        if (row.dataset.dpbRetryAt) row.dataset.dpbLabel = row.textContent;
+      const stateKey = value.text + ':' + (value.retryAt || 0);
+      if (entry.stateKey !== stateKey) {
+        delete row.dataset.dpbRetryAt;
+        delete row.dataset.dpbLabel;
+        row.textContent = value.text;
+        if (value.retryAt) {
+          row.dataset.dpbRetryAt = String(value.retryAt);
+          row.dataset.dpbLabel = value.text;
+        }
+        row.title = value.text;
+        entry.stateKey = stateKey;
       }
-      row.title = row.textContent;
     }
     ${priceCountdownScript}
   })();`;
@@ -450,6 +507,10 @@ let tileIds: string[] = [];
 let visibleApps = new Set<string>();
 const refreshQueue = new Set<string>();
 const cacheChecked = new Set<string>();
+const priceHydrating = new Set<string>();
+const sentTileModels = new Map<string, string>();
+let sentTileUrl = "";
+const manualRefreshes = new Map<string, Promise<PriceResult>>();
 const priceListeners = new Set<() => void>();
 export function subscribePriceResults(listener: () => void): () => void {
   priceListeners.add(listener);
@@ -462,13 +523,15 @@ export function visiblePrice(id: string): PriceResult | undefined {
   if (cached) return cached.value;
   return serviceFailure && serviceFailure.expires > Date.now() ? serviceFailure.value : undefined;
 }
-export function resetPriceView(): void { prices.clear(); serviceFailure = undefined; revision++; fetching = false; hydrating = false; currentApp = ""; tileIds = []; tileUrl = ""; visibleApps.clear(); refreshQueue.clear(); cacheChecked.clear(); }
-export function updatePriceView(url: string, send: (script: string) => Promise<unknown>, visibleTileIds: string[] = []): void {
+export function isPriceHydrating(id: string): boolean { return !prices.has(id) && (!cacheChecked.has(id) || priceHydrating.has(id)); }
+export function resetPriceView(): void { prices.clear(); serviceFailure = undefined; revision++; fetching = false; hydrating = false; currentApp = ""; tileIds = []; tileUrl = ""; sentTileUrl = ""; sentTileModels.clear(); visibleApps.clear(); refreshQueue.clear(); cacheChecked.clear(); priceHydrating.clear(); }
+export function updatePriceView(url: string, send: (script: string) => Promise<unknown>, visibleTileIds: string[] = [], pagePriceStateReady = true): void {
   let id = "";
   try { const parsed = new URL(url); if (parsed.hostname === "store.steampowered.com") id = parsed.pathname.match(/^\/app\/(\d+)/)?.[1] ?? ""; } catch { /* no game */ }
   const previousApp = currentApp;
   currentApp = id;
   tileUrl = url;
+  if (sentTileUrl !== url || !pagePriceStateReady) { sentTileUrl = url; sentTileModels.clear(); }
   tileIds = allowsStoreTilePrices(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value) && Number(value) > 0))).slice(0, 80) : [];
   const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
   for (const app of nextVisible) {
@@ -481,15 +544,26 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   for (const app of refreshQueue) if (!nextVisible.has(app)) refreshQueue.delete(app);
   visibleApps = nextVisible;
   const renderTiles = () => {
-    const values: Record<string, PriceResult | null> = {};
-    for (const tile of tileIds) values[tile] = visiblePrice(tile) ?? null;
-    void send(buildTilePricesScript(tileUrl, values)).catch(() => {});
+    const changed: Record<string, PriceResult | null | undefined> = {};
+    for (const tile of tileIds) {
+      const value = prices.get(tile)?.value ?? (isPriceHydrating(tile) ? undefined : visiblePrice(tile) ?? null);
+      const key = JSON.stringify(tilePriceModel(value));
+      if (sentTileModels.get(tile) !== key) { sentTileModels.set(tile, key); changed[tile] = value; }
+    }
+    // The small script still attaches saved labels to newly inserted Steam cards.
+    void send(buildTilePricesScript(tileUrl, changed)).catch(() => sentTileModels.clear());
   };
-  renderTiles();
-  void send(buildPricePanelScript(id, visiblePrice(id))).catch(() => {});
   const batch = [...new Set([...(id ? [id] : []), ...tileIds])].filter(app => !cacheChecked.has(app)).slice(0, 24);
   if (batch.length && !hydrating) {
     for (const app of batch) cacheChecked.add(app);
+    for (const app of batch) priceHydrating.add(app);
+  }
+  renderTiles();
+  if (id && isPriceHydrating(id)) {
+    void send(`(() => { const panel = document.getElementById('deck-play-badges-price');
+      if (panel && !panel.dataset.state?.startsWith(${JSON.stringify(id + ":")})) panel.remove(); })();`).catch(() => {});
+  } else void send(buildPricePanelScript(id, visiblePrice(id))).catch(() => {});
+  if (batch.length && !hydrating) {
     hydrating = true;
     const batchRevision = revision, batchUrl = tileUrl;
     const applyBatch = (values: Record<string, PriceResult>) => {
@@ -503,7 +577,7 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
       }
       if (batchUrl === tileUrl) {
         renderTiles();
-        if (currentApp) void send(buildPricePanelScript(currentApp, visiblePrice(currentApp))).catch(() => {});
+        if (currentApp && !isPriceHydrating(currentApp)) void send(buildPricePanelScript(currentApp, visiblePrice(currentApp))).catch(() => {});
         notifyPriceResults();
       }
     };
@@ -518,7 +592,9 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
       }
     })().catch(() => {}).finally(() => {
       if (batchRevision !== revision) return;
+      for (const app of batch) priceHydrating.delete(app);
       hydrating = false;
+      notifyPriceResults();
       if (batchUrl === tileUrl) updatePriceView(tileUrl, send, tileIds);
     });
     return;
@@ -563,6 +639,31 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     if (tileIds.length) renderTiles();
     notifyPriceResults();
   }).finally(() => { if (requestRevision === revision) fetching = false; });
+}
+
+export function refreshVisiblePrice(appId: string, url: string, send: (script: string) => Promise<unknown>): Promise<PriceResult> {
+  const existing = manualRefreshes.get(appId);
+  if (existing) return existing;
+  const startedRevision = revision;
+  const task = timed(refreshPrice(appId)).then(result => {
+    if (startedRevision !== revision) return result;
+    const old = prices.get(appId)?.value;
+    let value = result;
+    if (!result.success && old?.success) value = { ...old, stale: true, pending: false, error: result.error };
+    const expires = value.pending ? Date.now() + Math.max(1, value.retry_after ?? 3) * 1000
+      : value.checked_at ? value.checked_at * 1000 + priceTtlMs(value)
+      : Date.now() + Math.max(1, value.retry_after ?? 30) * 1000;
+    if (!value.success) value = { ...value, retry_at: expires };
+    prices.set(appId, { value, expires });
+    cacheChecked.add(appId);
+    priceHydrating.delete(appId);
+    sentTileModels.delete(appId);
+    if (tileUrl === url) updatePriceView(url, send, tileIds);
+    notifyPriceResults();
+    return result;
+  }).finally(() => manualRefreshes.delete(appId));
+  manualRefreshes.set(appId, task);
+  return task;
 }
 
 export const nativePriceUrl = 'https://store.steampowered.com/?dpb_native=1';

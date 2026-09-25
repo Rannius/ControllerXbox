@@ -70,6 +70,42 @@ class PriceServerTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fetch.call_count, 1)
             self.assertEqual(self.broker.finished, {})
 
+    async def test_manual_refresh_bypasses_fresh_cache_once(self):
+        self.engine._price_cache["10"] = self.entry()
+        async def lookup(app_id, force=False):
+            self.assertEqual(app_id, "10")
+            self.assertTrue(force)
+            self.engine._price_cache[app_id] = {**self.entry(), "title": "Refreshed"}
+            return {"success": True}
+        with patch.object(self.engine, "_get_allkeyshop_price", side_effect=lookup) as fetch:
+            code, result = await self.request("/v1/price", {"provider": "aks", "app_id": "10",
+                "priority": "foreground", "refresh": True})
+            self.assertEqual(code, 200)
+            self.assertTrue(result["pending"])
+            for _ in range(30):
+                if not self.broker.pending:
+                    break
+                await asyncio.sleep(.01)
+            _, cached = await self.request("/v1/price", {"provider": "aks", "app_id": "10"})
+            self.assertFalse(cached["pending"])
+            self.assertEqual(cached["entry"]["title"], "Refreshed")
+            fetch.assert_called_once_with("10", force=True)
+        self.assertEqual((await self.request("/v1/price", {"provider": "aks", "app_id": "10",
+            "refresh": "true"}))[0], 400)
+
+    async def test_deck_poll_after_forced_refresh_reads_server_despite_fresh_local_cache(self):
+        self.engine._price_cache["10"] = self.entry()
+        async def lookup(app_id, epoch, force=False):
+            self.assertEqual((app_id, force), ("10", False))
+            return {"success": True, "checked_at": time.time(), "offers": [], "updated": True}
+        with patch.object(self.engine, "_lookup_price_with_fallback", side_effect=lookup) as fetch:
+            await self.engine._get_allkeyshop_price("10")
+            fetch.assert_not_called()
+            self.engine._price_force_pending.add("10")
+            refreshed = await self.engine._get_allkeyshop_price("10")
+            self.assertTrue(refreshed["updated"])
+            fetch.assert_called_once()
+
     async def test_foreground_wait_timeout_keeps_shared_job_running(self):
         release = asyncio.Event()
         self.release_events.append(release)

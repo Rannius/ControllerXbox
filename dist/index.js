@@ -351,6 +351,7 @@ const getMerchants = callable("get_price_merchants");
 const getCachedPrices = callable("get_cached_allkeyshop_prices");
 const getRemotePricePreviews = callable("get_remote_price_previews");
 const getPrice = callable("get_allkeyshop_price");
+const refreshPrice = callable("refresh_allkeyshop_price");
 async function timed(request) {
     let timer;
     try {
@@ -604,6 +605,31 @@ function readSteamEuroPrice(text) {
     const value = Number(amount.slice(0, separator).replace(/[.,]/g, "") + "." + amount.slice(separator + 1));
     return Number.isFinite(value) && value > 0 ? value : null;
 }
+function explainMissingPrice(data) {
+    if (!data || !data.success || data.disabled || data.skipped || data.offers?.length)
+        return "";
+    if (data.provider === "gg")
+        return "A GG.deals jelenleg nem közöl EU/EUR irányárat ehhez a játékhoz.";
+    if (data.not_found)
+        return data.match_status === "ambiguous"
+            ? "Több azonos nevű játék van a katalógusban; bizonytalan találathoz nem mutatunk árat."
+            : "Ehhez a Steam-játékhoz nem találtunk egyértelmű AKS-katalógustételt.";
+    if (data.history_unavailable)
+        return "Az AKS ismeri a játékot, de még nem közöl hozzá árhistóriát.";
+    const f = data.filtering || {};
+    const total = f.total || 0;
+    if (!total)
+        return "Az AKS jelenleg nem közöl ellenőrizhető ajánlatot ehhez a játékhoz.";
+    const reasons = [
+        ["merchant", "nem engedélyezett bolt"], ["region", "nem megfelelő régió vagy platform"],
+        ["edition", "más kiadás"], ["gift", "tiltott Gift"],
+        ["steam", "Steam közvetlen ajánlata"], ["price", "érvénytelen ár"], ["invalid", "hiányos adat"],
+    ];
+    const excluded = reasons.filter(([key]) => (f[key] || 0) > 0)
+        .map(([key, label]) => `${f[key]} ${label}`);
+    return excluded.length ? `${total} AKS-bejegyzésből nincs megfelelő ajánlat: ${excluded.join(", ")}.`
+        : "Az AKS bejegyzései közül egyik sem felel meg az aktuális szűrésnek.";
+}
 function buildPricePanelScript(appId, result) {
     return `(() => {
     const appId = ${JSON.stringify(appId)};
@@ -659,6 +685,7 @@ function buildPricePanelScript(appId, result) {
       if (data.fallback_from === 'aks') line('Tartalék forrás: AKS-hiba.');
       line('Kulcsboltok: ' + (data.keyshop_price != null ? data.keyshop_price.toFixed(2) + ' €' : 'nincs ár'));
       line('Hivatalos boltok: ' + (data.retail_price != null ? data.retail_price.toFixed(2) + ' €' : 'nincs ár'));
+      if (data.keyshop_price == null && data.retail_price == null) line((${explainMissingPrice.toString()})(data), true);
       line('Irányár; bolt és terméktípus szerint nem szűrhető.');
       if (data.stale) line('Mentett ár; frissítésre vár.');
       if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
@@ -669,19 +696,12 @@ function buildPricePanelScript(appId, result) {
     }
     else {
       if (steamPrice !== null) line('Steam: ' + steamPrice.toFixed(2) + ' €' + (steamCheaper ? ' · itt olcsóbb' : ''));
-      if (data.not_found) line(data.match_status === 'ambiguous' ? 'Több azonos nevű játék; bizonytalan árat nem mutatunk.' : 'A játék nincs ezen a néven az AKS-katalógusban.');
-      else if (data.history_unavailable) line('Az AKS API még nem ad árhistóriát ehhez a játékhoz; később újraellenőrizzük.');
-      else if (!data.offers?.length) line('Nincs megfelelő ajánlat az aktuális szűrőkkel.');
-      else for (const [index, offer] of data.offers.entries()) {
+      if (data.offers?.length) for (const [index, offer] of data.offers.entries()) {
         line(offer.price.toFixed(2) + ' € · ' + offer.merchant + ' · ' + offer.kind
           + (offer.coupon ? ' · Kupon: ' + offer.coupon : ''), index === 0);
       }
-      if (!data.not_found && !data.offers?.length && data.filtering) {
-        const f = data.filtering;
-        const labels = {edition:'más kiadás',region:'régió/platform',gift:'Gift tiltva',merchant:'bolt tiltva',price:'hibás ár',invalid:'hiányos',steam:'Steam kizárva'};
-        const excluded = Object.entries(labels).filter(([key]) => f[key]).map(([key, label]) => label + ': ' + f[key]);
-        if (excluded.length) line('Kihagyva: ' + excluded.join(' · '));
-      }
+      const explanation = (${explainMissingPrice.toString()})(data);
+      if (explanation) line(explanation, true);
       if (data.offers?.[0]?.source_updated_at) line('AKS-adat: ' + data.offers[0].source_updated_at);
       if (data.stale) line('Mentett ár; frissítésre vár.');
       if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
@@ -690,6 +710,17 @@ function buildPricePanelScript(appId, result) {
         link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; content.appendChild(link);
       }
     }
+    const refresh = document.createElement('button');
+    refresh.type = 'button'; refresh.textContent = 'E játék árának újraellenőrzése';
+    refresh.disabled = data?.pending === true;
+    refresh.style.cssText = 'display:block;margin-top:10px;padding:6px 9px;border:1px solid #67c1f5;border-radius:4px;background:#25455c;color:#fff;cursor:pointer';
+    refresh.addEventListener('click', () => {
+      const queue = window.__controllerXboxPriceRefreshActions ||= [];
+      if (!queue.includes(appId)) queue.push(appId);
+      refresh.disabled = true; refresh.textContent = 'Újraellenőrzés indítva…';
+      window.__dpbStoreMonitor?.signal();
+    });
+    content.appendChild(refresh);
     panel.addEventListener('keydown', event => { if (event.key === 'Escape') { panel.open = false; summary.focus(); } });
     anchor.insertAdjacentElement('afterend', panel);
     ${priceCountdownScript}
@@ -707,15 +738,41 @@ const tilePriceCleanupScript = `
   }
   delete window.__dpbPriceTiles;
   delete window.__dpbPriceTilesUrl;
+  delete window.__dpbPriceTileLabels;
 `;
+function tilePriceModel(value) {
+    if (value === undefined || value?.disabled || value?.skipped)
+        return { text: "", hidden: true };
+    if (!value)
+        return { text: "AKS: betöltés…" };
+    if (value.provider === "gg") {
+        const amount = value.keyshop_price ?? value.retail_price;
+        return { text: !value.success ? "GG.deals: várakozás / hiba"
+                : amount != null ? "GG.deals: tájékoztató ár: " + amount.toFixed(2) + " €" : "GG.deals: nincs ár",
+            retryAt: !value.success ? value.retry_at : undefined };
+    }
+    const offer = value.offers?.[0];
+    const error = { pending: "szerveres lekérés folyamatban", server: "szerverkapcsolati hiba",
+        server_version: "árszerver-frissítés szükséges", backend: "Decky-kapcsolati hiba",
+        connection: "kapcsolati hiba", rate_limit: "várakozás", http: "szerverhiba",
+        steam: "Steam-adathiba", match: "nem azonosítható", format: "adatformátum-hiba" }[value.error_code || ""];
+    return { text: !value.success ? "AKS: " + (error || "nem elérhető")
+            : value.not_found ? value.match_status === "ambiguous" ? "AKS: több azonos nevű találat" : "AKS: nincs a katalógusban"
+                : offer ? "AKS: " + offer.price.toFixed(2) + " € ∙ " + offer.merchant
+                    : value.history_unavailable ? "AKS: áradat még nincs" : "AKS: nincs ajánlat",
+        retryAt: !value.success ? value.retry_at : undefined };
+}
 function buildTilePricesScript(url, values) {
+    const compact = Object.fromEntries(Object.entries(values).map(([id, value]) => [id, tilePriceModel(value)]));
     return `(() => {
     if (location.href !== ${JSON.stringify(url).replace(/</g, "\\u003c")}) return;
     if (window.__dpbPriceTilesUrl && window.__dpbPriceTilesUrl !== location.href) {
       ${tilePriceCleanupScript}
     }
     window.__dpbPriceTilesUrl = location.href;
-    const values = ${JSON.stringify(values).replace(/</g, "\\u003c")};
+    const values = ${JSON.stringify(compact).replace(/</g, "\\u003c")};
+    const labels = window.__dpbPriceTileLabels ||= new Map();
+    for (const [id, value] of Object.entries(values)) labels.set(id, value);
     const saved = window.__dpbPriceTiles ||= new Map();
     for (const [host] of saved) if (host.isConnected === false) saved.delete(host);
     ${storePriceTilesScript}
@@ -739,14 +796,15 @@ function buildTilePricesScript(url, values) {
       return calendarCard && calendarCard !== host ? calendarCard : null;
     }
     for (const {host, id} of collectPriceTiles()) {
-      if (!(id in values)) continue;
+      const value = labels.get(id);
+      if (!value) continue;
       // Prefer Steam's complete card. Dynamic calendar/featured cards may lack
       // these classes, so accept a one-game wrapper with cover and Steam price.
       const anchor = host.closest('.wishlist_row,.search_result_row,.sale_capsule,.store_capsule,.tab_item,.tab_row_item,.dailydeal,.small_cap,.large_cap,.home_area_spotlight')
         || findSingleAppCard(host, id);
       if (!anchor || anchor.getBoundingClientRect().width < 80) continue;
       let entry = saved.get(anchor);
-      if (values[id]?.disabled || values[id]?.skipped) {
+      if (value.hidden) {
         if (entry) {
           entry.row?.remove();
           for (const [key, value, priority] of entry.original || entry) {
@@ -764,24 +822,26 @@ function buildTilePricesScript(url, values) {
         if (getComputedStyle(anchor).overflow === 'hidden') anchor.style.setProperty('overflow', 'visible');
         if ((parseFloat(getComputedStyle(anchor).marginBottom) || 0) < 32) anchor.style.setProperty('margin-bottom', '32px');
       }
-      const value = values[id], offer = value?.offers?.[0];
       let row = entry.row;
       if (!row || row.isConnected === false) {
         row = document.createElement('span'); row.className = 'dpb-tile-price';
         row.style.cssText = 'position:absolute;top:calc(100% + 3px);left:0;width:100%;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
         anchor.appendChild(row);
         entry.row = row;
+        entry.stateKey = '';
       }
-      delete row.dataset.dpbRetryAt;
-      delete row.dataset.dpbLabel;
-      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : value.history_unavailable ? 'AKS: áradat még nincs' : 'AKS: nincs ajánlat';
-      if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
-      if (value?.provider === 'gg') {
-        const amount = value.keyshop_price ?? value.retail_price;
-        row.textContent = !value.success ? 'GG.deals: várakozás / hiba' : amount != null ? 'GG.deals: tájékoztató ár: ' + amount.toFixed(2) + ' €' : 'GG.deals: nincs ár';
-        if (row.dataset.dpbRetryAt) row.dataset.dpbLabel = row.textContent;
+      const stateKey = value.text + ':' + (value.retryAt || 0);
+      if (entry.stateKey !== stateKey) {
+        delete row.dataset.dpbRetryAt;
+        delete row.dataset.dpbLabel;
+        row.textContent = value.text;
+        if (value.retryAt) {
+          row.dataset.dpbRetryAt = String(value.retryAt);
+          row.dataset.dpbLabel = value.text;
+        }
+        row.title = value.text;
+        entry.stateKey = stateKey;
       }
-      row.title = row.textContent;
     }
     ${priceCountdownScript}
   })();`;
@@ -797,6 +857,10 @@ let tileIds = [];
 let visibleApps = new Set();
 const refreshQueue = new Set();
 const cacheChecked = new Set();
+const priceHydrating = new Set();
+const sentTileModels = new Map();
+let sentTileUrl = "";
+const manualRefreshes = new Map();
 const priceListeners = new Set();
 function subscribePriceResults(listener) {
     priceListeners.add(listener);
@@ -811,8 +875,9 @@ function visiblePrice(id) {
         return cached.value;
     return serviceFailure && serviceFailure.expires > Date.now() ? serviceFailure.value : undefined;
 }
-function resetPriceView() { prices.clear(); serviceFailure = undefined; revision++; fetching = false; hydrating = false; currentApp = ""; tileIds = []; tileUrl = ""; visibleApps.clear(); refreshQueue.clear(); cacheChecked.clear(); }
-function updatePriceView(url, send, visibleTileIds = []) {
+function isPriceHydrating(id) { return !prices.has(id) && (!cacheChecked.has(id) || priceHydrating.has(id)); }
+function resetPriceView() { prices.clear(); serviceFailure = undefined; revision++; fetching = false; hydrating = false; currentApp = ""; tileIds = []; tileUrl = ""; sentTileUrl = ""; sentTileModels.clear(); visibleApps.clear(); refreshQueue.clear(); cacheChecked.clear(); priceHydrating.clear(); }
+function updatePriceView(url, send, visibleTileIds = [], pagePriceStateReady = true) {
     let id = "";
     try {
         const parsed = new URL(url);
@@ -823,6 +888,10 @@ function updatePriceView(url, send, visibleTileIds = []) {
     const previousApp = currentApp;
     currentApp = id;
     tileUrl = url;
+    if (sentTileUrl !== url || !pagePriceStateReady) {
+        sentTileUrl = url;
+        sentTileModels.clear();
+    }
     tileIds = allowsStoreTilePrices(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value) && Number(value) > 0))).slice(0, 80) : [];
     const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
     for (const app of nextVisible) {
@@ -837,17 +906,33 @@ function updatePriceView(url, send, visibleTileIds = []) {
             refreshQueue.delete(app);
     visibleApps = nextVisible;
     const renderTiles = () => {
-        const values = {};
-        for (const tile of tileIds)
-            values[tile] = visiblePrice(tile) ?? null;
-        void send(buildTilePricesScript(tileUrl, values)).catch(() => { });
+        const changed = {};
+        for (const tile of tileIds) {
+            const value = prices.get(tile)?.value ?? (isPriceHydrating(tile) ? undefined : visiblePrice(tile) ?? null);
+            const key = JSON.stringify(tilePriceModel(value));
+            if (sentTileModels.get(tile) !== key) {
+                sentTileModels.set(tile, key);
+                changed[tile] = value;
+            }
+        }
+        // The small script still attaches saved labels to newly inserted Steam cards.
+        void send(buildTilePricesScript(tileUrl, changed)).catch(() => sentTileModels.clear());
     };
-    renderTiles();
-    void send(buildPricePanelScript(id, visiblePrice(id))).catch(() => { });
     const batch = [...new Set([...(id ? [id] : []), ...tileIds])].filter(app => !cacheChecked.has(app)).slice(0, 24);
     if (batch.length && !hydrating) {
         for (const app of batch)
             cacheChecked.add(app);
+        for (const app of batch)
+            priceHydrating.add(app);
+    }
+    renderTiles();
+    if (id && isPriceHydrating(id)) {
+        void send(`(() => { const panel = document.getElementById('deck-play-badges-price');
+      if (panel && !panel.dataset.state?.startsWith(${JSON.stringify(id + ":")})) panel.remove(); })();`).catch(() => { });
+    }
+    else
+        void send(buildPricePanelScript(id, visiblePrice(id))).catch(() => { });
+    if (batch.length && !hydrating) {
         hydrating = true;
         const batchRevision = revision, batchUrl = tileUrl;
         const applyBatch = (values) => {
@@ -865,7 +950,7 @@ function updatePriceView(url, send, visibleTileIds = []) {
             }
             if (batchUrl === tileUrl) {
                 renderTiles();
-                if (currentApp)
+                if (currentApp && !isPriceHydrating(currentApp))
                     void send(buildPricePanelScript(currentApp, visiblePrice(currentApp))).catch(() => { });
                 notifyPriceResults();
             }
@@ -883,7 +968,10 @@ function updatePriceView(url, send, visibleTileIds = []) {
         })().catch(() => { }).finally(() => {
             if (batchRevision !== revision)
                 return;
+            for (const app of batch)
+                priceHydrating.delete(app);
             hydrating = false;
+            notifyPriceResults();
             if (batchUrl === tileUrl)
                 updatePriceView(tileUrl, send, tileIds);
         });
@@ -940,6 +1028,35 @@ function updatePriceView(url, send, visibleTileIds = []) {
         notifyPriceResults();
     }).finally(() => { if (requestRevision === revision)
         fetching = false; });
+}
+function refreshVisiblePrice(appId, url, send) {
+    const existing = manualRefreshes.get(appId);
+    if (existing)
+        return existing;
+    const startedRevision = revision;
+    const task = timed(refreshPrice(appId)).then(result => {
+        if (startedRevision !== revision)
+            return result;
+        const old = prices.get(appId)?.value;
+        let value = result;
+        if (!result.success && old?.success)
+            value = { ...old, stale: true, pending: false, error: result.error };
+        const expires = value.pending ? Date.now() + Math.max(1, value.retry_after ?? 3) * 1000
+            : value.checked_at ? value.checked_at * 1000 + priceTtlMs(value)
+                : Date.now() + Math.max(1, value.retry_after ?? 30) * 1000;
+        if (!value.success)
+            value = { ...value, retry_at: expires };
+        prices.set(appId, { value, expires });
+        cacheChecked.add(appId);
+        priceHydrating.delete(appId);
+        sentTileModels.delete(appId);
+        if (tileUrl === url)
+            updatePriceView(url, send, tileIds);
+        notifyPriceResults();
+        return result;
+    }).finally(() => manualRefreshes.delete(appId));
+    manualRefreshes.set(appId, task);
+    return task;
 }
 const nativePriceUrl = 'https://store.steampowered.com/?dpb_native=1';
 function clearNativePriceView() {
@@ -1036,7 +1153,7 @@ function renderNativePrices() {
     const visible = visibleCards();
     for (const [node, card] of visible) {
         const value = visiblePrice(card.id);
-        const text = tilePriceLabel(value);
+        const text = isPriceHydrating(card.id) ? "" : tilePriceLabel(value);
         node.textContent = text;
         node.style.visibility = text ? "visible" : "hidden";
         node.title = text + (value?.offers?.[0]?.source_updated_at ? " · AKS-adat: " + value.offers[0].source_updated_at : "");
@@ -1072,7 +1189,7 @@ function NativeTilePrice({ appId, enabled }) {
     }, [appId, enabled]);
     if (!enabled)
         return null;
-    const label = tilePriceLabel(visiblePrice(appId));
+    const label = isPriceHydrating(appId) ? "" : tilePriceLabel(visiblePrice(appId));
     return SP_JSX.jsx("span", { ref: ref, style: { position: "absolute", bottom: 0, left: 0, right: 0,
             height: "25px", zIndex: 101, boxSizing: "border-box", padding: "3px 6px",
             background: "#162634", color: "#dce6ed", font: "11px/19px Arial,sans-serif",
@@ -1347,7 +1464,8 @@ const BADGE_KEY = "controller-xbox-tile-badge";
 const DETAIL_BADGE_KEY = "controller-xbox-detail-badge";
 const DETAIL_PATCH_FLAG = "__controllerXboxDetailPatched";
 const STORE_DEBUGGER_URL = "http://localhost:8080/json";
-const STORE_SCAN_INTERVAL_MS = 1_500;
+const STORE_SCAN_INTERVAL_MS = 12_000;
+const STORE_SCAN_SIGNAL = "DeckPlayBadges:store-dirty";
 const NOTIFICATION_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 const getControllerSupport = callable("get_controller_support");
 const getGfnAvailability = callable("get_gfn_availability");
@@ -1411,6 +1529,8 @@ let nativePriceTilesEnabled = false;
 let storeWebSocketReady = false;
 let storeMessageId = 1;
 let storeScanTimer;
+let storeScanDueAt = 0;
+let storeScanInFlight = false;
 let storeReconnectTimer;
 let storeCurrentAppIds = new Set();
 let notificationTimer;
@@ -2401,9 +2521,42 @@ function patchLibraryDetails() {
         renderPatches.clear();
     };
 }
+function buildStoreMonitorScript() {
+    return `
+    if (!window.__dpbStoreMonitor && document.documentElement) {
+      let timer;
+      const signal = () => {
+        if (document.visibilityState === 'hidden') return;
+        clearTimeout(timer);
+        timer = setTimeout(() => console.debug(${JSON.stringify(STORE_SCAN_SIGNAL)}), 350);
+      };
+      const relevant = node => node?.nodeType === 1 &&
+        (node.matches?.('a[href*="/app/"],[data-ds-appid],[data-app-id],.wishlist_row,.StoreSalePriceWidgetContainer') ||
+         node.querySelector?.('a[href*="/app/"],[data-ds-appid],[data-app-id],.wishlist_row,.StoreSalePriceWidgetContainer'));
+      const observer = new MutationObserver(records => {
+        for (const record of records) {
+          if (record.type === 'attributes') { if (relevant(record.target)) { signal(); break; } continue; }
+          if (Array.from(record.addedNodes).some(relevant) || Array.from(record.removedNodes).some(relevant)) {
+            signal(); break;
+          }
+        }
+      });
+      observer.observe(document.documentElement, { childList:true, subtree:true, attributes:true,
+        attributeFilter:['href','data-ds-appid','data-app-id'] });
+      window.addEventListener('scroll', signal, true);
+      window.addEventListener('resize', signal);
+      window.__dpbStoreMonitor = { signal, disconnect() {
+        observer.disconnect(); clearTimeout(timer);
+        window.removeEventListener('scroll', signal, true);
+        window.removeEventListener('resize', signal);
+      } };
+    }
+  `;
+}
 function buildStoreScanScript() {
     return `
     (function() {
+      ${buildStoreMonitorScript()}
       const ids = new Set();
       ${storePriceTilesScript}
       const tileIds = Array.from(new Set(collectPriceTiles().map(item => item.id))).slice(0, 80);
@@ -2425,7 +2578,11 @@ function buildStoreScanScript() {
       const watchActions = Array.isArray(window.__controllerXboxWatchActions)
         ? window.__controllerXboxWatchActions.splice(0, 20).map(String)
         : [];
-      return { url: location.href, appIds: Array.from(ids), tileIds, watchActions };
+      const priceRefreshActions = Array.isArray(window.__controllerXboxPriceRefreshActions)
+        ? window.__controllerXboxPriceRefreshActions.splice(0, 10).map(String)
+        : [];
+      return { url: location.href, appIds: Array.from(ids), tileIds, watchActions,
+        priceRefreshActions, priceViewReady: Boolean(window.__dpbPriceTileLabels) };
     })();
   `;
 }
@@ -2624,19 +2781,29 @@ function renderStoreBadges() {
     });
 }
 function scheduleStoreScan(delay = STORE_SCAN_INTERVAL_MS) {
-    if (storeScanTimer !== undefined)
-        window.clearTimeout(storeScanTimer);
     if (!storeMounted)
         return;
+    const dueAt = Date.now() + delay;
+    if (storeScanTimer !== undefined && storeScanDueAt <= dueAt)
+        return;
+    if (storeScanTimer !== undefined)
+        window.clearTimeout(storeScanTimer);
+    storeScanDueAt = dueAt;
     storeScanTimer = window.setTimeout(() => void scanStorePage(), delay);
 }
 async function scanStorePage() {
     storeScanTimer = undefined;
+    storeScanDueAt = 0;
     if (!storeMounted || !storeWebSocketReady)
         return;
+    if (storeScanInFlight) {
+        scheduleStoreScan(500);
+        return;
+    }
+    storeScanInFlight = true;
     try {
         const result = await sendStoreRuntime(buildStoreScanScript(), true);
-        updatePriceView(result?.url ?? "", sendStoreRuntime, Array.isArray(result?.tileIds) ? result.tileIds : []);
+        updatePriceView(result?.url ?? "", sendStoreRuntime, Array.isArray(result?.tileIds) ? result.tileIds : [], result?.priceViewReady === true);
         priceWishlist.scan(sendStoreRuntime);
         const nextIds = new Set((Array.isArray(result?.appIds) ? result.appIds : [])
             .map((value) => String(value))
@@ -2647,6 +2814,15 @@ async function scanStorePage() {
             .filter((value) => /^\d+$/.test(value) && Number(value) > 0);
         for (const appId of watchActions)
             void toggleWatchlistGame(appId);
+        const openedStoreApp = (result?.url ?? "").match(/^https:\/\/store\.steampowered\.com\/app\/(\d+)/)?.[1];
+        const priceRefreshActions = (Array.isArray(result?.priceRefreshActions) ? result.priceRefreshActions : [])
+            .map(String).filter(value => value === openedStoreApp);
+        for (const appId of priceRefreshActions) {
+            void refreshVisiblePrice(appId, result?.url ?? "", sendStoreRuntime)
+                .then(value => { if (value.pending)
+                scheduleStoreScan(Math.max(1000, (value.retry_after ?? 3) * 1000)); })
+                .catch(error => console.debug("A játék árának újraellenőrzése sikertelen", error));
+        }
         for (const appId of nextIds)
             queueSupportLookup(appId);
         renderStoreBadges();
@@ -2655,6 +2831,7 @@ async function scanStorePage() {
         console.debug("ControllerXbox store scan skipped", error);
     }
     finally {
+        storeScanInFlight = false;
         scheduleStoreScan();
     }
 }
@@ -2720,6 +2897,9 @@ async function connectToStoreDebugger() {
             if (message.method === "Page.frameNavigated" && message.params?.frame?.url?.includes("store.steampowered.com")) {
                 scheduleStoreScan(500);
             }
+            if (message.method === "Runtime.consoleAPICalled" && message.params?.args?.[0]?.value === STORE_SCAN_SIGNAL) {
+                scheduleStoreScan(250);
+            }
         };
         socket.onerror = () => {
             if (storeWebSocket === socket)
@@ -2746,6 +2926,7 @@ function disconnectStoreDebugger() {
     if (storeReconnectTimer !== undefined)
         window.clearTimeout(storeReconnectTimer);
     storeScanTimer = undefined;
+    storeScanDueAt = 0;
     storeReconnectTimer = undefined;
     if (storeWebSocketReady) {
         void sendStoreRuntime(`
@@ -2758,6 +2939,8 @@ function disconnectStoreDebugger() {
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
         delete window.__controllerXboxWatchActions;
+        delete window.__controllerXboxPriceRefreshActions;
+        window.__dpbStoreMonitor?.disconnect(); delete window.__dpbStoreMonitor;
       })();
     `).catch(() => { });
     }

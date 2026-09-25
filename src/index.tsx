@@ -4,7 +4,7 @@ import { CloudResumeRefresh } from "./cloudResumeRefresh";
 import { BadgeSizeSettings, BadgeSizes } from "./BadgeSizeSettings";
 import { HungarianProgress, CuratorProgress } from "./HungarianProgress";
 import { CatalogStatus } from "./CatalogStatus";
-import { AllKeyShopSettings, AllKeyShopMerchants, PriceCacheStatus, tilePriceCleanupScript, resetPriceView, updatePriceView } from "./AllKeyShop";
+import { AllKeyShopSettings, AllKeyShopMerchants, PriceCacheStatus, refreshVisiblePrice, tilePriceCleanupScript, resetPriceView, updatePriceView } from "./AllKeyShop";
 import { storeBadgeDockScript, storeBadgeDockCleanupScript } from "./storeBadgeDock";
 import { storePriceTilesScript } from "./storePriceTiles";
 import { NativeTilePrice, stopNativePriceTiles } from "./NativeTilePrice";
@@ -23,7 +23,8 @@ const BADGE_KEY = "controller-xbox-tile-badge";
 const DETAIL_BADGE_KEY = "controller-xbox-detail-badge";
 const DETAIL_PATCH_FLAG = "__controllerXboxDetailPatched";
 const STORE_DEBUGGER_URL = "http://localhost:8080/json";
-const STORE_SCAN_INTERVAL_MS = 1_500;
+const STORE_SCAN_INTERVAL_MS = 12_000;
+const STORE_SCAN_SIGNAL = "DeckPlayBadges:store-dirty";
 const NOTIFICATION_CHECK_INTERVAL_MS = 15 * 60 * 1000;
 
 type SupportResponse = {
@@ -178,13 +179,15 @@ type StorePageScan = {
   url?: string;
   appIds?: string[];
   watchActions?: string[];
+  priceRefreshActions?: string[];
+  priceViewReady?: boolean;
 };
 type StoreRuntimeResponse = {
   id?: number;
   result?: { result?: { value?: unknown } };
   error?: unknown;
   method?: string;
-  params?: { frame?: { url?: string } };
+  params?: { frame?: { url?: string }; args?: { value?: unknown }[] };
 };
 
 const getControllerSupport = callable<[appIds: string[]], SupportResponse>("get_controller_support");
@@ -271,6 +274,8 @@ let nativePriceTilesEnabled = false;
 let storeWebSocketReady = false;
 let storeMessageId = 1;
 let storeScanTimer: number | undefined;
+let storeScanDueAt = 0;
+let storeScanInFlight = false;
 let storeReconnectTimer: number | undefined;
 let storeCurrentAppIds = new Set<string>();
 let notificationTimer: number | undefined;
@@ -1284,9 +1289,43 @@ function patchLibraryDetails(): () => void {
   };
 }
 
+function buildStoreMonitorScript(): string {
+  return `
+    if (!window.__dpbStoreMonitor && document.documentElement) {
+      let timer;
+      const signal = () => {
+        if (document.visibilityState === 'hidden') return;
+        clearTimeout(timer);
+        timer = setTimeout(() => console.debug(${JSON.stringify(STORE_SCAN_SIGNAL)}), 350);
+      };
+      const relevant = node => node?.nodeType === 1 &&
+        (node.matches?.('a[href*="/app/"],[data-ds-appid],[data-app-id],.wishlist_row,.StoreSalePriceWidgetContainer') ||
+         node.querySelector?.('a[href*="/app/"],[data-ds-appid],[data-app-id],.wishlist_row,.StoreSalePriceWidgetContainer'));
+      const observer = new MutationObserver(records => {
+        for (const record of records) {
+          if (record.type === 'attributes') { if (relevant(record.target)) { signal(); break; } continue; }
+          if (Array.from(record.addedNodes).some(relevant) || Array.from(record.removedNodes).some(relevant)) {
+            signal(); break;
+          }
+        }
+      });
+      observer.observe(document.documentElement, { childList:true, subtree:true, attributes:true,
+        attributeFilter:['href','data-ds-appid','data-app-id'] });
+      window.addEventListener('scroll', signal, true);
+      window.addEventListener('resize', signal);
+      window.__dpbStoreMonitor = { signal, disconnect() {
+        observer.disconnect(); clearTimeout(timer);
+        window.removeEventListener('scroll', signal, true);
+        window.removeEventListener('resize', signal);
+      } };
+    }
+  `;
+}
+
 function buildStoreScanScript(): string {
   return `
     (function() {
+      ${buildStoreMonitorScript()}
       const ids = new Set();
       ${storePriceTilesScript}
       const tileIds = Array.from(new Set(collectPriceTiles().map(item => item.id))).slice(0, 80);
@@ -1308,7 +1347,11 @@ function buildStoreScanScript(): string {
       const watchActions = Array.isArray(window.__controllerXboxWatchActions)
         ? window.__controllerXboxWatchActions.splice(0, 20).map(String)
         : [];
-      return { url: location.href, appIds: Array.from(ids), tileIds, watchActions };
+      const priceRefreshActions = Array.isArray(window.__controllerXboxPriceRefreshActions)
+        ? window.__controllerXboxPriceRefreshActions.splice(0, 10).map(String)
+        : [];
+      return { url: location.href, appIds: Array.from(ids), tileIds, watchActions,
+        priceRefreshActions, priceViewReady: Boolean(window.__dpbPriceTileLabels) };
     })();
   `;
 }
@@ -1513,17 +1556,24 @@ function renderStoreBadges(): void {
 }
 
 function scheduleStoreScan(delay = STORE_SCAN_INTERVAL_MS): void {
-  if (storeScanTimer !== undefined) window.clearTimeout(storeScanTimer);
   if (!storeMounted) return;
+  const dueAt = Date.now() + delay;
+  if (storeScanTimer !== undefined && storeScanDueAt <= dueAt) return;
+  if (storeScanTimer !== undefined) window.clearTimeout(storeScanTimer);
+  storeScanDueAt = dueAt;
   storeScanTimer = window.setTimeout(() => void scanStorePage(), delay);
 }
 
 async function scanStorePage(): Promise<void> {
   storeScanTimer = undefined;
+  storeScanDueAt = 0;
   if (!storeMounted || !storeWebSocketReady) return;
+  if (storeScanInFlight) { scheduleStoreScan(500); return; }
+  storeScanInFlight = true;
   try {
     const result = await sendStoreRuntime(buildStoreScanScript(), true) as StorePageScan | undefined;
-    updatePriceView(result?.url ?? "", sendStoreRuntime, Array.isArray(result?.tileIds) ? result.tileIds : []);
+    updatePriceView(result?.url ?? "", sendStoreRuntime, Array.isArray(result?.tileIds) ? result.tileIds : [],
+      result?.priceViewReady === true);
     priceWishlist.scan(sendStoreRuntime);
     const nextIds = new Set(
       (Array.isArray(result?.appIds) ? result.appIds : [])
@@ -1535,11 +1585,20 @@ async function scanStorePage(): Promise<void> {
       .map((value) => String(value))
       .filter((value) => /^\d+$/.test(value) && Number(value) > 0);
     for (const appId of watchActions) void toggleWatchlistGame(appId);
+    const openedStoreApp = (result?.url ?? "").match(/^https:\/\/store\.steampowered\.com\/app\/(\d+)/)?.[1];
+    const priceRefreshActions = (Array.isArray(result?.priceRefreshActions) ? result.priceRefreshActions : [])
+      .map(String).filter(value => value === openedStoreApp);
+    for (const appId of priceRefreshActions) {
+      void refreshVisiblePrice(appId, result?.url ?? "", sendStoreRuntime)
+        .then(value => { if (value.pending) scheduleStoreScan(Math.max(1000, (value.retry_after ?? 3) * 1000)); })
+        .catch(error => console.debug("A játék árának újraellenőrzése sikertelen", error));
+    }
     for (const appId of nextIds) queueSupportLookup(appId);
     renderStoreBadges();
   } catch (error) {
     console.debug("ControllerXbox store scan skipped", error);
   } finally {
+    storeScanInFlight = false;
     scheduleStoreScan();
   }
 }
@@ -1598,6 +1657,9 @@ async function connectToStoreDebugger(): Promise<void> {
       if (message.method === "Page.frameNavigated" && message.params?.frame?.url?.includes("store.steampowered.com")) {
         scheduleStoreScan(500);
       }
+      if (message.method === "Runtime.consoleAPICalled" && message.params?.args?.[0]?.value === STORE_SCAN_SIGNAL) {
+        scheduleStoreScan(250);
+      }
     };
     socket.onerror = () => {
       if (storeWebSocket === socket) console.debug("ControllerXbox store debugger connection error");
@@ -1620,6 +1682,7 @@ function disconnectStoreDebugger(): void {
   if (storeScanTimer !== undefined) window.clearTimeout(storeScanTimer);
   if (storeReconnectTimer !== undefined) window.clearTimeout(storeReconnectTimer);
   storeScanTimer = undefined;
+  storeScanDueAt = 0;
   storeReconnectTimer = undefined;
   if (storeWebSocketReady) {
     void sendStoreRuntime(`
@@ -1632,6 +1695,8 @@ function disconnectStoreDebugger(): void {
         document.querySelectorAll('.controller-xbox-store-card-badges').forEach(function(node) { node.remove(); });
         document.getElementById('controller-xbox-store-style')?.remove();
         delete window.__controllerXboxWatchActions;
+        delete window.__controllerXboxPriceRefreshActions;
+        window.__dpbStoreMonitor?.disconnect(); delete window.__dpbStoreMonitor;
       })();
     `).catch(() => {});
   }
