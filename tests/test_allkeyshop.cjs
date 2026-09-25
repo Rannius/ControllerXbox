@@ -145,8 +145,9 @@ test('homepage featured price sits below its full card',()=>{
 
 test('home DLC tile price stays below the entire card while Steam price loads and page scrolls',()=>{
  const f=fixture(),url='https://store.steampowered.com/';
+ let layoutWrites=0,appends=0;
  const values=new Map(),style={cssText:'',getPropertyValue:key=>values.get(key)||'',getPropertyPriority:()=>'',
-  setProperty:(key,value)=>values.set(key,value),removeProperty:key=>values.delete(key)};
+  setProperty:(key,value)=>{layoutWrites++;values.set(key,value);},removeProperty:key=>{layoutWrites++;values.delete(key);}};
  const card={left:100,top:480,right:520,bottom:720,width:420,height:240};
  const image={left:100,top:480,right:520,bottom:655,width:420,height:175,getBoundingClientRect(){return this;}};
  let steam=null;
@@ -159,7 +160,7 @@ test('home DLC tile price stays below the entire card while Steam price loads an
   getAttribute:key=>key==='href'?'https://store.steampowered.com/app/2780810/':'',
   getBoundingClientRect:()=>card,querySelector:selector=>selector==='.discount_block[data-price-final]'&&steam?
    {getBoundingClientRect:()=>steam}:selector.startsWith('img')?image:null,
-  querySelectorAll:selector=>selector.startsWith('img')?[image]:[],appendChild(row){this.row=row;}};
+  querySelectorAll:selector=>selector.startsWith('img')?[image]:[],appendChild(row){appends++;this.row=row;}};
  const context={location:{href:url,pathname:'/'},URL,innerWidth:1800,innerHeight:900,window:{},Date,
   document:{body:{},querySelectorAll:selector=>selector.startsWith('a[href')?[host]:[],
    createElement:()=>({style:{cssText:''},dataset:{}})},
@@ -172,11 +173,15 @@ test('home DLC tile price stays below the entire card while Steam price loads an
  assert.equal(style.getPropertyValue('overflow'),'visible');
  assert.equal(style.getPropertyValue('margin-bottom'),'32px');
  assert.equal(style.getPropertyValue('padding-bottom'),'');
+ const firstRow=host.row,firstLayoutWrites=layoutWrites;
  steam={left:250,top:665,right:520,bottom:720,width:270,height:55};
  scroll=100;card.top-=scroll;card.bottom-=scroll;image.top-=scroll;image.bottom-=scroll;
  vm.runInNewContext(f.api.buildTilePricesScript(url,{'2780810':{success:true,
   offers:[{price:16.1,merchant:'Kinguin'}]}}),context);
  assert.match(host.row.style.cssText,/top:calc\(100% \+ 3px\);left:0;width:100%/);
+ assert.equal(host.row,firstRow);
+ assert.equal(appends,1);
+ assert.equal(layoutWrites,firstLayoutWrites);
 });
 
 test('tile prices require explicit visible IDs, share cache and stop when disabled',async()=>{

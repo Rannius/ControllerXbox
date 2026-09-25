@@ -348,21 +348,28 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
 
 // Store cards reserve a short strip below themselves for the price label.
 export const tilePriceCleanupScript = `
-  for (const [host, original] of window.__dpbPriceTiles || []) {
-    host.querySelector(':scope > .dpb-tile-price')?.remove();
+  for (const [host, entry] of window.__dpbPriceTiles || []) {
+    if (entry.row) entry.row.remove();
+    else host.querySelector(':scope > .dpb-tile-price')?.remove();
+    const original = entry.original || entry;
     for (const [key, value, priority] of original) {
       if (value) host.style.setProperty(key, value, priority); else host.style.removeProperty(key);
     }
   }
   delete window.__dpbPriceTiles;
+  delete window.__dpbPriceTilesUrl;
 `;
 
 export function buildTilePricesScript(url: string, values: Record<string, PriceResult | null>): string {
   return `(() => {
     if (location.href !== ${JSON.stringify(url).replace(/</g, "\\u003c")}) return;
-    ${tilePriceCleanupScript}
+    if (window.__dpbPriceTilesUrl && window.__dpbPriceTilesUrl !== location.href) {
+      ${tilePriceCleanupScript}
+    }
+    window.__dpbPriceTilesUrl = location.href;
     const values = ${JSON.stringify(values).replace(/</g, "\\u003c")};
-    const saved = window.__dpbPriceTiles = new Map();
+    const saved = window.__dpbPriceTiles ||= new Map();
+    for (const [host] of saved) if (host.isConnected === false) saved.delete(host);
     ${storePriceTilesScript}
     function findSingleAppCard(host, id) {
       const calendar = host.closest('.personal_calendar_ctn');
@@ -384,21 +391,41 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
       return calendarCard && calendarCard !== host ? calendarCard : null;
     }
     for (const {host, id} of collectPriceTiles()) {
-      if (!(id in values) || values[id]?.disabled || values[id]?.skipped) continue;
+      if (!(id in values)) continue;
       // Prefer Steam's complete card. Dynamic calendar/featured cards may lack
       // these classes, so accept a one-game wrapper with cover and Steam price.
       const anchor = host.closest('.wishlist_row,.search_result_row,.sale_capsule,.store_capsule,.tab_item,.tab_row_item,.dailydeal,.small_cap,.large_cap,.home_area_spotlight')
         || findSingleAppCard(host, id);
       if (!anchor || anchor.getBoundingClientRect().width < 80) continue;
-      if (saved.has(anchor)) continue;
-      saved.set(anchor, ['position', 'overflow', 'margin-bottom']
-        .map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
-      if (getComputedStyle(anchor).position === 'static') anchor.style.setProperty('position', 'relative');
-      if (getComputedStyle(anchor).overflow === 'hidden') anchor.style.setProperty('overflow', 'visible');
-      if ((parseFloat(getComputedStyle(anchor).marginBottom) || 0) < 32) anchor.style.setProperty('margin-bottom', '32px');
+      let entry = saved.get(anchor);
+      if (values[id]?.disabled || values[id]?.skipped) {
+        if (entry) {
+          entry.row?.remove();
+          for (const [key, value, priority] of entry.original || entry) {
+            if (value) anchor.style.setProperty(key, value, priority); else anchor.style.removeProperty(key);
+          }
+          saved.delete(anchor);
+        }
+        continue;
+      }
+      if (!entry) {
+        entry = { original: ['position', 'overflow', 'margin-bottom']
+          .map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]), row: null };
+        saved.set(anchor, entry);
+        if (getComputedStyle(anchor).position === 'static') anchor.style.setProperty('position', 'relative');
+        if (getComputedStyle(anchor).overflow === 'hidden') anchor.style.setProperty('overflow', 'visible');
+        if ((parseFloat(getComputedStyle(anchor).marginBottom) || 0) < 32) anchor.style.setProperty('margin-bottom', '32px');
+      }
       const value = values[id], offer = value?.offers?.[0];
-      const row = document.createElement('span'); row.className = 'dpb-tile-price';
-      row.style.cssText = 'position:absolute;top:calc(100% + 3px);left:0;width:100%;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
+      let row = entry.row;
+      if (!row || row.isConnected === false) {
+        row = document.createElement('span'); row.className = 'dpb-tile-price';
+        row.style.cssText = 'position:absolute;top:calc(100% + 3px);left:0;width:100%;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
+        anchor.appendChild(row);
+        entry.row = row;
+      }
+      delete row.dataset.dpbRetryAt;
+      delete row.dataset.dpbLabel;
       row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : value.history_unavailable ? 'AKS: áradat még nincs' : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {
@@ -407,7 +434,6 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
         if (row.dataset.dpbRetryAt) row.dataset.dpbLabel = row.textContent;
       }
       row.title = row.textContent;
-      anchor.appendChild(row);
     }
     ${priceCountdownScript}
   })();`;

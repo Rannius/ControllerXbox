@@ -190,3 +190,7 @@ A ™, ®, ℠ és hasonló jogi jelölések nem akadályozzák a pontos címpá
 ## 1.0.107: gyorsabb mentett árak és külön kezelt Steam-hibák
 
 Egyetlen játék átmeneti Steam-adatlekérési hibája nem állítja le a többi játék árát; a Steam kifejezett 429-es korlátozása továbbra is közös várakozást kér. Az áruház látható csempéi a Decken mentett árakat egyetlen kötegelt, hálózatmentes hívással kapják meg. A saját árszerveren már tárolt árak egy külön, csak olvasó kötegelt kérésben érkeznek, új Steam- vagy AKS-lekérés nélkül. A natív csempék a megérkező mentett árat a következő időzített ellenőrzés bevárása nélkül kirajzolják. A Decky plugint és az Ubuntu árszervert is frissíteni kell.
+
+## 1.0.108: stabil kijelölés az áruházi áraknál
+
+Az áruház külső ársávjai az oldal ismételt ellenőrzésekor helyükön maradnak. A plugin csak a szövegüket frissíti; nem távolítja el és helyezi vissza őket, így nem változtatja meg újra meg újra a csempék térközét és a Steam kijelölését. Csak a Decky plugint kell frissíteni.
