@@ -350,7 +350,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
   })();`;
 }
 
-// Tile rows reserve their own space; remove our changes when disabled or recycled.
+// Tile labels sit over the artwork without changing Steam's card layout.
 export const tilePriceCleanupScript = `
   for (const [host, original] of window.__dpbPriceTiles || []) {
     host.querySelector(':scope > .dpb-tile-price')?.remove();
@@ -370,15 +370,35 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
     ${storePriceTilesScript}
     for (const {host, id} of collectPriceTiles()) {
       if (!(id in values) || values[id]?.disabled || values[id]?.skipped) continue;
-      saved.set(host, ['position', 'padding-bottom', 'box-sizing', 'overflow'].map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
-      const oldPadding = parseFloat(getComputedStyle(host).paddingBottom) || 0;
+      const hostRect = host.getBoundingClientRect();
+      const visual = Array.from(host.querySelectorAll('img,picture,video,[style*="background-image"]'))
+        .map(node => node.getBoundingClientRect())
+        .filter(rect => rect.width >= Math.min(80, hostRect.width * .4) && rect.height >= 52
+          && rect.right > hostRect.left && rect.left < hostRect.right
+          && rect.bottom > hostRect.top && rect.top < hostRect.bottom)
+        .sort((a, b) => b.width * b.height - a.width * a.height)[0]
+        || (getComputedStyle(host).backgroundImage !== 'none' ? hostRect : null);
+      // Without artwork there is no safe place for an overlay: keep Steam's price unobscured.
+      if (!visual) continue;
+      const scale = host.offsetWidth ? hostRect.width / host.offsetWidth : 1;
+      const left = Math.max(0, visual.left - hostRect.left) / scale;
+      const right = Math.min(hostRect.right, visual.right);
+      const width = Math.max(0, (right - Math.max(hostRect.left, visual.left)) / scale);
+      if (width < 80) continue;
+      const imageTop = Math.max(0, (Math.max(hostRect.top, visual.top) - hostRect.top) / scale);
+      let top = Math.max(imageTop, (Math.min(hostRect.bottom, visual.bottom) - hostRect.top) / scale - 26);
+      const steamPrices = Array.from(host.querySelectorAll('.discount_block,.discount_final_price,.game_purchase_price,.price,[class*="SalePrice"],[class*="sale_price"]'))
+        .map(node => node.getBoundingClientRect());
+      const overlapsSteamPrice = () => steamPrices.some(rect => rect.width && rect.height
+        && rect.left < hostRect.left + (left + width) * scale && rect.right > hostRect.left + left * scale
+        && rect.top < hostRect.top + (top + 26) * scale && rect.bottom > hostRect.top + top * scale);
+      while (top - 28 >= imageTop && overlapsSteamPrice()) top -= 28;
+      if (overlapsSteamPrice()) continue;
+      saved.set(host, ['position'].map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
       if (getComputedStyle(host).position === 'static') host.style.setProperty('position', 'relative');
-      host.style.setProperty('padding-bottom', (oldPadding + 26) + 'px', 'important');
-      host.style.setProperty('box-sizing', 'content-box', 'important');
-      host.style.setProperty('overflow', 'visible', 'important');
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
-      row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
+      row.style.cssText = 'position:absolute;top:' + top + 'px;left:' + left + 'px;width:' + width + 'px;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
       row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {

@@ -184,3 +184,7 @@ A korábbi csempeár-tiltás megszűnt. A webes Steam-áruház főoldalán, list
 A beállítások négy oldalra kerültek: jelvények és méret, áruházi elhelyezés, játékárak, értesítések. Az árbeállításokon belül külön látható a kapcsolat, az árforrás és a szűrés. A magyarázó szövegek rövidebbek; az AKS ársora minden játékoldalon és csempén `AKS: ár € ∙ bolt` formátumú, a részletekben az ellenőrzés és a forrás ideje továbbra is látható.
 
 Az AKS API ajánlat nélküli játékoknál üres listákat küldhet a boltok, régiók és kiadások helyén. Ezeket a plugin és a saját árszerver most szabályos üres eredményként kezeli, így nem állítja le az összes csempe lekérését „adatformátum-hiba” üzenettel. A valóban sérült ajánlatadatokat továbbra is elutasítja. Saját árszerver esetén a Decky plugint és az Ubuntu árszervert is 1.0.96-ra kell frissíteni.
+
+## 1.0.97: csempeárak a borítón
+
+A webes Steam-áruház csempéin az AKS/GG ársáv a borítókép aljára kerül. Nem adunk belső térközt a Steam-csempéhez, így az ajánlások saját ára látható marad, és a kívánságlista sorai nem tolódnak el. Ha nincs biztonságos képfelület, a csempén nem jelenik meg külön ársáv. Ehhez csak a Decky plugint kell frissíteni; az 1.0.96-os árszerver tovább használható.

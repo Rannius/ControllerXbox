@@ -27,6 +27,34 @@ test('price renderer serializes untrusted text and guards page identity',()=>{
  assert.doesNotMatch(script,/<img/);assert.match(script,/textContent/);assert.match(script,/pageId !== appId/);assert.doesNotMatch(script,/innerHTML/);
 });
 
+test('web tile price stays on artwork without moving wishlist rows or hiding Steam price',()=>{
+ const f=fixture(),url='https://store.steampowered.com/wishlist/';
+ const cover={left:10,top:20,right:150,bottom:120,width:140,height:100,getBoundingClientRect(){return this;}};
+ const card={left:10,top:20,right:310,bottom:170,width:300,height:150};
+ function render(steamPrice) {
+  const values=new Map(),style={cssText:'',getPropertyValue:key=>values.get(key)||'',getPropertyPriority:()=>'',
+   setProperty:(key,value)=>values.set(key,value),removeProperty:key=>values.delete(key)};
+  const host={style,offsetWidth:300,closest:()=>null,matches:()=>true,contains:()=>false,
+   getAttribute:key=>key==='href'?'https://store.steampowered.com/app/10/':'',
+   getBoundingClientRect:()=>card,querySelector:selector=>selector.startsWith('img')?cover:null,
+   querySelectorAll:selector=>selector.startsWith('img')?[cover]:selector.startsWith('.discount_block')?[{getBoundingClientRect:()=>steamPrice}]:[],
+   appendChild(row){this.row=row;}};
+  const context={location:{href:url},URL,innerWidth:1280,innerHeight:800,window:{},Date,
+   document:{body:{},querySelectorAll:selector=>selector.startsWith('a[href')?[host]:[],
+    createElement:()=>({style:{cssText:''},dataset:{}})},
+   getComputedStyle:()=>({position:'static',visibility:'visible',backgroundImage:'none'}),setInterval,clearInterval};
+  vm.runInNewContext(f.api.buildTilePricesScript(url,{'10':{success:true,offers:[{price:3.97,merchant:'Kinguin'}]}}),context);
+  assert.equal(style.getPropertyValue('padding-bottom'),'');
+  assert.equal(style.getPropertyValue('margin-bottom'),'');
+  assert.equal(style.getPropertyValue('overflow'),'');
+  assert.equal(host.row.textContent,'AKS: 3.97 € ∙ Kinguin');
+  assert.match(host.row.style.cssText,/width:140px/);
+  return host.row.style.cssText;
+ }
+ assert.match(render({left:210,right:290,top:140,bottom:165,width:80,height:25}),/top:74px/);
+ assert.match(render({left:10,right:100,top:92,bottom:120,width:90,height:28}),/top:46px/);
+});
+
 test('tile prices require explicit visible IDs, share cache and stop when disabled',async()=>{
  const f=fixture(),url='https://store.steampowered.com/search/';
  f.api.updatePriceView(url,f.send);await f.drain();assert.equal(f.requests.length,0);
