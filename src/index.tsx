@@ -145,7 +145,7 @@ type NotificationHistoryResponse = {
   unread_count?: number;
   error?: string;
 };
-type PluginPage = "home" | "watchlist" | "history" | "settings" | "shops";
+type PluginPage = "home" | "watchlist" | "history" | "settings" | "settingsBadges" | "settingsStore" | "settingsPrices" | "settingsNotifications" | "shops";
 type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 type GfnState = "loading" | "available" | "not_available" | "unavailable";
 type BoosteroidState = "loading" | "available" | "maintenance" | "not_available" | "unavailable";
@@ -2225,13 +2225,19 @@ function Content() {
       store_badge_percent: response.store_badge_percent ?? 100 });
   };
 
-  if (page === "shops") return <PanelSection title="Megbízható boltok"><AllKeyShopMerchants onBack={() => openPage("home")} /></PanelSection>;
+  if (page === "shops") return <PanelSection title="Megbízható boltok"><AllKeyShopMerchants onBack={() => openPage("settingsPrices")} /></PanelSection>;
   if (page === "settings") return <PanelSection title="Beállítások">
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
-    <PanelSectionRow><div style={{ fontWeight: 700 }}>Jelvények</div></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settingsBadges")}>Jelvények és méret</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settingsStore")}>Áruházi elhelyezés</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settingsPrices")}>Játékárak</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settingsNotifications")}>Értesítések</ButtonItem></PanelSectionRow>
+  </PanelSection>;
+  if (page === "settingsBadges") return <PanelSection title="Jelvények és méret">
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>← Beállítások</ButtonItem></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Magyar zászló"
-      description="Magyar nyelv a Steam nyelvi listája vagy a Magyar Felirat kurátor alapján. A teljes könyvtárból magyar gyűjteményt készít. Kikapcsolva a gyűjtés szünetel, a gyűjtemény megmarad."
+      description="Steam és Magyar Felirat adatok alapján. Magyar gyűjteményt is készít; kikapcsolva az megmarad."
       checked={visibility.show_hungarian_badges}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked })}
@@ -2250,10 +2256,13 @@ function Content() {
     /></PanelSectionRow>
     <BadgeSizeSettings initial={{ library_badge_percent: visibility.library_badge_percent ?? 100,
       store_badge_percent: visibility.store_badge_percent ?? 100 }} save={saveSizes} />
-    <PanelSectionRow><div style={{ fontWeight: 700 }}>Áruházi játékoldal – jelvények oldala</div></PanelSectionRow>
+  </PanelSection>;
+  if (page === "settingsStore") return <PanelSection title="Áruházi elhelyezés">
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>← Beállítások</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>A játékoldalon megjelenő jelvények oldala.</div></PanelSectionRow>
     {([['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']] as const).map(([key, label]) =>
       <PanelSectionRow key={key}><ToggleField label={label + ' – bal oldalon'}
-        description="Bekapcsolva balra, kikapcsolva jobbra. A csempéken lévő ikonokat nem módosítja."
+        description="Kikapcsolva jobbra kerül."
         checked={(visibility.store_badge_sides?.[key] ?? 'right') === 'left'} disabled={settingsWorking}
         onChange={async checked => {
           setSettingsWorking(true);
@@ -2264,8 +2273,13 @@ function Content() {
           } catch (error) { toaster.toast({ title: 'Beállítási hiba', body: errorMessage(error) }); }
           finally { setSettingsWorking(false); }
         }} /></PanelSectionRow>)}
+  </PanelSection>;
+  if (page === "settingsPrices") return <PanelSection title="Játékárak">
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>← Beállítások</ButtonItem></PanelSectionRow>
     <AllKeyShopSettings openMerchants={() => openPage("shops")} />
-    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Értesítések</div></PanelSectionRow>
+  </PanelSection>;
+  if (page === "settingsNotifications") return <PanelSection title="Értesítések">
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>← Beállítások</ButtonItem></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Új GeForce NOW-játékok"
       checked={notifications.notify_gfn_additions}
@@ -2405,7 +2419,6 @@ function Content() {
       Előzmények{unreadHistoryCount ? " (" + String(unreadHistoryCount) + ")" : ""}
     </ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>Beállítások</ButtonItem></PanelSectionRow>
-    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("shops")}>Megbízható boltok (AllKeyShop)</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div>{status}</div></PanelSectionRow>
     <PanelSectionRow><HungarianProgress manager={hungarianCollection} loadCurator={loadCuratorProgress} /></PanelSectionRow>
     <PanelSectionRow><CatalogStatus /></PanelSectionRow>

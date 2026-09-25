@@ -37,7 +37,7 @@ test('native Store cards share one visible-only timer, hide skipped prices and c
  }
  const cleanup=effects.map(fn=>fn());assert.equal(started,1);
  observers[0].fn([{isIntersecting:true}]);tick();
- assert.deepEqual(Array.from(calls.at(-1)),['10']);assert.match(nodes[0].textContent,/4.37 € · Eneba/);
+ assert.deepEqual(Array.from(calls.at(-1)),['10']);assert.equal(nodes[0].textContent,'AKS: 4.37 € ∙ Eneba');
  observers[1].fn([{isIntersecting:true}]);tick();assert.equal(nodes[1].style.visibility,'hidden');
  observers[0].fn([{isIntersecting:false}]);tick();assert.deepEqual(Array.from(calls.at(-1)),['20']);
  cleanup.forEach(fn=>fn());assert.equal(stopped,1);assert.equal(cleared,1);assert.ok(observers.every(o=>o.done));

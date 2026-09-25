@@ -11,6 +11,6 @@ test('Steam EUR comparison uses final displayed price, never historical AKS Stea
  const document={documentElement:{classList:{contains:()=>true}},getElementById:()=>null,querySelectorAll:s=>s==='.StoreSalePriceWidgetContainer'?[widget]:[],createElement:()=>new Element()};
  const script=api.buildPricePanelScript('400',{success:true,source:'aks_history',offers:[{merchant:'Kinguin',price:9,kind:'Steam Gift EU',edition:'Standard',coupon:''}]});
  vm.runInNewContext(script,{document,location:{pathname:'/app/400/'},getComputedStyle:()=>({flexDirection:'column'}),window:{},setInterval,clearInterval});
- assert.equal(anchor.panel.children[0].textContent,'Steam: 7.31 € · a jelzett AKS-árnál kedvezőbb');
- assert.ok(anchor.panel.children[1].children.some(x=>x.textContent==='Steam az itt megnyitott oldalon: 7.31 €'));
+ assert.equal(anchor.panel.children[0].textContent,'AKS: 9.00 € ∙ Kinguin');
+ assert.ok(anchor.panel.children[1].children.some(x=>x.textContent==='Steam: 7.31 € · itt olcsóbb'));
 });

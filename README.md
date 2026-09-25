@@ -178,3 +178,9 @@ Version 1.0.94 fixes Portal comparisons by excluding historical Steam prices and
 ## 1.0.95: csempeárak a főoldalon és a kívánságlistán
 
 A korábbi csempeár-tiltás megszűnt. A webes Steam-áruház főoldalán, listáin és kívánságlistáján, valamint a natív áruház támogatott játékcsempéin is látható az ár. A játékárak meglévő főkapcsolója kapcsolja a megjelenítést. Csak a látható csempék kerülnek ebbe a sorba; a már engedélyezett kívánságlista-előtöltés ettől függetlenül tovább működik. A közös 24 órás cache, soros külső lekérés, boltválasztás, kulcs/Gift-szűrés és szolgáltatói várakozás változatlan. A képernyőről kikerült, még nem indult csempekérések kiesnek a sorból. A meglévő 1.0.94-es árszerver kompatibilis; ehhez a változáshoz csak a Deckyt kell frissíteni.
+
+## 1.0.96: áttekinthetőbb beállítások és AKS üres találatok
+
+A beállítások négy oldalra kerültek: jelvények és méret, áruházi elhelyezés, játékárak, értesítések. Az árbeállításokon belül külön látható a kapcsolat, az árforrás és a szűrés. A magyarázó szövegek rövidebbek; az AKS ársora minden játékoldalon és csempén `AKS: ár € ∙ bolt` formátumú, a részletekben az ellenőrzés és a forrás ideje továbbra is látható.
+
+Az AKS API ajánlat nélküli játékoknál üres listákat küldhet a boltok, régiók és kiadások helyén. Ezeket a plugin és a saját árszerver most szabályos üres eredményként kezeli, így nem állítja le az összes csempe lekérését „adatformátum-hiba” üzenettel. A valóban sérült ajánlatadatokat továbbra is elutasítja. Saját árszerver esetén a Decky plugint és az Ubuntu árszervert is 1.0.96-ra kell frissíteni.

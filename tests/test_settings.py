@@ -704,6 +704,12 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         payload["history"].append({**payload["history"][1], "min_discount_price": 3})
         self.assertEqual(self.plugin._aks_history_data(payload)["prices"], [])
         self.assertEqual(self.plugin._aks_history_data({**payload, "history": [False]})["prices"], [])
+        # Live AKS responses use empty arrays for maps when a product has no history.
+        empty = {"history": [], "merchants": [], "regions": [], "editions": []}
+        self.assertEqual(self.plugin._aks_history_data(empty),
+                         {"prices": [], "merchants": {}, "regions": {}, "editions": {}})
+        with self.assertRaises(ValueError):
+            self.plugin._aks_history_data({**empty, "history": payload["history"]})
         for value in ({"history": []}, {**payload, "history": [{}]}, {**payload, "history": "broken"}):
             with self.assertRaises(ValueError):
                 self.plugin._aks_history_data(value)

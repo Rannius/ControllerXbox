@@ -24,7 +24,7 @@ export function tilePriceLabel(value?: PriceResult): string {
     return price == null ? source + ": nincs ár" : source + ": tájékoztató ár: " + price.toFixed(2) + " €";
   }
   const best = value.offers?.[0];
-  return best ? "AKS " + best.price.toFixed(2) + " € · " + best.merchant
+  return best ? "AKS: " + best.price.toFixed(2) + " € ∙ " + best.merchant
     : value.not_found ? "AKS: nincs a katalógusban" : "AKS: nincs ajánlat";
 }
 

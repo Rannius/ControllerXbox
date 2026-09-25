@@ -24,6 +24,6 @@ export function BadgeSizeSettings({ initial, save }: { initial: BadgeSizes; save
       catch (e) { setError(e instanceof Error ? e.message : String(e)); }
       finally { setWorking(false); }
     }}>{working ? "Méret mentése…" : "Ikonméretek alkalmazása"}</ButtonItem></PanelSectionRow>
-    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{error || "100% = eredeti méret. A két felület külön állítható; a nagyobb jelvények szükség esetén több sorba kerülnek."}</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{error || "100% = eredeti méret. Könyvtár és áruház külön állítható."}</div></PanelSectionRow>
   </>;
 }

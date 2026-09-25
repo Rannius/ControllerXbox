@@ -1368,6 +1368,12 @@ class Plugin:
 
     @classmethod
     def _aks_history_data(cls, payload: Any) -> Dict[str, Any]:
+        # The API represents a game with no history using [] for these maps.
+        # Accept that exact empty shape, but never accept malformed maps when
+        # there are offers to match against merchants, regions and editions.
+        if isinstance(payload, dict) and payload.get("history") == []:
+            payload = {**payload, **{key: {} if payload.get(key) == [] else payload.get(key)
+                                     for key in ("merchants", "regions", "editions")}}
         if (not isinstance(payload, dict) or not isinstance(payload.get("history"), list)
                 or any(not isinstance(payload.get(k), dict) for k in ("merchants", "regions", "editions"))):
             raise ValueError("Megváltozott az AllKeyShop adatformátuma.")

@@ -96,7 +96,7 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
     return () => { active = false; };
   }, []);
   return <>
-    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Játékárak · AllKeyShop / GG.deals</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Kapcsolat</div></PanelSectionRow>
     {prefs && connection && <>
       <PanelSectionRow><ToggleField label="Lekérés saját szerveren keresztül" checked={connection.mode === "server"} disabled={busy}
         onChange={server => setConnectionState({ ...connection, mode: server ? "server" : "direct" })} /></PanelSectionRow>
@@ -105,21 +105,20 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
           onChange={event => setConnectionState({ ...connection, url: event.currentTarget.value })} /></PanelSectionRow>
         <PanelSectionRow><TextField label={connection.token_configured ? "Szervertoken (mentve; üresen megtartja)" : "Szervertoken"}
           bIsPassword value={serverToken} disabled={busy} onChange={event => setServerToken(event.currentTarget.value)} /></PanelSectionRow>
-        <PanelSectionRow><div style={{ fontSize: "12px" }}>Példa: https://sajat-szerver.duckdns.org · Az Ubuntu telepítője adja a szervertokent.
-          Ez nem a DuckDNS-token és nem a GG.deals-kulcs. A GG.deals-kulcs szerveres módban az Ubuntun szükséges.</div></PanelSectionRow>
+        <PanelSectionRow><div style={{ fontSize: "12px" }}>A szervertokent az Ubuntu telepítője adja. A GG.deals-kulcs szerveres módban az Ubuntun szükséges.</div></PanelSectionRow>
       </>}
+      <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Árforrás</div></PanelSectionRow>
       <PanelSectionRow><ToggleField label="Árforrás: GG.deals" description="Kikapcsolva: AllKeyShop. Váltás az Alkalmazás gombbal."
         checked={prefs.provider === "gg"} disabled={busy} onChange={gg => setPrefs({ ...prefs, provider: gg ? "gg" : "aks" })} /></PanelSectionRow>
       <>
         {connection.mode === "direct" && <PanelSectionRow><TextField label={prefs.gg_key_configured ? "GG.deals API-kulcs (mentve; üresen megtartja)" : "GG.deals API-kulcs"}
           bIsPassword value={apiKey} disabled={busy} onChange={event => setApiKey(event.currentTarget.value)} /></PanelSectionRow>}
         <PanelSectionRow><div style={{ fontSize: "12px", lineHeight: 1.5 }}>
-          GG.deals összehasonlító minimumárak (EU/EUR). Az API nem ad boltonkénti ajánlatokat:
-          a boltszűrő, a Steam-kulcs/Gift és kiadásszűrő itt nem alkalmazható. A pontos terméket és aktiválhatóságot a GG.deals adatlapján ellenőrizd.
-          AKS-kapcsolati hiba vagy korlátozás esetén automatikusan ezt használjuk tartalékként, ha van GG.deals-kulcs. Az AllKeyShop-beállításaid megmaradnak.
+          GG.deals: EU/EUR irányár, boltra és terméktípusra nem szűrhető. AKS-hibánál tartalék forrás, ha van API-kulcs.
         </div></PanelSectionRow>
       </>
-      <PanelSectionRow><ToggleField label="Árak az áruházi játékoldalon" checked={prefs.enabled} disabled={busy}
+      <PanelSectionRow><div style={{ marginTop: "12px", fontWeight: 700 }}>Megjelenítés és szűrés</div></PanelSectionRow>
+      <PanelSectionRow><ToggleField label="Játékárak megjelenítése" checked={prefs.enabled} disabled={busy}
         onChange={async (enabled) => {
           const updated = { ...prefs, enabled };
           setPrefs(updated); setBusy(true); setMessage("");
@@ -133,7 +132,7 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
         }} /></PanelSectionRow>
       <PanelSectionRow><ToggleField label="Steam Gift is megengedett (AllKeyShop)" checked={prefs.allow_gifts} disabled={busy || prefs.provider === "gg"}
         onChange={allow_gifts => setPrefs({ ...prefs, allow_gifts })} /></PanelSectionRow>
-      <PanelSectionRow><ButtonItem layout="below" disabled={prefs.provider === "gg"} onClick={openMerchants}>Megbízható boltok kiválasztása (AllKeyShop)</ButtonItem></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={prefs.provider === "gg"} onClick={openMerchants}>Megbízható boltok (AKS)</ButtonItem></PanelSectionRow>
       <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={async () => {
         setBusy(true); setMessage("");
         try {
@@ -160,7 +159,7 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
         } catch { setMessage("A szerverkapcsolat nem ellenőrizhető."); } finally { setBusy(false); }
       }}>Mentett szerverkapcsolat tesztelése</ButtonItem></PanelSectionRow>}
     </>}
-    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard / Early Access alapjáték · Global/EU/ROW Steam-kulcsok és opcionálisan Gift. A legutóbbi AKS-adatokból választja a legolcsóbbat; forrásdátum a részletekben. Account és ismeretlen típus kizárva. A megnyitott játéknál, a főoldali csempéken és a kívánságlistán is megjelenik. Az áruház használata közben a kívánságlista árait is előtölti. Az árakat lemezre menti; 24 óráig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás."}</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Steam-kulcs és engedélyezett Gift; account kizárva. AKS: utoljára jelentett ár. Gyorsítótár: 24 óra."}</div></PanelSectionRow>
   </>;
 }
 
@@ -186,7 +185,7 @@ export function AllKeyShopMerchants({ onBack }: { onBack(): void }) {
   return <>
     <PanelSectionRow><ButtonItem layout="below" onClick={onBack}>← Vissza</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ fontSize: "12px", lineHeight: 1.5 }}>
-      Te döntöd el, mely boltokban bízol. A mentés után kizárólag a bepipált boltok megfelelő Steam-kulcs/Gift ajánlatait mutatjuk. Ha egyet sem választasz, nem jelenik meg ajánlat. Saját szervernél is az ezen a Decken mentett kijelölés szűri a kapott teljes ajánlatlistát; nincs külön szerveres tiltólista. A hét kért bolt eleve választható. Az API-val ellenőrzött játékoknál talált további boltok felkerülnek a listára; az új boltokat külön engedélyezheted.
+      Csak a bepipált boltok Steam-kulcs és Gift ajánlatai jelennek meg. A szűrés a Decken történik; üres lista esetén nincs ajánlat. Az új boltokat külön engedélyezheted.
     </div></PanelSectionRow>
     <PanelSectionRow><TextField label="Bolt keresése" value={query} onChange={event => setQuery(event.currentTarget.value)} /></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={async () => {
@@ -287,9 +286,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     const best = data?.offers?.[0];
     const gg = data?.provider === 'gg';
     const steamCheaper = !gg && data?.success && best && steamPrice !== null && steamPrice <= best.price;
-    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : data.not_found ? (data.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: ezen a néven nincs a katalógusban') : best ? 'AKS legutóbbi · ' + best.edition + ': ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
-    if (steamCheaper) summary.textContent = 'Steam: ' + steamPrice.toFixed(2) + ' € · a jelzett AKS-árnál kedvezőbb';
-    else if (!gg && data?.source === 'aks_history' && best?.source_updated_at) summary.textContent += ' · adat: ' + best.source_updated_at.slice(0, 10);
+    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : data.not_found ? (data.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: ezen a néven nincs a katalógusban') : best ? 'AKS: ' + best.price.toFixed(2) + ' € ∙ ' + best.merchant : 'AKS: nincs ajánlat';
     if (data?.retry_at && !data.success) { summary.dataset.dpbRetryAt = String(data.retry_at); summary.dataset.dpbLabel = summary.textContent; }
     const ggRetailCheaper = data?.retail_price != null && (data?.keyshop_price == null || data.retail_price <= data.keyshop_price);
     if (gg) summary.textContent = !data.success ? 'GG.deals: ' + (data.pending ? 'szerveres lekérés folyamatban' : data.error_code === 'rate_limit' ? 'várakozás' : 'hiba')
@@ -303,49 +300,47 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     content.style.cssText = 'box-sizing:border-box;width:100%;overflow-wrap:anywhere;background:#162634;border:1px solid #4a6478;border-radius:6px;padding:14px;margin-top:4px';
     panel.appendChild(content);
     const line = (text, bold = false) => { const node = document.createElement('div'); node.textContent = text; if (bold) node.style.fontWeight = '700'; content.appendChild(node); };
-    line(gg ? 'GG.deals · összehasonlító árak · EU/EUR' : 'AllKeyShop · Steam-kulcs / Gift', true);
+    line(gg ? 'GG.deals · EU/EUR' : 'AKS · Steam-kulcs / Gift', true);
     if (!data) line('Árak betöltése…');
-    else if (!data.success) { line(data.error || 'Az ár most nem érhető el.'); if (data.global_error) line('A többi árlekérés is szünetel. A következő próbáig hátralévő idő az ársorban látható. Az újrapróbálkozáshoz maradjon nyitva az áruház.'); }
+    else if (!data.success) { line(data.error || 'Az ár most nem érhető el.'); if (data.global_error) line('A többi lekérés is szünetel; az újrapróbálás ideje az ársorban látható.'); }
     else if (gg) {
-      if (data.fallback_from === 'aks') line('Tartalék árforrás: az AllKeyShop kapcsolati hibája vagy korlátozása miatt.');
-      line('Kulcsboltok minimuma: ' + (data.keyshop_price != null ? data.keyshop_price.toFixed(2) + ' €' : 'nincs ár'));
-      line('Hivatalos boltok minimuma: ' + (data.retail_price != null ? data.retail_price.toFixed(2) + ' €' : 'nincs ár'));
-      line('Összesített ár: a kiválasztott boltokra, Steam-kulcs/Gift típusra és kiadásra nem szűrhető.');
-      line('A terméket, díjakat és magyarországi aktiválhatóságot az ajánlatnál ellenőrizd.');
-      if (data.stale) line('Korábban mentett ár · frissítés folyamatban vagy kapcsolatra vár.');
-      if (data.checked_at) line('Utoljára ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
+      if (data.fallback_from === 'aks') line('Tartalék forrás: AKS-hiba.');
+      line('Kulcsboltok: ' + (data.keyshop_price != null ? data.keyshop_price.toFixed(2) + ' €' : 'nincs ár'));
+      line('Hivatalos boltok: ' + (data.retail_price != null ? data.retail_price.toFixed(2) + ' €' : 'nincs ár'));
+      line('Összesített irányár; bolt, típus és kiadás szerint nem szűrhető. Ellenőrizd a díjakat és az aktiválást.');
+      if (data.stale) line('Mentett ár; frissítésre vár.');
+      if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
       if (/^https:\\/\\/gg\\.deals\\/(?:game\\/[a-z0-9-]+\\/)?$/.test(data.url || '')) {
-        const link = document.createElement('a'); link.href = data.url; link.textContent = 'Árak forrása: GG.deals – ajánlatok megnyitása';
+        const link = document.createElement('a'); link.href = data.url; link.textContent = 'GG.deals megnyitása';
         link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; content.appendChild(link);
       }
     }
     else {
-      line(data.preferred_only ? 'Legalacsonyabb legutóbb jelentett AKS-ár a kiválasztott boltokból' : 'Legalacsonyabb legutóbb jelentett megfelelő AKS-ár');
-      if (steamPrice !== null) line('Steam az itt megnyitott oldalon: ' + steamPrice.toFixed(2) + ' €');
-      if (data.not_found) line(data.match_status === 'ambiguous' ? 'Több azonos nevű API-termék van; bizonytalan árat nem párosítunk. Új ellenőrzés a 24 órás cache lejárata után.' : 'A játék ezen a néven nem található az AKS API katalógusában. Ez nem kapcsolati hiba. Új ellenőrzés a 24 órás cache lejárata után.');
-      else if (!data.offers?.length) line('Nincs megfelelő Steam-kulcs vagy Gift az aktuális szűrőkkel.');
+      line(data.preferred_only ? 'Legutóbbi AKS-ár a kiválasztott boltokból.' : 'Legutóbbi megfelelő AKS-ár.');
+      if (steamPrice !== null) line('Steam: ' + steamPrice.toFixed(2) + ' €' + (steamCheaper ? ' · itt olcsóbb' : ''));
+      if (data.not_found) line(data.match_status === 'ambiguous' ? 'Több azonos nevű játék; bizonytalan árat nem mutatunk.' : 'A játék nincs ezen a néven az AKS-katalógusban.');
+      else if (!data.offers?.length) line('Nincs megfelelő ajánlat az aktuális szűrőkkel.');
       for (const [index, offer] of (data.offers || []).entries()) {
         line(offer.price.toFixed(2) + ' € · ' + offer.merchant, index === 0);
         line(offer.kind + ' · ' + offer.edition + (offer.coupon ? ' · Kupon: ' + offer.coupon : ''));
-        if (offer.source_updated_at) line('Ajánlat utolsó AKS-megfigyelése: ' + offer.source_updated_at + ' (a forrás időzónája nincs megadva)');
-        if (offer.price_kind === 'discount') line(offer.coupon ? 'Kedvezményes ár a jelzett kuponnal.' : 'AKS kedvezményes ár; a forrás nem adott kuponkódot.');
+        if (offer.source_updated_at) line('AKS-adat: ' + offer.source_updated_at + ' (időzóna nélkül)');
+        if (offer.price_kind === 'discount' && !offer.coupon) line('Kedvezményes ár; kupon nem jelzett.');
       }
       if (!data.not_found && data.filtering) {
         const f = data.filtering;
-        line('Legutóbbi API-ajánlatok: ' + f.total + ' · Szűrés után: ' + f.accepted);
-        const labels = {edition:'Más kiadás',region:'Más platform/régió',gift:'Gift kikapcsolva',merchant:'Nem engedélyezett bolt',price:'Hiányzó vagy hibás ár',invalid:'Hiányos adat',steam:'Steam történeti ár kizárva; összehasonlítás az oldalon látható árral'};
-        for (const [key, label] of Object.entries(labels)) if (f[key]) line(label + ': ' + f[key]);
+        line('Szűrés: ' + f.accepted + '/' + f.total + ' ajánlat');
+        const labels = {edition:'más kiadás',region:'régió/platform',gift:'Gift tiltva',merchant:'bolt tiltva',price:'hibás ár',invalid:'hiányos',steam:'Steam kizárva'};
+        const excluded = Object.entries(labels).filter(([key]) => f[key]).map(([key, label]) => label + ': ' + f[key]);
+        if (excluded.length) line('Kihagyva: ' + excluded.join(' · '));
       }
       if (data.source === 'aks_history') {
-        line('Termékenként a legutóbbi API-adat. A boltok eltérő napokon frissülnek; a dátum nem lejárati idő. Ezek jelentett árak, nem élő árellenőrzés.');
-        if (data.source_updated_at) line('Játék áradatai eddig frissültek az AKS-nél: ' + data.source_updated_at);
-        line('A forrás nem igazolja az aktuális készletet és az összes fizetési díjat.');
-      } else line('AKS szerinti, kártyadíjat tartalmazó ár; kupon esetén annak feltételeivel.');
-      line('EU/Global/ROW szűrés. Az egyszerű Steam jelölés nem igazolja az összes országot; a ROW sem garantál magyarországi aktiválást. A végösszeget és a régiót az eladónál ellenőrizd.');
-      if (data.stale) line("Korábban mentett ár · frissítés folyamatban vagy kapcsolatra vár.");
-      if (data.checked_at) line('Utoljára ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
+        line('A boltok adatai eltérő napokon frissülnek; ez nem élő készletár.');
+      } else line('AKS szerinti ár; kupon és fizetési díj eltérhet.');
+      line('EU/Global/ROW. A végösszeget és a magyarországi aktiválást ellenőrizd az eladónál.');
+      if (data.stale) line('Mentett ár; frissítésre vár.');
+      if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
       if (/^https:\\/\\/www\\.allkeyshop\\.com\\/blog\\/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+\\/$/.test(data.url || '') || (data.source === 'aks_history' && data.url === 'https://www.allkeyshop.com/')) {
-        const link = document.createElement('a'); link.href = data.url; link.textContent = data.source === 'aks_history' ? 'AllKeyShop megnyitása' : 'AllKeyShop adatlap megnyitása (az ottani lista külön szűrhető)';
+        const link = document.createElement('a'); link.href = data.url; link.textContent = 'AllKeyShop megnyitása';
         link.style.cssText = 'display:block;color:#67c1f5;padding:8px 0'; content.appendChild(link);
       }
     }
@@ -384,7 +379,7 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
       row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
-      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
+      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {
         const amount = value.keyshop_price ?? value.retail_price;
