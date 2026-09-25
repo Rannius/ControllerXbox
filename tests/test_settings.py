@@ -18,6 +18,62 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class SettingsTest(unittest.IsolatedAsyncioTestCase):
+    async def test_portal_bento_quotes_and_remote_filter_changes(self):
+        # Minimal rows from the API response captured on 2026-09-25. Steam's
+        # Portal history says 1.95; different shops update on different days.
+        row = {"product_id": 118234, "merchant_id": 1, "edition": "1", "region": "2",
+               "min_discount_price": 1.95, "start": "2026-03-26 05:31:17", "end": "2026-09-24 01:12:41"}
+        payload = {"history": [row], "regions": {"2": {"name": "Steam"}},
+                   "merchants": {"1": {"name": "Steam"}, "47": {"name": "Kinguin"}, "272": {"name": "Eneba"}},
+                   "editions": {"1": {"name": "Standard Edition"}}}
+        prefs = {"merchants": [], "allow_gifts": True}
+        counts = {}
+        self.assertEqual(self.plugin._aks_history_filter(self.plugin._aks_history_data(payload), prefs, counts), [])
+        self.assertEqual(counts["steam"], 1)
+        payload["history"] = [{**row, "min_discount_price": 13.99},
+            {**row, "product_id": 140380495, "merchant_id": 272, "min_discount_price": 4.37,
+             "start": "2026-09-22 17:33:42", "end": "2026-09-22 19:48:06"},
+            {**row, "product_id": 138751917, "merchant_id": 47, "last_price": 3.46,
+             "min_discount_price": 3.4, "best_discount_code": "AKSPLAY",
+             "start": "2026-09-04 12:46:36", "end": "2026-09-04 12:46:36"}]
+        entry = {"title": "Bento Blocks", "source": "aks_history", "history_version": 2,
+                 "url": "https://www.allkeyshop.com/", "checked_at": time.time(),
+                 "data": self.plugin._aks_history_data(payload)}
+        await self.plugin.set_price_connection("server", "https://example.com", "test_server_token_1234567890")
+        with patch.object(self.plugin, "_price_server_request", return_value={"protocol": 1, "provider": "aks", "app_id": "3311670", "entry": entry}) as network:
+            await self.plugin.set_price_preferences(True, True, ["Steam", "Kinguin", "Eneba"], True)
+            result = await self.plugin.get_allkeyshop_price("3311670")
+            self.assertEqual((result["offers"][0]["merchant"], result["offers"][0]["price"]), ("Kinguin", 3.4))
+            self.assertEqual(result["offers"][0]["source_updated_at"], "2026-09-04 12:46:36")
+            await self.plugin.set_price_preferences(True, True, ["Eneba"], True)
+            result = await self.plugin.get_cached_allkeyshop_price("3311670")
+            self.assertEqual((result["offers"][0]["merchant"], result["offers"][0]["price"]), ("Eneba", 4.37))
+            await self.plugin.set_price_preferences(True, True, [], True)
+            self.assertEqual((await self.plugin.get_cached_allkeyshop_price("3311670"))["offers"], [])
+            self.assertEqual(network.call_count, 1)
+
+    async def test_remote_provider_error_is_not_reported_as_server_connection(self):
+        await self.plugin.set_price_connection("server", "https://example.com", "test_server_token_1234567890")
+        response = {"protocol": 1, "provider": "aks", "app_id": "10", "entry": None, "retry_after": 30,
+                    "failure": {"error_code": "format", "error": "Invalid provider format", "global_error": True}}
+        with patch.object(self.plugin, "_price_server_request", return_value=response) as network:
+            self.assertEqual((await self.plugin.get_allkeyshop_price("10"))["error_code"], "format")
+            self.assertEqual((await self.plugin.get_allkeyshop_price("20"))["error_code"], "format")
+            self.assertEqual(network.call_count, 1)
+
+    async def test_old_pruned_history_cache_is_invalidated_without_losing_other_caches(self):
+        old = {"title": "Example", "url": "https://www.allkeyshop.com/", "source": "aks_history",
+               "data": self.plugin._aks_history_data(self.history_fixture()), "checked_at": time.time()}
+        self.plugin._price_cache = {"10": old, "20": {**old, "history_version": 2}}
+        await self.plugin._save_price_cache()
+        restarted = self.plugin_type()
+        await restarted._load_price_cache()
+        self.assertNotIn("10", restarted._price_cache)
+        self.assertIn("20", restarted._price_cache)
+        await self.plugin.set_price_connection("server", "https://example.com", "test_server_token_1234567890")
+        with patch.object(self.plugin, "_price_server_request", return_value={"protocol": 1, "provider": "aks", "app_id": "30", "entry": old}):
+            self.assertEqual((await self.plugin.get_allkeyshop_price("30"))["error_code"], "server_version")
+
     async def test_global_failure_rotates_wishlist_after_shared_pause(self):
         self.plugin._price_wishlist = ["10", "20"]
         self.plugin._price_wishlist_lease = time.monotonic() + 90
@@ -316,7 +372,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         await restarted._load_price_merchants()
         with patch.object(restarted, "_aks_read") as network:
             result = await restarted.get_price_merchants(True)
-            self.assertEqual(result["merchants"], ["Eneba", "New store"])
+            self.assertEqual(set(result["merchants"]), {"YUPLAY", "GAMESEAL", "GAMIVO", "G2A", "Kinguin", "Eneba", "HRK", "New store"})
             network.assert_not_called()
         self.assertEqual(self.plugin._price_preferences["merchants"], ["Eneba"])
         with patch.object(self.plugin, "_open_request") as network:
@@ -353,7 +409,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         data["prices"] += [{**base, **change} for change in invalid]
         data["prices"].append({**base, "region": "25", "priceCard": 8, "merchant": 2})
         result = self.plugin._aks_filter(data, {"merchants": [], "allow_gifts": True})
-        self.assertEqual([r["price"] for r in result], [8, 10])
+        self.assertEqual([r["price"] for r in result], [.5, 8, 10])
         self.assertIn("Gift", result[0]["kind"])
         self.assertEqual(len(self.plugin._aks_filter(data, {"merchants": [], "allow_gifts": False})), 1)
         self.assertEqual(self.plugin._aks_filter(data, {"merchants": ["ENEBA"], "allow_gifts": True})[0]["price"], 10)
@@ -626,10 +682,10 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         data = self.plugin._aks_history_data(payload)
         prefs = {"merchants": [], "allow_gifts": True}
         offers = self.plugin._aks_history_filter(data, prefs)
-        self.assertEqual([x["price"] for x in offers], [6, 7, 8, 9, 10])
+        self.assertEqual([x["price"] for x in offers], [.5, 6, 7, 8, 9, 10])
         self.assertEqual(offers[-1]["coupon"], "")  # no coupon inherited from an older row
         prefs.update(allow_gifts=False, merchants=["KINGUIN"])
-        self.assertEqual([x["price"] for x in self.plugin._aks_history_filter(data, prefs)], [8, 10])
+        self.assertEqual([x["price"] for x in self.plugin._aks_history_filter(data, prefs)], [.5, 8, 10])
         prefs.update(merchants=["GAMIVO"])
         self.assertEqual(self.plugin._aks_history_filter(data, prefs)[0]["price"], 9)
         prefs.update(merchants=[], restrict_merchants=True)
@@ -647,7 +703,8 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         payload = self.history_fixture()
         payload["history"].append({**payload["history"][1], "min_discount_price": 3})
         self.assertEqual(self.plugin._aks_history_data(payload)["prices"], [])
-        for value in ({"history": []}, {**payload, "history": [False]}, {**payload, "history": "broken"}):
+        self.assertEqual(self.plugin._aks_history_data({**payload, "history": [False]})["prices"], [])
+        for value in ({"history": []}, {**payload, "history": [{}]}, {**payload, "history": "broken"}):
             with self.assertRaises(ValueError):
                 self.plugin._aks_history_data(value)
 
@@ -710,7 +767,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         counts = {}
         self.assertEqual(self.plugin._aks_history_filter(data, prefs, counts), [])
         self.assertEqual(counts, {"total": 5, "accepted": 0, "edition": 1, "region": 1,
-                                  "merchant": 3, "gift": 0, "price": 0, "invalid": 0})
+                                  "merchant": 3, "gift": 0, "price": 0, "invalid": 0, "steam": 0})
 
     def price_metadata(self, app_id="10", title="Example"):
         return {"app_id": app_id, "title": title, "is_free": False, "coming_soon": False, "checked_at": time.time()}
@@ -1021,7 +1078,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
         await self.plugin.set_price_preferences(True, False, ["Kinguin"], True)
         entry = {"title": "Example", "url": "https://www.allkeyshop.com/", "source": "aks_history",
-                 "data": self.plugin._aks_history_data(self.history_fixture()), "checked_at": time.time()}
+                 "history_version": 2, "data": self.plugin._aks_history_data(self.history_fixture()), "checked_at": time.time()}
         response = {"protocol": 1, "provider": "aks", "app_id": "10", "entry": entry, "pending": False}
         with patch.object(self.plugin, "_price_server_request", return_value=response) as remote, patch.object(self.plugin, "_fetch_aks_game") as direct:
             result = await self.plugin.get_allkeyshop_price("10")
@@ -1080,7 +1137,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         await self.plugin.set_price_connection("server", "https://sajat-szerver.duckdns.org", "test_server_token_1234567890")
         with patch.object(self.plugin, "_price_server_request", return_value={"protocol": 1, "merchants": ["Eneba", "GAMIVO"]}) as remote, patch.object(self.plugin, "_aks_read") as aks:
             result = await self.plugin.get_price_merchants(True)
-            self.assertEqual(result["merchants"], ["Eneba", "GAMIVO"])
+            self.assertEqual(set(result["merchants"]), {"YUPLAY", "GAMESEAL", "GAMIVO", "G2A", "Kinguin", "Eneba", "HRK"})
             self.assertEqual(remote.call_args.args[2], "/v1/merchants")
             aks.assert_not_called()
 

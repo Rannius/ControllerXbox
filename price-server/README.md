@@ -19,8 +19,8 @@ Ez a szerver **nem IP-forgató és nem tiltásmegkerülő szolgáltatás**. A Du
 Az Ubuntu termináljában:
 
 ```bash
-curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.92/DeckPriceServer-v1.0.92.tar.gz
-tar -xzf DeckPriceServer-v1.0.92.tar.gz
+curl -fLO https://github.com/Rannius/ControllerXbox/releases/download/v1.0.93/DeckPriceServer-v1.0.93.tar.gz
+tar -xzf DeckPriceServer-v1.0.93.tar.gz
 cd DeckPriceServer
 sudo bash install.sh sajat-szerver.duckdns.org
 ```
@@ -127,7 +127,7 @@ Források: [DuckDNS API](https://www.duckdns.org/spec.jsp), [Caddy automatikus H
 
 A szerver az `allkeyshop-api` projekt által használt nyilvános JSON-katalógust és árhistorika-végpontot kérdezi. A közös katalógus 24 órás, a pontos név → termékazonosító kapcsolat 7 napos, az árak és Steam-metaadatok 24 órás tartós cache-t kapnak. Egy ismert játék árfrissítése egyetlen AKS-kérést igényel; friss ár esetén nincs kérés. A HTML-kereső és termékoldal nem része az árlekérési útvonalnak. 1.0.89-től a boltlista is kizárólag az API-válaszokban talált és korábban mentett boltnevekből épül, HTML-lekérés nélkül.
 
-Ajánlatonként a legutóbbi megfigyelést választjuk. A legújabb megfigyelésnél több mint 24 órával régebbi termékajánlatok kimaradnak. Ezután a Decky a saját megbízhatóbolt-listája, Standard kiadás, Steam-kulcs/Gift és EU/Global/ROW besorolás szerint szűr, és a minimumot mutatja. A historika nem igazol aktuális készletet vagy minden fizetési díjat; külön látszik a forrás megfigyelési ideje és a lekérésünk ideje. A régi abszolút minimumokat nem használjuk.
+Ajánlatonként a legutóbbi megfigyelést választjuk. 1.0.93-tól nem zárjuk ki az egyik bolt utolsó árát pusztán azért, mert egy másik bolt frissebb dátumot küld. Ezután a Decky a saját megbízhatóbolt-listája, Standard / Early Access kiadás, Steam-kulcs/Gift és EU/Global/ROW besorolás szerint szűr, és a minimumot mutatja. A historika nem igazol aktuális készletet vagy minden fizetési díjat; külön látszik a forrás megfigyelési ideje és a lekérésünk ideje. A régi abszolút minimumokat nem használjuk.
 
 Ehhez mindkét oldalt 1.0.88-ra kell frissíteni. A meglevő beállítások és érvényes korábbi cache megmaradnak; lejáratkor már az új végpontot használjuk. A Decky árgyorsítótár-törlése csak a helyi cache-t üríti; a szerver érvényes cache-e a lejáratáig megmarad. A GG.deals tartalék működés megmarad.
 
@@ -136,3 +136,13 @@ Ehhez mindkét oldalt 1.0.88-ra kell frissíteni. A meglevő beállítások és 
 1.0.90: a Steam AppDetails válasz eltérő külső kulcsánál az egyértelmű belső `steam_appid` alapján azonosítjuk a játékot. A más AppID-hez tartozó adat továbbra is kizárt. Egy hiányzó játékadat nem szünetelteti a teljes AKS-sort. Az API-katalógusból hiányzó név és a többértelmű név külön jelzést, 24 órás tartós negatív cache-t kap; nem kapcsolati hibaként ismétlődik. A szerver státusza és az új Home Assistant kártyaminta tartalmazza a konkrét hibaokot; a már bemásolt kártyát az új mintára kell cserélni.
 
 1.0.92: az alapjáték-szűrés a Standard mellett az explicit Early Access kiadást is elfogadja. A WARDOGS friss ajánlatait korábban ez a túl szűk kiadásszűrés kizárta. Az EU-t is tartalmazó Steam EU/US besorolás engedélyezett, saját címkével. A Supporter/Deluxe/bundle, account és más platform változatlanul kizárt. A mentett API-áradatokra is azonnal az új szűrés érvényes; nem kell cache-t törölni.
+
+## Árjavítás és boltszűrés (1.0.93)
+
+A Portal 1,95 EUR összege az AKS történeti Steam-sorából származott, nem kuponszámításból. Ezt a Steam-sort kizárjuk. A megnyitott Steam-oldalon az ott látható EUR végösszeg az összehasonlítás alapja (személyes/bundle kedvezmény is eltérhet a nyilvános Steam API árától). Más pénznemet nem hasonlítunk az EUR ajánlatokhoz.
+
+A Bento Blocks Kinguin/Eneba sorait a túl szigorú, más bolthoz viszonyított 24 órás dátumszűrő dobta el. Termékenként továbbra is csak a legutóbbi sort választjuk, de eltérő frissítési nap miatt nem törlünk ajánlatot. A historikus végpont nem garantál jelenlegi árat vagy készletet; a felület utoljára jelentett AKS-árat és annak forrásdátumát mutatja.
+
+A boltkijelölés egyetlen forrása az adott Deck `price-preferences.json` fájlja. A szerver teljes nyers ajánlatokat tárol és küld, nem alkalmaz külön engedélylistát. A Deck a saját kijelölésével minden olvasáskor újraszűri az adatokat; a beállítás módosításához nem kell AKS-kérés vagy cache-törlés. A YUPLAY, GAMESEAL, GAMIVO, G2A, Kinguin, Eneba és HRK mindig választható; további boltok az API-válaszokból és a mentett kijelölésből kerülnek a listára. Ettől még nem válnak automatikusan engedélyezetté explicit boltszűrés mellett. Az üres mentett kijelölés minden boltot kizár. A Steam-oldali ár külön összehasonlítási alap, nem egy történeti kulcsajánlat.
+
+Mindkét oldalt frissítsd: az előző adapter már kidobott sorait nem lehet visszaállítani a régi cache-ből, ezért a régi AKS-historika cache egyszer automatikusan érvénytelenedik. A katalógus, párosítások, beállítások és GG-cache megmaradnak. A 24 órás ár-cache továbbra is használható a Decken és a szerveren. Nincs új Home Assistant vezérlés. Az üres `[false]` árhistorika nem kapcsolati hiba; a szerver az eredeti szolgáltatói hibakategóriát továbbítja.

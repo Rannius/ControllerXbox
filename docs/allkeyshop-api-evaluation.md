@@ -14,7 +14,7 @@ Forrásvizsgálat: 2026-09-24, [sergioalmela/allkeyshop-api 2.0.0](https://githu
 
 1. A `history` nem feltétlenül csak objektumokat tartalmaz: a hibás sorok kimaradnak.
 2. Kereskedő + termék + kiadás + régió szerint az `end`, majd `start` időponttal legújabb sort vesszük. Érvénytelen új ár nem hozza vissza a régi olcsó árat. Egyező időpontú, ellentmondásos sorok kizárva.
-3. A teljes játék legújabb megfigyelésénél több mint 24 órával régebbi ajánlatokat kizárjuk, hogy rég eltűnt termékek ne legyenek tartós minimumok. Ez a forrásadatok közötti időablak, nem készletigazolás és nem a helyi cache TTL-je.
+3. 1.0.93-tól nincs boltok közötti 24 órás dátumszűrés: a Bento Blocks esetén ez a Kinguin/Eneba utolsó ajánlatát tévesen kizárta. A termék legutolsó sora megmarad, dátuma látszik; jelenlegi elérhetőséget a historika nem bizonyít. A Steam történeti sorai kizárva: az összehasonlítás a megnyitott Steam-oldal EUR árával történik.
 4. A kiválasztott boltok listája és az üres explicit kiválasztás működése megmarad. Csak Standard / Standard Edition, Steam-kulcs és engedélyezett Gift: EU, Global vagy ROW régió. Az egyszerű `Steam` / `Steam Gift` az AKS általános, régiómegkötés nélküli csoportja; a felület az eredeti jelölést is kiírja. Ez és a ROW nem garantál magyarországi aktiválhatóságot.
 5. A legutóbbi sor `last_price` / `min_discount_price` értékei közül választunk. Nincs régi rekordból átvett kupon. Hiányzó kupon esetén a kedvezményes árat ezzel a megjegyzéssel jelenítjük meg. A `lower_keyshops_price` és `lower_official_price` történeti minimumokat nem használjuk.
 6. A szűrés után legalacsonyabb ár jelenik meg. A kiválasztott ajánlat `end` dátuma külön látszik a saját `checked_at` lekérési időpontunktól. A forrás nem ad időzónát, ezért a dátumát nem alakítjuk át kitalált UTC-idővé.
@@ -26,3 +26,7 @@ A végpont nem ad megbízható jelenlegi készlet- vagy teljes fizetésidíj-ada
 A 2026-09-24-én letöltött Solarpunk-mintában 3381 történeti sorból 40 legutóbbi, időablakon belüli sor maradt. A felsorolt hét bolt (YUPLAY, GAMESEAL, GAMIVO, G2A, Kinguin, Eneba, HRK) szűrésével 16 ajánlatból a Kinguin EU kedvezményes 10,05 EUR volt a minimum; forrásidő 2026-09-24 09:52:39, kuponkód nélkül. Ez rögzített tesztminta, nem folyamatosan frissülő árígéret. Célzott tesztek ellenőrzik a sorrendfüggetlenséget, régi minimumok kizárását, boltokat, Gift-kapcsolót, EU/Global/ROW besorolást, hibás adatokat, cache-visszatöltést és szerveres továbbítást.
 
 A régi HTML-árak érvényes cache-e lejáratig megmarad; utána már az új JSON-adapter fut. A GG.deals kapcsolati hiba esetére meglévő tartalék működés változatlan, külön jelölt összesített árat ad. Az új végpont ugyanazon szolgáltatóé, ezért IP-korlátozás továbbra is előfordulhat.
+
+## 2026-09-25 célzott ellenőrzés
+
+Portal (AKS 4773): a legutóbbi Steam-sor maga 1,95 EUR értéket tartalmazott (2026-03-26–2026-09-24), ezért nem tekinthető a megnyitott oldali aktuális Steam-árnak. Bento Blocks (AKS 205196): Kinguin 3,40 EUR, AKSPLAY, 2026-09-04 12:46:36; Eneba 4,37 EUR, 2026-09-22 19:48:06. Mindkettő kiesett a más bolthoz viszonyított dátumszűrésen. Ezek a letöltött API-minta értékei, nem az eladónál igazolt mai végösszegek. A szolgáltatótól kapott régi/hibás adatot helyi számítás nem tudja hiteles élő árrá alakítani.

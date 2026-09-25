@@ -186,7 +186,7 @@ export function AllKeyShopMerchants({ onBack }: { onBack(): void }) {
   return <>
     <PanelSectionRow><ButtonItem layout="below" onClick={onBack}>← Vissza</ButtonItem></PanelSectionRow>
     <PanelSectionRow><div style={{ fontSize: "12px", lineHeight: 1.5 }}>
-      Te döntöd el, mely boltokban bízol. A mentés után kizárólag a bepipált boltok megfelelő Steam-kulcs/Gift ajánlatait mutatjuk. Ha egyet sem választasz, nem jelenik meg ajánlat. Az API-val ellenőrzött játékoknál talált boltok automatikusan felkerülnek a listára; az új boltokat külön engedélyezheted.
+      Te döntöd el, mely boltokban bízol. A mentés után kizárólag a bepipált boltok megfelelő Steam-kulcs/Gift ajánlatait mutatjuk. Ha egyet sem választasz, nem jelenik meg ajánlat. Saját szervernél is az ezen a Decken mentett kijelölés szűri a kapott teljes ajánlatlistát; nincs külön szerveres tiltólista. A hét kért bolt eleve választható. Az API-val ellenőrzött játékoknál talált további boltok felkerülnek a listára; az új boltokat külön engedélyezheted.
     </div></PanelSectionRow>
     <PanelSectionRow><TextField label="Bolt keresése" value={query} onChange={event => setQuery(event.currentTarget.value)} /></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={busy} onClick={async () => {
@@ -242,6 +242,17 @@ export const priceCountdownScript = `
 
 // Keep this renderer independent of Steam selectors except for its insertion
 // point. All third-party text is assigned through textContent, never HTML.
+export function readSteamEuroPrice(text: string): number | null {
+  // Scoped price widget only. The final amount follows the struck-through one.
+  const matches = Array.from(text.matchAll(/(\d[\d.,\s\u00a0]*\d|\d)\s*(?:€|EUR(?![A-Z]))/g));
+  const amount = matches[matches.length - 1]?.[1].replace(/[\s\u00a0]/g, "");
+  if (!amount) return null;
+  const separator = Math.max(amount.lastIndexOf(","), amount.lastIndexOf("."));
+  if (separator < 0 || amount.length - separator !== 3) return null;
+  const value = Number(amount.slice(0, separator).replace(/[.,]/g, "") + "." + amount.slice(separator + 1));
+  return Number.isFinite(value) && value > 0 ? value : null;
+}
+
 export function buildPricePanelScript(appId: string, result?: PriceResult): string {
   return `(() => {
     const appId = ${JSON.stringify(appId)};
@@ -263,7 +274,9 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
       !node.closest('[data-ds-bundleid]') && !node.querySelector('[name="bundleid"]') && node.getBoundingClientRect().height > 0 && node.querySelector('.game_purchase_price, .discount_final_price, .game_purchase_action'));
     const anchor = gamepadAnchor || purchase;
     if (!anchor) { panel?.remove(); return; }
-    const key = appId + ':' + Boolean(gamepadAnchor) + ':' + JSON.stringify(data);
+    const steamPriceNode = gamepadPrice || purchase?.querySelector('.discount_final_price, .game_purchase_price');
+    const steamPrice = (${readSteamEuroPrice.toString()})(steamPriceNode?.textContent || '');
+    const key = appId + ':' + Boolean(gamepadAnchor) + ':' + steamPrice + ':' + JSON.stringify(data);
     if (panel?.dataset.state === key && panel.previousElementSibling === anchor) return;
     const wasOpen = panel?.open === true;
     panel?.remove(); panel = document.createElement('details'); panel.id = id; panel.dataset.state = key; panel.open = wasOpen;
@@ -273,7 +286,10 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     const summary = document.createElement('summary');
     const best = data?.offers?.[0];
     const gg = data?.provider === 'gg';
-    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : data.not_found ? (data.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: ezen a néven nincs a katalógusban') : best ? 'AllKeyShop · ' + best.edition + ': ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
+    const steamCheaper = !gg && data?.success && best && steamPrice !== null && steamPrice <= best.price;
+    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : data.not_found ? (data.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: ezen a néven nincs a katalógusban') : best ? 'AKS legutóbbi · ' + best.edition + ': ' + best.price.toFixed(2) + ' € · ' + best.merchant : 'AKS: nincs ajánlat';
+    if (steamCheaper) summary.textContent = 'Steam: ' + steamPrice.toFixed(2) + ' € · a jelzett AKS-árnál kedvezőbb';
+    else if (!gg && data?.source === 'aks_history' && best?.source_updated_at) summary.textContent += ' · adat: ' + best.source_updated_at.slice(0, 10);
     if (data?.retry_at && !data.success) { summary.dataset.dpbRetryAt = String(data.retry_at); summary.dataset.dpbLabel = summary.textContent; }
     const ggRetailCheaper = data?.retail_price != null && (data?.keyshop_price == null || data.retail_price <= data.keyshop_price);
     if (gg) summary.textContent = !data.success ? 'GG.deals: ' + (data.pending ? 'szerveres lekérés folyamatban' : data.error_code === 'rate_limit' ? 'várakozás' : 'hiba')
@@ -304,7 +320,8 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
       }
     }
     else {
-      line(data.preferred_only ? 'Legalacsonyabb ár a kiválasztott boltokból' : 'Legalacsonyabb megfelelő ajánlat');
+      line(data.preferred_only ? 'Legalacsonyabb legutóbb jelentett AKS-ár a kiválasztott boltokból' : 'Legalacsonyabb legutóbb jelentett megfelelő AKS-ár');
+      if (steamPrice !== null) line('Steam az itt megnyitott oldalon: ' + steamPrice.toFixed(2) + ' €');
       if (data.not_found) line(data.match_status === 'ambiguous' ? 'Több azonos nevű API-termék van; bizonytalan árat nem párosítunk. Új ellenőrzés a 24 órás cache lejárata után.' : 'A játék ezen a néven nem található az AKS API katalógusában. Ez nem kapcsolati hiba. Új ellenőrzés a 24 órás cache lejárata után.');
       else if (!data.offers?.length) line('Nincs megfelelő Steam-kulcs vagy Gift az aktuális szűrőkkel.');
       for (const [index, offer] of (data.offers || []).entries()) {
@@ -316,11 +333,11 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
       if (!data.not_found && data.filtering) {
         const f = data.filtering;
         line('Legutóbbi API-ajánlatok: ' + f.total + ' · Szűrés után: ' + f.accepted);
-        const labels = {edition:'Más kiadás',region:'Más platform/régió',gift:'Gift kikapcsolva',merchant:'Nem engedélyezett bolt',price:'Hiányzó vagy hibás ár',invalid:'Hiányos adat'};
+        const labels = {edition:'Más kiadás',region:'Más platform/régió',gift:'Gift kikapcsolva',merchant:'Nem engedélyezett bolt',price:'Hiányzó vagy hibás ár',invalid:'Hiányos adat',steam:'Steam történeti ár kizárva; összehasonlítás az oldalon látható árral'};
         for (const [key, label] of Object.entries(labels)) if (f[key]) line(label + ': ' + f[key]);
       }
       if (data.source === 'aks_history') {
-        line('Az API legutóbbi ármegfigyeléseiből. A régi minimumokat és a legújabb adatnál több mint 24 órával régebbi ajánlatokat kizárjuk.');
+        line('Termékenként a legutóbbi API-adat. A boltok eltérő napokon frissülnek; a dátum nem lejárati idő. Ezek jelentett árak, nem élő árellenőrzés.');
         if (data.source_updated_at) line('Játék áradatai eddig frissültek az AKS-nél: ' + data.source_updated_at);
         line('A forrás nem igazolja az aktuális készletet és az összes fizetési díjat.');
       } else line('AKS szerinti, kártyadíjat tartalmazó ár; kupon esetén annak feltételeivel.');
@@ -367,7 +384,7 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
       row.style.cssText = 'position:absolute;bottom:0;left:0;right:0;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
-      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
+      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS ' + offer.price.toFixed(2) + ' € · ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {
         const amount = value.keyshop_price ?? value.retail_price;

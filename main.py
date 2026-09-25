@@ -46,6 +46,8 @@ AKS_CATALOG_URL = "https://www.allkeyshop.com/api/v2/vaks.php?action=gameNames&c
 AKS_REQUEST_GAP_SECONDS = 1.5
 CACHE_SCHEMA_VERSION = 6
 STORE_URL = "https://store.steampowered.com/api/appdetails?appids={app_id}&l=english&cc=us"
+PRICE_MERCHANT_CHOICES = ("YUPLAY", "GAMESEAL", "GAMIVO", "G2A", "Kinguin", "Eneba", "HRK")
+AKS_HISTORY_VERSION = 2
 HUNGARIAN_CURATOR_ID = "34235089"
 HUNGARIAN_CURATOR_URL = "https://store.steampowered.com/curator/34235089/ajaxgetfilteredrecommendations/?start={start}&count=100&l=english&cc=us&filter=all"
 HUNGARIAN_CURATOR_TTL_SECONDS = 24 * 60 * 60
@@ -166,6 +168,7 @@ class Plugin:
         self._price_server_retry_at = 0.0
         self._price_server_failures = 0
         self._price_server_error = ""
+        self._price_server_error_code = "server"
         self._price_server_queue = 0
         self._price_preferences = {"enabled": True, "allow_gifts": True, "merchants": []}
         self._price_merchants: Set[str] = set()
@@ -473,7 +476,8 @@ class Plugin:
             if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("entries"), dict):
                 return
             self._price_cache = {key: value for key, value in list(payload["entries"].items())[-10000:]
-                                 if key.isdigit() and 0 < int(key) < 10000000000 and self._valid_price_entry(value)}
+                                 if key.isdigit() and 0 < int(key) < 10000000000 and self._valid_price_entry(value)
+                                 and (value.get("source") != "aks_history" or value.get("history_version") == AKS_HISTORY_VERSION)}
             gg = payload.get("gg_entries", {})
             if isinstance(gg, dict):
                 self._gg_cache = {k: v for k, v in list(gg.items())[-10000:]
@@ -776,7 +780,7 @@ class Plugin:
             return {"success": True, "disabled": True}
         now = time.time()
         if now < self._price_server_retry_at:
-            return {"success": False, "provider": provider, "global_error": True, "error_code": "server",
+            return {"success": False, "provider": provider, "global_error": True, "error_code": self._price_server_error_code,
                     "error": self._price_server_error, "retry_after": self._price_server_retry_at - now}
         try:
             response = await self._run_blocking(self._price_server_request, self._price_connection["url"], self._price_server_token,
@@ -797,6 +801,9 @@ class Plugin:
             if entry is not None:
                 if not (self._valid_gg_entry(entry) if entry_provider == "gg" else self._valid_price_entry(entry)):
                     raise ValueError("Invalid price data")
+                if entry.get("source") == "aks_history" and entry.get("history_version") != AKS_HISTORY_VERSION:
+                    return {"success": False, "provider": provider, "error_code": "server_version", "retry_after": 60,
+                            "error": "Az árszerver régi, hiányosan szűrt árakat küld. Frissítsd az Ubuntu árszervert is 1.0.93 vagy újabb verzióra."}
                 cache = self._gg_cache if entry_provider == "gg" else self._price_cache
                 if app_id not in cache and len(cache) >= 10000:
                     cache.pop(next(iter(cache)))
@@ -815,8 +822,10 @@ class Plugin:
                 if shared:
                     self._price_server_retry_at = time.time() + max(1, retry)
                 self._price_server_error = message
+                code = failure.get("error_code")
+                self._price_server_error_code = code if code in ("steam", "match", "connection", "rate_limit", "format", "http", "lookup") else "lookup"
                 failed_provider = "gg" if provider == "aks" and failure.get("provider") == "gg" else provider
-                return {"success": False, "provider": failed_provider, "global_error": shared, "error_code": "server",
+                return {"success": False, "provider": failed_provider, "global_error": shared, "error_code": self._price_server_error_code,
                         "error": message, "retry_after": max(1, retry)}
             self._price_server_failures = 0
             self._price_server_error = ""
@@ -834,6 +843,7 @@ class Plugin:
             delay = max(min(300, 10 * 2 ** min(5, self._price_server_failures - 1)), self._retry_after(getattr(error, "headers", None)))
             self._price_server_retry_at = time.time() + delay
             self._price_server_error = self._price_server_error_text(error)
+            self._price_server_error_code = "server"
             return {"success": False, "provider": provider, "global_error": True, "error_code": "server",
                     "error": self._price_server_error, "retry_after": delay}
 
@@ -851,8 +861,8 @@ class Plugin:
                 error = "A szerver frissíti a boltlistát. A már ismert boltok választhatók; néhány másodperc múlva frissítsd a listát."
         except (OSError, ValueError, TypeError) as exc:
             error = self._price_server_error_text(exc)
-        names = self._price_merchants | set(self._price_preferences["merchants"])
-        return {"success": True, "merchants": sorted(names, key=str.casefold), "error": error}
+        names = {name.casefold(): name for name in (*PRICE_MERCHANT_CHOICES, *self._price_merchants, *self._price_preferences["merchants"])}
+        return {"success": True, "merchants": sorted(names.values(), key=str.casefold), "error": error}
 
     async def _load_price_preferences(self) -> None:
         try:
@@ -1103,7 +1113,7 @@ class Plugin:
         if self._price_connection["mode"] == "server":
             return await self._get_remote_merchants(refresh is True)
         # API responses already supply merchant names. Never scrape the old directory.
-        names = {name.casefold(): name for name in self._price_merchants}
+        names = {name.casefold(): name for name in (*PRICE_MERCHANT_CHOICES, *self._price_merchants)}
         for name in self._price_preferences["merchants"]:
             names.setdefault(name.casefold(), name)
         return {"success": True, "merchants": sorted(names.values(), key=str.casefold),
@@ -1380,13 +1390,12 @@ class Plugin:
             elif rank == (previous["end"], previous["start"]) and any(
                     row.get(k) != previous.get(k) for k in ("last_price", "min_discount_price", "best_discount_code")):
                 previous["ambiguous"] = True
-        if payload["history"] and not latest:
+        if any(row is not False for row in payload["history"]) and not latest:
             raise ValueError("Az AllKeyShop ajánlatai most nem olvashatók.")
-        # Discontinued products must not compete indefinitely with recently observed offers.
-        newest = max((row["end"] for row in latest.values()), default="")
-        threshold = time.mktime(time.strptime(newest, "%Y-%m-%d %H:%M:%S")) - 86400 if newest else 0
-        prices = [row for row in latest.values() if not row.get("ambiguous") and
-                  time.mktime(time.strptime(row["end"], "%Y-%m-%d %H:%M:%S")) >= threshold]
+        # Each product has its own observation date. Another shop's newer row
+        # does not prove this product expired. Preserve the last known quote,
+        # expose its date, and never describe historical quotes as live stock.
+        prices = [row for row in latest.values() if not row.get("ambiguous")]
         return {"prices": prices, **{k: payload[k] for k in ("merchants", "regions", "editions")}}
 
     @classmethod
@@ -1402,7 +1411,7 @@ class Plugin:
                    "steam gift row": "Steam Gift · ROW"}
         allowed = {name.casefold() for name in preferences["merchants"]}
         restricted = preferences.get("restrict_merchants", bool(allowed))
-        counts = {key: 0 for key in ("invalid", "region", "edition", "merchant", "gift", "price", "accepted")}
+        counts = {key: 0 for key in ("invalid", "region", "edition", "merchant", "gift", "price", "steam", "accepted")}
         counts["total"] = len(data["prices"])
         offers = []
         for row in data["prices"]:
@@ -1417,7 +1426,8 @@ class Plugin:
                 continue
             region_name = " ".join(str(region.get("name", "")).casefold().split())
             name = merchant.get("name")
-            reason = ("region" if region_name not in regions else
+            reason = ("steam" if isinstance(name, str) and name.strip().casefold() == "steam" else
+                      "region" if region_name not in regions else
                       "edition" if edition.get("name") not in ("Standard", "Standard Edition", "Early Access") else
                       "invalid" if not isinstance(name, str) or not name or len(name) > 80 else
                       "gift" if "gift" in region_name and not preferences["allow_gifts"] else
@@ -1433,6 +1443,7 @@ class Plugin:
                 counts["price"] += 1
                 continue
             price, kind = min(candidates, key=lambda item: (item[0], item[1] != "regular"))
+            price = round(price, 2)
             coupon = row.get("best_discount_code") if kind == "discount" else ""
             offers.append({"merchant": name, "price": price, "kind": regions[region_name],
                            "edition": "Early Access" if edition["name"] == "Early Access" else "Standard",
@@ -1464,6 +1475,7 @@ class Plugin:
                 product_id = catalog.get(self._aks_title(title))
                 if not product_id:
                     return {"title": title, "url": "https://www.allkeyshop.com/", "source": "aks_history",
+                            "history_version": AKS_HISTORY_VERSION,
                             "not_found": True, "match_status": "ambiguous" if self._aks_title(title) in catalog else "missing",
                             "data": {"prices": [], "merchants": {}, "regions": {}, "editions": {}},
                             "checked_at": time.time()}
@@ -1485,6 +1497,7 @@ class Plugin:
                 raise
             data = self._aks_history_data(payload)
             return {"title": title, "url": "https://www.allkeyshop.com/", "data": data,
+                    "history_version": AKS_HISTORY_VERSION,
                     "source": "aks_history", "source_updated_at": max((row["end"] for row in data["prices"]), default=""),
                     "checked_at": time.time()}
         raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
