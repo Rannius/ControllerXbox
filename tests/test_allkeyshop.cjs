@@ -55,6 +55,27 @@ test('web tile price stays on artwork without moving wishlist rows or hiding Ste
  assert.match(render({left:10,right:100,top:92,bottom:120,width:90,height:28}),/top:46px/);
 });
 
+test('homepage featured prices sit beside the Steam price, below the artwork',()=>{
+ const f=fixture(),url='https://store.steampowered.com/';
+ const values=new Map(),style={cssText:'',getPropertyValue:key=>values.get(key)||'',getPropertyPriority:()=>'',
+  setProperty:(key,value)=>values.set(key,value),removeProperty:key=>values.delete(key)};
+ const card={left:1200,top:330,right:1738,bottom:668,width:538,height:338};
+ const steam={left:1460,top:600,right:1738,bottom:666,width:278,height:66};
+ const host={style,offsetWidth:538,closest:selector=>selector==='.home_special_offers_group'?{}:null,
+  matches:()=>true,contains:()=>false,getAttribute:key=>key==='href'?'https://store.steampowered.com/app/10/':'',
+  getBoundingClientRect:()=>card,querySelector:selector=>selector==='.discount_block[data-price-final]'?{getBoundingClientRect:()=>steam}:null,
+  querySelectorAll:()=>[],appendChild(row){this.row=row;}};
+ const context={location:{href:url,pathname:'/'},URL,innerWidth:1800,innerHeight:900,window:{},Date,
+  document:{body:{},querySelectorAll:selector=>selector.startsWith('a[href')?[host]:[],
+   createElement:()=>({style:{cssText:''},dataset:{}})},
+  getComputedStyle:()=>({position:'static',visibility:'visible',backgroundImage:'none'}),setInterval,clearInterval};
+ vm.runInNewContext(f.api.buildTilePricesScript(url,{'10':{success:true,offers:[{price:3.97,merchant:'Kinguin'}]}}),context);
+ assert.equal(host.row.textContent,'AKS: 3.97 € ∙ Kinguin');
+ assert.match(host.row.style.cssText,/top:290px;left:0px;width:256px/);
+ assert.equal(style.getPropertyValue('padding-bottom'),'');
+ assert.equal(style.getPropertyValue('margin-bottom'),'');
+});
+
 test('tile prices require explicit visible IDs, share cache and stop when disabled',async()=>{
  const f=fixture(),url='https://store.steampowered.com/search/';
  f.api.updatePriceView(url,f.send);await f.drain();assert.equal(f.requests.length,0);

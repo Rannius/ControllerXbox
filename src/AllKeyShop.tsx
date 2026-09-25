@@ -307,7 +307,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
       if (data.fallback_from === 'aks') line('Tartalék forrás: AKS-hiba.');
       line('Kulcsboltok: ' + (data.keyshop_price != null ? data.keyshop_price.toFixed(2) + ' €' : 'nincs ár'));
       line('Hivatalos boltok: ' + (data.retail_price != null ? data.retail_price.toFixed(2) + ' €' : 'nincs ár'));
-      line('Összesített irányár; bolt, típus és kiadás szerint nem szűrhető. Ellenőrizd a díjakat és az aktiválást.');
+      line('Irányár; bolt és terméktípus szerint nem szűrhető.');
       if (data.stale) line('Mentett ár; frissítésre vár.');
       if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
       if (/^https:\\/\\/gg\\.deals\\/(?:game\\/[a-z0-9-]+\\/)?$/.test(data.url || '')) {
@@ -316,27 +316,20 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
       }
     }
     else {
-      line(data.preferred_only ? 'Legutóbbi AKS-ár a kiválasztott boltokból.' : 'Legutóbbi megfelelő AKS-ár.');
       if (steamPrice !== null) line('Steam: ' + steamPrice.toFixed(2) + ' €' + (steamCheaper ? ' · itt olcsóbb' : ''));
       if (data.not_found) line(data.match_status === 'ambiguous' ? 'Több azonos nevű játék; bizonytalan árat nem mutatunk.' : 'A játék nincs ezen a néven az AKS-katalógusban.');
       else if (!data.offers?.length) line('Nincs megfelelő ajánlat az aktuális szűrőkkel.');
-      for (const [index, offer] of (data.offers || []).entries()) {
-        line(offer.price.toFixed(2) + ' € · ' + offer.merchant, index === 0);
-        line(offer.kind + ' · ' + offer.edition + (offer.coupon ? ' · Kupon: ' + offer.coupon : ''));
-        if (offer.source_updated_at) line('AKS-adat: ' + offer.source_updated_at + ' (időzóna nélkül)');
-        if (offer.price_kind === 'discount' && !offer.coupon) line('Kedvezményes ár; kupon nem jelzett.');
+      else for (const [index, offer] of data.offers.entries()) {
+        line(offer.price.toFixed(2) + ' € · ' + offer.merchant + ' · ' + offer.kind
+          + (offer.coupon ? ' · Kupon: ' + offer.coupon : ''), index === 0);
       }
-      if (!data.not_found && data.filtering) {
+      if (!data.not_found && !data.offers?.length && data.filtering) {
         const f = data.filtering;
-        line('Szűrés: ' + f.accepted + '/' + f.total + ' ajánlat');
         const labels = {edition:'más kiadás',region:'régió/platform',gift:'Gift tiltva',merchant:'bolt tiltva',price:'hibás ár',invalid:'hiányos',steam:'Steam kizárva'};
         const excluded = Object.entries(labels).filter(([key]) => f[key]).map(([key, label]) => label + ': ' + f[key]);
         if (excluded.length) line('Kihagyva: ' + excluded.join(' · '));
       }
-      if (data.source === 'aks_history') {
-        line('A boltok adatai eltérő napokon frissülnek; ez nem élő készletár.');
-      } else line('AKS szerinti ár; kupon és fizetési díj eltérhet.');
-      line('EU/Global/ROW. A végösszeget és a magyarországi aktiválást ellenőrizd az eladónál.');
+      if (data.offers?.[0]?.source_updated_at) line('AKS-adat: ' + data.offers[0].source_updated_at);
       if (data.stale) line('Mentett ár; frissítésre vár.');
       if (data.checked_at) line('Ellenőrizve: ' + new Date(data.checked_at * 1000).toLocaleString('hu-HU'));
       if (/^https:\\/\\/www\\.allkeyshop\\.com\\/blog\\/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+\\/$/.test(data.url || '') || (data.source === 'aks_history' && data.url === 'https://www.allkeyshop.com/')) {
@@ -350,7 +343,8 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
   })();`;
 }
 
-// Tile labels sit over the artwork without changing Steam's card layout.
+// Tile labels leave Steam's card layout untouched. Featured offers use the free
+// space beside Steam's price; other cards (including wishlist) use the artwork.
 export const tilePriceCleanupScript = `
   for (const [host, original] of window.__dpbPriceTiles || []) {
     host.querySelector(':scope > .dpb-tile-price')?.remove();
@@ -371,29 +365,42 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
     for (const {host, id} of collectPriceTiles()) {
       if (!(id in values) || values[id]?.disabled || values[id]?.skipped) continue;
       const hostRect = host.getBoundingClientRect();
-      const visual = Array.from(host.querySelectorAll('img,picture,video,[style*="background-image"]'))
-        .map(node => node.getBoundingClientRect())
-        .filter(rect => rect.width >= Math.min(80, hostRect.width * .4) && rect.height >= 52
-          && rect.right > hostRect.left && rect.left < hostRect.right
-          && rect.bottom > hostRect.top && rect.top < hostRect.bottom)
-        .sort((a, b) => b.width * b.height - a.width * a.height)[0]
-        || (getComputedStyle(host).backgroundImage !== 'none' ? hostRect : null);
-      // Without artwork there is no safe place for an overlay: keep Steam's price unobscured.
-      if (!visual) continue;
       const scale = host.offsetWidth ? hostRect.width / host.offsetWidth : 1;
-      const left = Math.max(0, visual.left - hostRect.left) / scale;
-      const right = Math.min(hostRect.right, visual.right);
-      const width = Math.max(0, (right - Math.max(hostRect.left, visual.left)) / scale);
-      if (width < 80) continue;
-      const imageTop = Math.max(0, (Math.max(hostRect.top, visual.top) - hostRect.top) / scale);
-      let top = Math.max(imageTop, (Math.min(hostRect.bottom, visual.bottom) - hostRect.top) / scale - 26);
-      const steamPrices = Array.from(host.querySelectorAll('.discount_block,.discount_final_price,.game_purchase_price,.price,[class*="SalePrice"],[class*="sale_price"]'))
-        .map(node => node.getBoundingClientRect());
-      const overlapsSteamPrice = () => steamPrices.some(rect => rect.width && rect.height
-        && rect.left < hostRect.left + (left + width) * scale && rect.right > hostRect.left + left * scale
-        && rect.top < hostRect.top + (top + 26) * scale && rect.bottom > hostRect.top + top * scale);
-      while (top - 28 >= imageTop && overlapsSteamPrice()) top -= 28;
-      if (overlapsSteamPrice()) continue;
+      const featured = /^\\/(?:|home\\/|index\\.php)$/.test(location.pathname || '/')
+        && !!host.closest('.home_special_offers_group');
+      let left, width, top;
+      if (featured) {
+        const steamPrice = host.querySelector('.discount_block[data-price-final]');
+        const priceRect = steamPrice?.getBoundingClientRect();
+        // An unpriced promotion has no Steam price row to align with.
+        if (!priceRect?.width || !priceRect.height) continue;
+        left = 0;
+        width = (priceRect.left - hostRect.left - 4) / scale;
+        top = ((priceRect.top + priceRect.bottom) / 2 - hostRect.top) / scale - 13;
+        if (width < 120 || top < 0) continue;
+      } else {
+        const visual = Array.from(host.querySelectorAll('img,picture,video,[style*="background-image"]'))
+          .map(node => node.getBoundingClientRect())
+          .filter(rect => rect.width >= Math.min(80, hostRect.width * .4) && rect.height >= 52
+            && rect.right > hostRect.left && rect.left < hostRect.right
+            && rect.bottom > hostRect.top && rect.top < hostRect.bottom)
+          .sort((a, b) => b.width * b.height - a.width * a.height)[0]
+          || (getComputedStyle(host).backgroundImage !== 'none' ? hostRect : null);
+        if (!visual) continue;
+        left = Math.max(0, visual.left - hostRect.left) / scale;
+        const right = Math.min(hostRect.right, visual.right);
+        width = Math.max(0, (right - Math.max(hostRect.left, visual.left)) / scale);
+        if (width < 80) continue;
+        const imageTop = Math.max(0, (Math.max(hostRect.top, visual.top) - hostRect.top) / scale);
+        top = Math.max(imageTop, (Math.min(hostRect.bottom, visual.bottom) - hostRect.top) / scale - 26);
+        const steamPrices = Array.from(host.querySelectorAll('.discount_block,.discount_final_price,.game_purchase_price,.price,[class*="SalePrice"],[class*="sale_price"]'))
+          .map(node => node.getBoundingClientRect());
+        const overlapsSteamPrice = () => steamPrices.some(rect => rect.width && rect.height
+          && rect.left < hostRect.left + (left + width) * scale && rect.right > hostRect.left + left * scale
+          && rect.top < hostRect.top + (top + 26) * scale && rect.bottom > hostRect.top + top * scale);
+        while (top - 28 >= imageTop && overlapsSteamPrice()) top -= 28;
+        if (overlapsSteamPrice()) continue;
+      }
       saved.set(host, ['position'].map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
       if (getComputedStyle(host).position === 'static') host.style.setProperty('position', 'relative');
       const value = values[id], offer = value?.offers?.[0];

@@ -22,7 +22,11 @@ export const storePriceTilesScript = `
       const raw = node.getAttribute('data-ds-appid') || node.getAttribute('data-app-id') || '';
       const id = linkedId || (/^\\d+$/.test(raw) ? raw : '');
       if (!id || Number(id) <= 0) continue;
-      let host = link || node;
+      const spotlight = node.closest('.home_area_spotlight');
+      // The main featured image link and its Steam price are siblings. Anchor
+      // the label to the entire featured card, not just to the image link.
+      if (spotlight && !linkedId) continue;
+      let host = spotlight || link || node;
       let rect = host.getBoundingClientRect();
       if (rect.width < 80 || rect.height < 30) {
         host = host.parentElement?.closest(cardSelector) || host.parentElement;

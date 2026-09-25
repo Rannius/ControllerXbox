@@ -150,3 +150,7 @@ Az AKS API ajánlat nélküli játékoknál üres listákat küldhet a boltok, r
 ## 1.0.97: csempeárak a borítón
 
 A webes Steam-áruház csempéin az AKS/GG ársáv a borítókép aljára kerül. Nem adunk belső térközt a Steam-csempéhez, így az ajánlások saját ára látható marad, és a kívánságlista sorai nem tolódnak el. Ha nincs biztonságos képfelület, a csempén nem jelenik meg külön ársáv. Ehhez csak a Decky plugint kell frissíteni; az 1.0.96-os árszerver tovább használható.
+
+## 1.0.98: főoldali ársáv és rövidebb árleírás
+
+A főoldali kiemelt ajánlatok AKS/GG ársávja a Steam-ár melletti szabad helyre kerül, így nem takarja a játék képét vagy az eredeti árat. A kívánságlista elrendezése változatlan. A játék adatlapján az ár lenyitható részében az ajánlatok és ellenőrzési időpont rövidebben jelennek meg. Csak a Decky plugint kell frissíteni.

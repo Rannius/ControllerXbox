@@ -19,6 +19,21 @@ test('web scanner collects visible home/wishlist games and excludes bundles and 
  assert.match(source,/tileIds, watchActions/);
 });
 
+test('featured game uses its outer card so the sibling Steam price is reachable',()=>{
+ const outer={getBoundingClientRect:()=>({width:520,height:340,top:20,bottom:360,left:0,right:520}),
+  querySelector:()=>({}),matches:()=>true,contains:()=>false};
+ const link={closest:selector=>selector==='.home_area_spotlight'?outer:null,matches:()=>true,
+  getAttribute:key=>key==='href'?'https://store.steampowered.com/app/10/':'',
+  querySelector:()=>null,getBoundingClientRect:()=>({width:520,height:300,top:20,bottom:320,left:0,right:520}),
+  contains:()=>false};
+ const context=vm.createContext({location:{href:'https://store.steampowered.com/'},URL,
+  innerWidth:1280,innerHeight:800,document:{querySelectorAll:()=>[link]},
+  getComputedStyle:()=>({visibility:'visible',backgroundImage:'none'})});
+ vm.runInContext(tiles.storePriceTilesScript,context);
+ const found=Array.from(context.collectPriceTiles());
+ assert.equal(found.length,1);assert.equal(found[0].host,outer);assert.equal(found[0].id,'10');
+});
+
 test('native Store cards share one visible-only timer, hide skipped prices and clean up',()=>{
  const exports={},effects=[],refs=[],calls=[],observers=[];let tick,started=0,stopped=0,cleared=0;
  class Observer {constructor(fn){this.fn=fn;observers.push(this);}observe(){}disconnect(){this.done=true;}}
