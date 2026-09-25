@@ -166,3 +166,7 @@ Az AKS által „DLC” kiadásként jelölt Steam-kulcs és Gift ajánlatokat i
 ## 1.0.101: a főoldali DLC-ársáv elhelyezése
 
 A Steam-áruház főoldalán a „DLC a játékaidhoz” kártyáin az AKS/GG ársáv a Steam-ár alatti szabad helyre kerül; ha ott nincs hely, a kép fölött jelenik meg. Nem fut át a borítón és nem takarja a Steam árát. A kívánságlista és a kiemelt ajánlatok elhelyezése változatlan. Csak a Decky plugint kell frissíteni.
+
+## 1.0.102: stabil DLC-ársáv görgetéskor
+
+A főoldali DLC-kártyák ársávja a borító fölötti szabad helyhez igazodik, így a Steam-ár későbbi betöltése vagy a görgetés nem helyezi vissza a képre. Csak a Decky plugint kell frissíteni.

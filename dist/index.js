@@ -317,7 +317,7 @@ const storePriceTilesScript = `
       // the label to the entire featured card, not just to the image link.
       if (spotlight && !linkedId) continue;
       let host = spotlight || link || node;
-      const dlcTier = node.closest('#dlc_tier');
+      const dlcTier = node.closest('#dlc_tier,.home_discounts_block.dlc_block');
       if (dlcTier && !host.querySelector('.discount_block[data-price-final]')) {
         // The DLC image and Steam price may be siblings inside one compact card.
         // Stop before the shared four-card row so each AppID retains its own host.
@@ -717,29 +717,25 @@ function buildTilePricesScript(url, values) {
       const scale = host.offsetWidth ? hostRect.width / host.offsetWidth : 1;
       const home = /^\\/(?:|home\\/|index\\.php)$/.test(location.pathname || '/');
       const featured = home && !!host.closest('.home_special_offers_group');
-      const homeDlc = home && !!host.closest('#dlc_tier');
+      const homeDlc = home && !!host.closest('#dlc_tier,.home_discounts_block.dlc_block');
       let left, width, top;
       if (homeDlc) {
-        const priceRect = host.querySelector('.discount_block[data-price-final]')?.getBoundingClientRect();
+        const section = host.closest('.home_discounts_block.dlc_block');
+        if (!section) continue;
         const imageRect = Array.from(host.querySelectorAll('img,picture,video'))
           .map(node => node.getBoundingClientRect())
           .filter(rect => rect.width >= 80 && rect.height >= 52)
-          .sort((a, b) => b.width * b.height - a.width * a.height)[0];
-        const section = host.closest('.home_discounts_block');
-        if (!priceRect?.height || !imageRect || !section) continue;
+          .sort((a, b) => a.top - b.top || b.width - a.width)[0];
+        if (!imageRect) continue;
         const sectionRect = section.getBoundingClientRect();
         left = Math.max(0, imageRect.left - hostRect.left) / scale;
         width = Math.min(hostRect.right, imageRect.right) / scale - Math.max(hostRect.left, imageRect.left) / scale;
         if (width < 80) continue;
-        // Keep the entire cover and Steam's own price visible. On the home DLC
-        // row there is normally a short strip below the native price.
-        if (sectionRect.bottom - priceRect.bottom >= 26 * scale + 6) {
-          top = (priceRect.bottom + 3 - hostRect.top) / scale;
-        } else {
-          const titleBottom = section.querySelector('.title_grid')?.getBoundingClientRect().bottom || sectionRect.top;
-          if (imageRect.top - titleBottom < 26 * scale + 6) continue;
-          top = (imageRect.top - 26 * scale - 3 - hostRect.top) / scale;
-        }
+        // Steam fills/repositions DLC prices asynchronously and again on scroll.
+        // Anchor above the cover instead, which stays fixed within the card.
+        const titleBottom = section.querySelector('.title_grid')?.getBoundingClientRect().bottom || sectionRect.top;
+        if (imageRect.top - titleBottom < 26 * scale + 6) continue;
+        top = (imageRect.top - 26 * scale - 3 - hostRect.top) / scale;
       } else if (featured) {
         const steamPrice = host.querySelector('.discount_block[data-price-final]');
         const priceRect = steamPrice?.getBoundingClientRect();

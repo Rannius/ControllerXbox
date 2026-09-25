@@ -37,10 +37,10 @@ test('featured game uses its outer card so the sibling Steam price is reachable'
 test('DLC card uses its own wrapper when the Steam price is next to the image link',()=>{
  const tier={};
  const rect={width:420,height:240,top:480,bottom:720,left:100,right:520};
- const card={parentElement:tier,closest:selector=>selector==='#dlc_tier'?tier:null,
+ const card={parentElement:tier,closest:selector=>selector==='#dlc_tier,.home_discounts_block.dlc_block'?tier:null,
   querySelector:selector=>selector==='.discount_block[data-price-final]'||selector.startsWith('img')?{}:null,
   matches:()=>true,getBoundingClientRect:()=>rect,contains:()=>false};
- const link={parentElement:card,closest:selector=>selector==='#dlc_tier'?tier:null,
+ const link={parentElement:card,closest:selector=>selector==='#dlc_tier,.home_discounts_block.dlc_block'?tier:null,
   querySelector:selector=>selector.startsWith('img')?{}:null,matches:()=>true,
   getAttribute:key=>key==='href'?'https://store.steampowered.com/app/2780810/':'',
   getBoundingClientRect:()=>({...rect,height:175,bottom:655}),contains:()=>false};

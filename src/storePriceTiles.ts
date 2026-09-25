@@ -27,7 +27,7 @@ export const storePriceTilesScript = `
       // the label to the entire featured card, not just to the image link.
       if (spotlight && !linkedId) continue;
       let host = spotlight || link || node;
-      const dlcTier = node.closest('#dlc_tier');
+      const dlcTier = node.closest('#dlc_tier,.home_discounts_block.dlc_block');
       if (dlcTier && !host.querySelector('.discount_block[data-price-final]')) {
         // The DLC image and Steam price may be siblings inside one compact card.
         // Stop before the shared four-card row so each AppID retains its own host.
