@@ -825,6 +825,33 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
                 index = self.plugin._load_aks_catalog(force=True)
             self.assertFalse(index.get(self.plugin._aks_title("Solarpunk™")))
 
+    def test_catalog_ignores_decorative_rights_marks_without_changing_game_identity(self):
+        catalog = {self.plugin._aks_title("EA SPORTS FC 27"): "217095"}
+        for title in ("EA SPORTS FC™ 27", "EA SPORTS FC® 27", "EA SPORTS FC℠ 27",
+                      "EA SPORTS FCⓇ 27", "EA SPORTS FCⒸ 27", "EA SPORTS FC� 27"):
+            self.assertEqual(self.plugin._aks_catalog_match(catalog, title), ("217095", True))
+        self.assertEqual(self.plugin._aks_catalog_match(catalog, "EA SPORTS FC™ 26"), (None, False))
+
+    async def test_matched_game_without_aks_history_is_not_reported_as_no_offer(self):
+        self.plugin._price_metadata["4080220"] = self.price_metadata("4080220", "EA SPORTS FC™ 27")
+        self.plugin._aks_catalog = {self.plugin._aks_title("EA SPORTS FC 27"): "217095"}
+        self.plugin._aks_catalog_checked_at = time.time()
+        payload = {"history": [], "merchants": [], "regions": [], "editions": []}
+        with patch.object(self.plugin, "_aks_read", return_value=json.dumps(payload)) as aks:
+            empty = self.plugin._fetch_aks_game("4080220")
+        self.assertIn("normalised_name=217095", aks.call_args.args[0])
+        empty["checked_at"] -= 2 * 3600
+        self.assertTrue(self.plugin._valid_price_entry(empty))
+        self.assertEqual(self.plugin._price_entry_ttl(empty), 3600)
+        self.assertTrue(self.plugin._price_result(empty)["history_unavailable"])
+        self.plugin._price_cache["4080220"] = empty
+        with patch.object(self.plugin, "_fetch_aks_game", return_value={**empty, "checked_at": time.time()}) as fetch:
+            refreshed = await self.plugin.get_allkeyshop_price("4080220")
+        fetch.assert_called_once_with("4080220")
+        self.assertTrue(refreshed["history_unavailable"])
+        self.assertFalse(refreshed["not_found"])
+        await self.plugin._price_save_task
+
     def test_roman_sequel_uses_exact_title_first_then_numeric_catalog_title(self):
         title = "Hades II"
         catalog = {self.plugin._aks_title("Hades 2"): "128119"}

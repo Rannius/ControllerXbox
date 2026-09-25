@@ -182,3 +182,7 @@ A normál áruházi csempék, keresési találatok és kívánságlista-sorok AK
 ## 1.0.105: további főoldali ársávok
 
 A „Kiemelt ajánlatok”, „Leárazások és események”, „Személyes naptárad” és az alsó listás csempék felismerése bővült. A pontosan egy játékhoz rendelhető kártyák AKS/GG ársávja a teljes kártya alatt jelenik meg. Csak a Decky plugint kell frissíteni.
+
+## 1.0.106: díszítő jelölések és hiányzó AKS-árhistória
+
+A ™, ®, ℠ és hasonló jogi jelölések nem akadályozzák a pontos címpárosítást; az eltérő sorszámú játékok továbbra sem keverednek. Ha egy játék szerepel az AKS-katalógusban, de az árhistória-API még üres választ ad, a felület ezt jelzi a „nincs ajánlat” helyett, és egy óra múlva újraellenőrzi. Ez az API által még nem szolgáltatott árakat nem tudja pótolni. A Decky plugint és az Ubuntu árszervert is frissíteni kell.

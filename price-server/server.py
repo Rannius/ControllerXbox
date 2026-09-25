@@ -115,7 +115,7 @@ class PriceBroker:
         providers = {}
         for provider in ("aks", "gg"):
             entries = [entry for entry in self.cache(provider).values() if "error" not in entry]
-            fresh = sum(0 <= now - entry["checked_at"] < self.engine.price_ttl_seconds for entry in entries)
+            fresh = sum(0 <= now - entry["checked_at"] < self.engine._price_entry_ttl(entry) for entry in entries)
             providers[provider] = {"stored": len(entries), "fresh": fresh, "stale": len(entries) - fresh,
                                    "skipped": sum(bool(entry.get("skipped")) for entry in entries),
                                    "retry_after": max(0, round(self.cooldown(provider) - now)),
@@ -167,7 +167,7 @@ class PriceBroker:
         response = {"protocol": PROTOCOL, "provider": provider, "app_id": app_id, "entry": entry,
                     "entry_provider": "gg" if entry and entry.get("provider") == "gg" else provider,
                     "pending": False, "retry_after": 3, "queue": len(self.pending)}
-        if entry and 0 <= now - entry["checked_at"] < self.engine.price_ttl_seconds:
+        if entry and 0 <= now - entry["checked_at"] < self.engine._price_entry_ttl(entry):
             self.cache_hits += 1
             self.observe(key, "cached")
             return response

@@ -39,6 +39,7 @@ except ImportError:
 
 CACHE_TTL_SECONDS = 30 * 24 * 60 * 60
 PRICE_TTL_SECONDS = 24 * 60 * 60
+AKS_EMPTY_HISTORY_TTL_SECONDS = 60 * 60
 PRICE_METADATA_TTL_SECONDS = 86400
 AKS_MATCH_TTL_SECONDS = 7 * 86400
 AKS_CATALOG_TTL_SECONDS = 86400
@@ -446,6 +447,7 @@ class Plugin:
                                           entry.get("steam_type") == "dlc") if history
                   else self._aks_filter(entry["data"], self._price_preferences))
         return {"success": True, "provider": "aks", "offers": offers[:1], "matched_offers": len(offers),
+                "history_unavailable": entry.get("history_unavailable") is True,
                 "filtering": filtering,
                 "not_found": entry.get("not_found") is True, "match_status": entry.get("match_status", ""),
                 "source": entry.get("source", "aks_page"), "source_updated_at": entry.get("source_updated_at", ""),
@@ -466,6 +468,14 @@ class Plugin:
                      or re.search(r"[^\w\s]", entry["title"]))):
             return False
         data = entry.get("data")
+        if ("history_unavailable" in entry and (type(entry["history_unavailable"]) is not bool
+                or (entry["history_unavailable"] and (not isinstance(data, dict) or data.get("prices") != [])))):
+            return False
+        # Older empty results did not distinguish missing history from filtered offers.
+        if (entry.get("source") == "aks_history" and not entry.get("not_found")
+                and isinstance(data, dict) and data.get("prices") == []
+                and "history_unavailable" not in entry):
+            return False
         # Older cached DLC results were filtered with the base-game rules.
         if (entry.get("source") == "aks_history" and "steam_type" not in entry
                 and isinstance(data, dict) and isinstance(data.get("editions"), dict)
@@ -477,6 +487,14 @@ class Plugin:
         return ((valid_url or (entry.get("source") == "aks_history" and entry.get("url") == "https://www.allkeyshop.com/"))
             and isinstance(data, dict) and isinstance(data.get("prices"), list)
             and all(isinstance(data.get(key), dict) for key in ("merchants", "regions", "editions")))
+
+    @staticmethod
+    def _price_entry_ttl(entry: Dict[str, Any]) -> int:
+        # A matched product may have no history yet, even when its AKS page has offers.
+        # Recheck that situation sooner without shortening the normal price cache.
+        if entry.get("history_unavailable") is True:
+            return AKS_EMPTY_HISTORY_TTL_SECONDS
+        return PRICE_TTL_SECONDS
 
     async def _load_price_cache(self) -> None:
         try:
@@ -594,7 +612,7 @@ class Plugin:
         entry = self._effective_price_entry(str(app_id))
         if not entry or "error" in entry:
             return {"success": True, "missing": True}
-        return {**self._active_price_result(entry), "stale": time.time() - entry["checked_at"] >= PRICE_TTL_SECONDS}
+        return {**self._active_price_result(entry), "stale": time.time() - entry["checked_at"] >= self._price_entry_ttl(entry)}
 
     async def clear_price_cache(self) -> Dict[str, Any]:
         self._price_epoch += 1
@@ -610,7 +628,7 @@ class Plugin:
     def _price_stats(self) -> Dict[str, Any]:
         now = time.time()
         valid = {key: value for key, value in self._active_price_cache().items() if "error" not in value}
-        fresh = {key for key, value in valid.items() if now - value["checked_at"] < PRICE_TTL_SECONDS}
+        fresh = {key for key, value in valid.items() if now - value["checked_at"] < self._price_entry_ttl(value)}
         wishlist = set(self._price_wishlist)
         return {"price_connection": self._price_connection["mode"], "price_server_queue": self._price_server_queue,
                 "price_provider": self._price_preferences.get("provider", "aks"),
@@ -657,7 +675,7 @@ class Plugin:
         for app_id in sorted(self._price_wishlist, key=lambda key: max(
                 (self._effective_price_entry(key) or {}).get("checked_at", 0), self._price_wishlist_attempts.get(key, 0))):
             entry = self._effective_price_entry(app_id)
-            if entry and "error" not in entry and now - entry["checked_at"] < PRICE_TTL_SECONDS:
+            if entry and "error" not in entry and now - entry["checked_at"] < self._price_entry_ttl(entry):
                 continue
             if self._price_wishlist_retry.get(app_id, 0) > now:
                 continue
@@ -845,7 +863,7 @@ class Plugin:
             pending = response.get("pending") is True
             if entry:
                 return {**self._active_price_result(entry),
-                        "stale": time.time() - entry["checked_at"] >= PRICE_TTL_SECONDS,
+                        "stale": time.time() - entry["checked_at"] >= self._price_entry_ttl(entry),
                         "pending": pending, "retry_after": max(1, retry)}
             return {"success": False, "provider": provider, "pending": pending, "error_code": "pending" if pending else "server",
                     "error": "A saját szerver lekérési sorában vár." if pending else "A szerver nem adott áradatot.", "retry_after": max(1, retry)}
@@ -941,7 +959,7 @@ class Plugin:
         if provider == "gg":
             return self._gg_cache.get(app_id)
         aks, gg = self._price_cache.get(app_id), self._gg_cache.get(app_id)
-        if aks and "error" not in aks and 0 <= time.time() - aks["checked_at"] < PRICE_TTL_SECONDS:
+        if aks and "error" not in aks and 0 <= time.time() - aks["checked_at"] < self._price_entry_ttl(aks):
             return aks
         if gg and gg.get("fallback_from") == "aks":
             if not aks or "error" in aks or gg["checked_at"] >= aks["checked_at"]:
@@ -1134,14 +1152,15 @@ class Plugin:
 
     @staticmethod
     def _aks_title(value: str) -> str:
-        value = html.unescape(re.sub(r"<[^>]*>", "", value)).replace("™", "").replace("®", "")
+        value = html.unescape(re.sub(r"<[^>]*>", "", value)).translate(
+            str.maketrans("", "", "™®℠Ⓡⓡ©℗Ⓒⓒ"))
         return re.sub(r"[^\w]", "", unicodedata.normalize("NFKC", value).casefold())
 
     @staticmethod
     def _aks_search_name(value: str) -> str:
         # Omit trademark glyphs in the request too, preserving words, accents,
         # punctuation and edition names. Exact result/AppID validation is unchanged.
-        return " ".join(html.unescape(value).replace("™", "").replace("®", "").split())
+        return " ".join(html.unescape(value).translate(str.maketrans("", "", "™®℠Ⓡⓡ©℗Ⓒⓒ")).split())
 
     @staticmethod
     def _aks_roman_variant(title: str) -> str:
@@ -1567,6 +1586,7 @@ class Plugin:
                     raise ValueError("A Steam-cím megváltozott; az AKS-párosítást újra kell ellenőrizni.")
             return {"title": title, "url": "https://www.allkeyshop.com/", "data": data,
                     "history_version": AKS_HISTORY_VERSION,
+                    "history_unavailable": payload.get("history") == [],
                     "steam_type": metadata.get("type", ""),
                     "source": "aks_history", "source_updated_at": max((row["end"] for row in data["prices"]), default=""),
                     "checked_at": time.time()}
@@ -1643,7 +1663,7 @@ class Plugin:
         if not self._price_preferences["enabled"] or self._price_stopping:
             return {"success": True, "disabled": True}
         entry = self._effective_price_entry(normalized)
-        if entry and "error" not in entry and 0 <= time.time() - entry["checked_at"] < PRICE_TTL_SECONDS:
+        if entry and "error" not in entry and 0 <= time.time() - entry["checked_at"] < self._price_entry_ttl(entry):
             return self._active_price_result(entry)
         task_key = str(self._price_epoch) + ":" + normalized
         task = self._price_tasks.get(task_key)
@@ -1692,7 +1712,7 @@ class Plugin:
             entry = self._price_cache.get(normalized)
             previous = entry
             epoch = self._price_epoch
-            if not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else PRICE_TTL_SECONDS):
+            if not entry or time.time() - entry["checked_at"] >= (30 if "error" in entry else self._price_entry_ttl(entry)):
                 if self._price_service_error and time.time() < self._price_service_retry_at:
                     return {"success": False, **self._price_service_error,
                             "retry_after": max(1, int(self._price_service_retry_at - time.time()))}

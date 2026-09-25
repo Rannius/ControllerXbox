@@ -25,7 +25,8 @@ export function tilePriceLabel(value?: PriceResult): string {
   }
   const best = value.offers?.[0];
   return best ? "AKS: " + best.price.toFixed(2) + " € ∙ " + best.merchant
-    : value.not_found ? "AKS: nincs a katalógusban" : "AKS: nincs ajánlat";
+    : value.not_found ? "AKS: nincs a katalógusban"
+    : value.history_unavailable ? "AKS: áradat még nincs" : "AKS: nincs ajánlat";
 }
 
 function tick(): void {

@@ -5,7 +5,7 @@ import { callable } from "@decky/api";
 
 
 type Preferences = { provider: "aks" | "gg"; gg_key_configured: boolean; success: boolean; enabled: boolean; allow_gifts: boolean; merchants: string[]; restrict_merchants: boolean; error?: string };
-export type PriceResult = { pending?: boolean; fallback_from?: "aks"; provider?: "aks" | "gg"; retail_price?: number | null; keyshop_price?: number | null; success: boolean; not_found?: boolean; match_status?: "missing" | "ambiguous" | ""; missing?: boolean; stale?: boolean; skipped?: "unreleased" | "release_unknown" | "free"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
+export type PriceResult = { pending?: boolean; fallback_from?: "aks"; provider?: "aks" | "gg"; retail_price?: number | null; keyshop_price?: number | null; success: boolean; not_found?: boolean; history_unavailable?: boolean; match_status?: "missing" | "ambiguous" | ""; missing?: boolean; stale?: boolean; skipped?: "unreleased" | "release_unknown" | "free"; error_code?: string; global_error?: boolean; retry_after?: number; retry_at?: number; disabled?: boolean; error?: string; title?: string; url?: string;
   filtering?: Record<string, number>; source?: "aks_history" | "aks_page"; source_updated_at?: string; checked_at?: number; currency?: string; preferred_only?: boolean; matched_offers?: number;
   offers?: { merchant: string; price: number; kind: string; edition: string; coupon: string; source_updated_at?: string; price_kind?: "regular" | "discount" }[] };
 const getPreferences = callable<[], Preferences>("get_price_preferences");
@@ -286,7 +286,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     const best = data?.offers?.[0];
     const gg = data?.provider === 'gg';
     const steamCheaper = !gg && data?.success && best && steamPrice !== null && steamPrice <= best.price;
-    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : data.not_found ? (data.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: ezen a néven nincs a katalógusban') : best ? 'AKS: ' + best.price.toFixed(2) + ' € ∙ ' + best.merchant : 'AKS: nincs ajánlat';
+    summary.textContent = !data ? 'Ár betöltése…' : !data.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[data.error_code] || 'hiba') : data.not_found ? (data.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: ezen a néven nincs a katalógusban') : best ? 'AKS: ' + best.price.toFixed(2) + ' € ∙ ' + best.merchant : data.history_unavailable ? 'AKS: áradat még nincs' : 'AKS: nincs ajánlat';
     if (data?.retry_at && !data.success) { summary.dataset.dpbRetryAt = String(data.retry_at); summary.dataset.dpbLabel = summary.textContent; }
     const ggRetailCheaper = data?.retail_price != null && (data?.keyshop_price == null || data.retail_price <= data.keyshop_price);
     if (gg) summary.textContent = !data.success ? 'GG.deals: ' + (data.pending ? 'szerveres lekérés folyamatban' : data.error_code === 'rate_limit' ? 'várakozás' : 'hiba')
@@ -318,6 +318,7 @@ export function buildPricePanelScript(appId: string, result?: PriceResult): stri
     else {
       if (steamPrice !== null) line('Steam: ' + steamPrice.toFixed(2) + ' €' + (steamCheaper ? ' · itt olcsóbb' : ''));
       if (data.not_found) line(data.match_status === 'ambiguous' ? 'Több azonos nevű játék; bizonytalan árat nem mutatunk.' : 'A játék nincs ezen a néven az AKS-katalógusban.');
+      else if (data.history_unavailable) line('Az AKS API még nem ad árhistóriát ehhez a játékhoz; később újraellenőrizzük.');
       else if (!data.offers?.length) line('Nincs megfelelő ajánlat az aktuális szűrőkkel.');
       else for (const [index, offer] of data.offers.entries()) {
         line(offer.price.toFixed(2) + ' € · ' + offer.merchant + ' · ' + offer.kind
@@ -396,7 +397,7 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
       row.style.cssText = 'position:absolute;top:calc(100% + 3px);left:0;width:100%;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
-      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : 'AKS: nincs ajánlat';
+      row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : value.history_unavailable ? 'AKS: áradat még nincs' : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {
         const amount = value.keyshop_price ?? value.retail_price;
