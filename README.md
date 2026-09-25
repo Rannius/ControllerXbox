@@ -162,3 +162,7 @@ Ha nincs pontos katalógustalálat, a Steam-cím önálló római sorszámát ar
 ## 1.0.100: DLC-ajánlatok az AKS áradatában
 
 Az AKS által „DLC” kiadásként jelölt Steam-kulcs és Gift ajánlatokat is figyelembe vesszük, de csak akkor, ha a Steam az adott AppID-t DLC-ként azonosítja. Így például az Euro Truck Simulator 2 - Nordic Horizons nem marad ajánlat nélkül a kiadás szűrése miatt. A korábbi, hibásan üres DLC-árgyorsítótár egyszer újraépül. A Decky plugint és a saját Ubuntu árszervert is frissíteni kell.
+
+## 1.0.101: a főoldali DLC-ársáv elhelyezése
+
+A Steam-áruház főoldalán a „DLC a játékaidhoz” kártyáin az AKS/GG ársáv a Steam-ár alatti szabad helyre kerül; ha ott nincs hely, a kép fölött jelenik meg. Nem fut át a borítón és nem takarja a Steam árát. A kívánságlista és a kiemelt ajánlatok elhelyezése változatlan. Csak a Decky plugint kell frissíteni.

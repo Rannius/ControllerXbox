@@ -366,10 +366,32 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
       if (!(id in values) || values[id]?.disabled || values[id]?.skipped) continue;
       const hostRect = host.getBoundingClientRect();
       const scale = host.offsetWidth ? hostRect.width / host.offsetWidth : 1;
-      const featured = /^\\/(?:|home\\/|index\\.php)$/.test(location.pathname || '/')
-        && !!host.closest('.home_special_offers_group');
+      const home = /^\\/(?:|home\\/|index\\.php)$/.test(location.pathname || '/');
+      const featured = home && !!host.closest('.home_special_offers_group');
+      const homeDlc = home && !!host.closest('#dlc_tier');
       let left, width, top;
-      if (featured) {
+      if (homeDlc) {
+        const priceRect = host.querySelector('.discount_block[data-price-final]')?.getBoundingClientRect();
+        const imageRect = Array.from(host.querySelectorAll('img,picture,video'))
+          .map(node => node.getBoundingClientRect())
+          .filter(rect => rect.width >= 80 && rect.height >= 52)
+          .sort((a, b) => b.width * b.height - a.width * a.height)[0];
+        const section = host.closest('.home_discounts_block');
+        if (!priceRect?.height || !imageRect || !section) continue;
+        const sectionRect = section.getBoundingClientRect();
+        left = Math.max(0, imageRect.left - hostRect.left) / scale;
+        width = Math.min(hostRect.right, imageRect.right) / scale - Math.max(hostRect.left, imageRect.left) / scale;
+        if (width < 80) continue;
+        // Keep the entire cover and Steam's own price visible. On the home DLC
+        // row there is normally a short strip below the native price.
+        if (sectionRect.bottom - priceRect.bottom >= 26 * scale + 6) {
+          top = (priceRect.bottom + 3 - hostRect.top) / scale;
+        } else {
+          const titleBottom = section.querySelector('.title_grid')?.getBoundingClientRect().bottom || sectionRect.top;
+          if (imageRect.top - titleBottom < 26 * scale + 6) continue;
+          top = (imageRect.top - 26 * scale - 3 - hostRect.top) / scale;
+        }
+      } else if (featured) {
         const steamPrice = host.querySelector('.discount_block[data-price-final]');
         const priceRect = steamPrice?.getBoundingClientRect();
         // An unpriced promotion has no Steam price row to align with.
@@ -401,8 +423,10 @@ export function buildTilePricesScript(url: string, values: Record<string, PriceR
         while (top - 28 >= imageTop && overlapsSteamPrice()) top -= 28;
         if (overlapsSteamPrice()) continue;
       }
-      saved.set(host, ['position'].map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
+      saved.set(host, (homeDlc ? ['position', 'overflow'] : ['position'])
+        .map(key => [key, host.style.getPropertyValue(key), host.style.getPropertyPriority(key)]));
       if (getComputedStyle(host).position === 'static') host.style.setProperty('position', 'relative');
+      if (homeDlc && getComputedStyle(host).overflow === 'hidden') host.style.setProperty('overflow', 'visible');
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
       row.style.cssText = 'position:absolute;top:' + top + 'px;left:' + left + 'px;width:' + width + 'px;height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';

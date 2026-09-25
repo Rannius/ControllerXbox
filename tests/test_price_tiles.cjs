@@ -34,6 +34,24 @@ test('featured game uses its outer card so the sibling Steam price is reachable'
  assert.equal(found.length,1);assert.equal(found[0].host,outer);assert.equal(found[0].id,'10');
 });
 
+test('DLC card uses its own wrapper when the Steam price is next to the image link',()=>{
+ const tier={};
+ const rect={width:420,height:240,top:480,bottom:720,left:100,right:520};
+ const card={parentElement:tier,closest:selector=>selector==='#dlc_tier'?tier:null,
+  querySelector:selector=>selector==='.discount_block[data-price-final]'||selector.startsWith('img')?{}:null,
+  matches:()=>true,getBoundingClientRect:()=>rect,contains:()=>false};
+ const link={parentElement:card,closest:selector=>selector==='#dlc_tier'?tier:null,
+  querySelector:selector=>selector.startsWith('img')?{}:null,matches:()=>true,
+  getAttribute:key=>key==='href'?'https://store.steampowered.com/app/2780810/':'',
+  getBoundingClientRect:()=>({...rect,height:175,bottom:655}),contains:()=>false};
+ const context=vm.createContext({location:{href:'https://store.steampowered.com/'},URL,
+  innerWidth:1800,innerHeight:900,document:{querySelectorAll:()=>[link]},
+  getComputedStyle:()=>({visibility:'visible',backgroundImage:'none'})});
+ vm.runInContext(tiles.storePriceTilesScript,context);
+ const found=Array.from(context.collectPriceTiles());
+ assert.equal(found.length,1);assert.equal(found[0].host,card);assert.equal(found[0].id,'2780810');
+});
+
 test('native Store cards share one visible-only timer, hide skipped prices and clean up',()=>{
  const exports={},effects=[],refs=[],calls=[],observers=[];let tick,started=0,stopped=0,cleared=0;
  class Observer {constructor(fn){this.fn=fn;observers.push(this);}observe(){}disconnect(){this.done=true;}}

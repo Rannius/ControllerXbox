@@ -76,6 +76,39 @@ test('homepage featured prices sit beside the Steam price, below the artwork',()
  assert.equal(style.getPropertyValue('margin-bottom'),'');
 });
 
+test('home DLC tile price sits below Steam price and never crosses the cover',()=>{
+ const f=fixture(),url='https://store.steampowered.com/';
+ const values=new Map(),style={cssText:'',getPropertyValue:key=>values.get(key)||'',getPropertyPriority:()=>'',
+  setProperty:(key,value)=>values.set(key,value),removeProperty:key=>values.delete(key)};
+ const card={left:100,top:480,right:520,bottom:720,width:420,height:240};
+ const image={left:100,top:480,right:520,bottom:655,width:420,height:175,getBoundingClientRect(){return this;}};
+ const steam={left:250,top:665,right:520,bottom:720,width:270,height:55};
+ let sectionBottom=755;
+ const section={getBoundingClientRect:()=>({top:350,bottom:sectionBottom}),
+  querySelector:()=>({getBoundingClientRect:()=>({bottom:410})})};
+ const host={style,offsetWidth:420,closest:selector=>selector==='#dlc_tier'?{}:
+  selector==='.home_discounts_block'?section:null,matches:()=>true,contains:()=>false,
+  getAttribute:key=>key==='href'?'https://store.steampowered.com/app/2780810/':'',
+  getBoundingClientRect:()=>card,querySelector:selector=>selector==='.discount_block[data-price-final]'?
+   {getBoundingClientRect:()=>steam}:selector.startsWith('img')?image:null,
+  querySelectorAll:selector=>selector.startsWith('img')?[image]:[],appendChild(row){this.row=row;}};
+ const context={location:{href:url,pathname:'/'},URL,innerWidth:1800,innerHeight:900,window:{},Date,
+  document:{body:{},querySelectorAll:selector=>selector.startsWith('a[href')?[host]:[],
+   createElement:()=>({style:{cssText:''},dataset:{}})},
+  getComputedStyle:()=>({position:'static',visibility:'visible',backgroundImage:'none',overflow:'hidden'}),
+  setInterval,clearInterval};
+ vm.runInNewContext(f.api.buildTilePricesScript(url,{'2780810':{success:true,
+  offers:[{price:16.1,merchant:'Kinguin'}]}}),context);
+ assert.equal(host.row.textContent,'AKS: 16.10 € ∙ Kinguin');
+ assert.match(host.row.style.cssText,/top:243px;left:0px;width:420px/);
+ assert.equal(style.getPropertyValue('overflow'),'visible');
+ assert.equal(style.getPropertyValue('padding-bottom'),'');
+ sectionBottom=730;
+ vm.runInNewContext(f.api.buildTilePricesScript(url,{'2780810':{success:true,
+  offers:[{price:16.1,merchant:'Kinguin'}]}}),context);
+ assert.match(host.row.style.cssText,/top:-29px;left:0px;width:420px/);
+});
+
 test('tile prices require explicit visible IDs, share cache and stop when disabled',async()=>{
  const f=fixture(),url='https://store.steampowered.com/search/';
  f.api.updatePriceView(url,f.send);await f.drain();assert.equal(f.requests.length,0);

@@ -27,6 +27,17 @@ export const storePriceTilesScript = `
       // the label to the entire featured card, not just to the image link.
       if (spotlight && !linkedId) continue;
       let host = spotlight || link || node;
+      const dlcTier = node.closest('#dlc_tier');
+      if (dlcTier && !host.querySelector('.discount_block[data-price-final]')) {
+        // The DLC image and Steam price may be siblings inside one compact card.
+        // Stop before the shared four-card row so each AppID retains its own host.
+        while (host.parentElement && host.parentElement !== dlcTier) {
+          const parent = host.parentElement;
+          if (parent.getBoundingClientRect().width > host.getBoundingClientRect().width * 1.3) break;
+          host = parent;
+          if (host.querySelector('.discount_block[data-price-final]')) break;
+        }
+      }
       let rect = host.getBoundingClientRect();
       if (rect.width < 80 || rect.height < 30) {
         host = host.parentElement?.closest(cardSelector) || host.parentElement;
