@@ -2334,8 +2334,8 @@ function Content() {
       onChange={(checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked })}
     /></PanelSectionRow>
     <PanelSectionRow><ToggleField
-      label="Telepített játékok buildszáma"
-      description="A könyvtári csempe alatt a helyben telepített Steam-build azonosítója látszik."
+      label="Telepített játékok verziója"
+      description="A könyvtári csempe alatt a helyi játék-, projekt-, fájlverzió vagy Steam-build látszik."
       checked={visibility.show_installed_builds}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_installed_builds: checked })}

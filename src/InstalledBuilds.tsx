@@ -1,10 +1,11 @@
 import { callable } from "@decky/api";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-type BuildResponse = { success: boolean; builds?: Record<string, string> };
+type VersionInfo = { version: string; source: "game" | "project" | "file" };
+type BuildResponse = { success: boolean; builds?: Record<string, string>; versions?: Record<string, VersionInfo> };
 const getInstalledBuilds = callable<[string[]], BuildResponse>("get_installed_builds");
 const CACHE_MS = 5 * 60 * 1000;
-const cache = new Map<string, { build: string; expires: number }>();
+const cache = new Map<string, { build: string; version: string; source: string; expires: number }>();
 const queued = new Set<string>();
 const mounted = new Map<string, number>();
 const listeners = new Set<() => void>();
@@ -69,7 +70,10 @@ async function flushBuilds(): Promise<void> {
       const expires = Date.now() + CACHE_MS;
       for (const id of ids) {
         const build = response.builds?.[id];
-        cache.set(id, { build: typeof build === "string" && /^\d{1,20}$/.test(build) ? build : "", expires });
+        const info = response.versions?.[id];
+        const version = typeof info?.version === "string" && /^\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?$/.test(info.version) ? info.version : "";
+        cache.set(id, { build: typeof build === "string" && /^\d{1,20}$/.test(build) ? build : "",
+          version, source: info?.source === "game" || info?.source === "project" || info?.source === "file" ? info.source : "", expires });
       }
       notify();
     }
@@ -98,19 +102,26 @@ function findTileHost(marker: HTMLElement): HTMLElement | null {
 export function InstalledBuildLabel({ appId, installedHint }: { appId: number; installedHint?: boolean }) {
   const id = String(appId);
   const [view, setView] = useState(() => ({ enabled, inStore }));
-  const [result, setResult] = useState(() => ({ id, build: cache.get(id)?.build ?? "", resolved: cache.has(id) }));
+  const [result, setResult] = useState(() => ({ id, build: cache.get(id)?.build ?? "",
+    version: cache.get(id)?.version ?? "", source: cache.get(id)?.source ?? "", resolved: cache.has(id) }));
   const marker = useRef<HTMLSpanElement>(null);
   const label = useRef<HTMLSpanElement | null>(null);
   const build = result.id === id ? result.build : cache.get(id)?.build ?? "";
+  const version = result.id === id ? result.version : cache.get(id)?.version ?? "";
+  const source = result.id === id ? result.source : cache.get(id)?.source ?? "";
+  const display = version ? (source === "file" ? "Fájlverzió: " : source === "project" ? "Projektverzió: " : "Játékverzió: ") + version
+    : build ? "Build: " + build : "";
   const resolved = result.id === id ? result.resolved : cache.has(id);
   const active = view.enabled && !view.inStore && installedHint !== false;
-  const showArea = active && (Boolean(build) || (installedHint === true && !resolved));
+  const showArea = active && (Boolean(display) || (installedHint === true && !resolved));
 
   useEffect(() => {
     const listener = () => {
       setView(current => current.enabled === enabled && current.inStore === inStore ? current : { enabled, inStore });
-      const next = { id, build: cache.get(id)?.build ?? "", resolved: cache.has(id) };
-      setResult(current => current.id === next.id && current.build === next.build && current.resolved === next.resolved ? current : next);
+      const next = { id, build: cache.get(id)?.build ?? "", version: cache.get(id)?.version ?? "",
+        source: cache.get(id)?.source ?? "", resolved: cache.has(id) };
+      setResult(current => current.id === next.id && current.build === next.build && current.version === next.version
+        && current.source === next.source && current.resolved === next.resolved ? current : next);
     };
     listeners.add(listener);
     listener();
@@ -134,8 +145,8 @@ export function InstalledBuildLabel({ appId, installedHint }: { appId: number; i
     const row = element.ownerDocument.createElement("span");
     row.className = "dpb-installed-build";
     row.style.cssText = "position:absolute;top:calc(100% + 3px);left:0;width:100%;height:23px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:2px 6px;font:11px/19px Arial,sans-serif;pointer-events:none;z-index:2";
-    row.textContent = build ? "Build: " + build : "";
-    row.style.visibility = build ? "visible" : "hidden";
+    row.textContent = display;
+    row.style.visibility = display ? "visible" : "hidden";
     host.appendChild(row);
     label.current = row;
     return () => {
@@ -153,10 +164,11 @@ export function InstalledBuildLabel({ appId, installedHint }: { appId: number; i
 
   useLayoutEffect(() => {
     if (!label.current) return;
-    label.current.textContent = build ? "Build: " + build : "";
-    label.current.style.visibility = build ? "visible" : "hidden";
-    label.current.title = build ? "Telepített Steam-build: " + build : "";
-  }, [build]);
+    label.current.textContent = display;
+    label.current.style.visibility = display ? "visible" : "hidden";
+    label.current.title = version ? (source === "file" ? "Futtatható fájl verziója: " : source === "project" ? "Unreal projektverzió: " : "Játék saját verzióadata: ")
+      + version + (build ? " · Steam-build: " + build : "") : build ? "Telepített Steam-build: " + build : "";
+  }, [build, version, source, display]);
 
   return active ? <span ref={marker} data-dpb-build-marker="true" style={{ display: "none" }} /> : null;
 }

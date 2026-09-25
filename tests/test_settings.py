@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import logging
+import struct
 from pathlib import Path
 import sys
 import tempfile
@@ -1365,6 +1366,8 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         if self.plugin._price_save_task:
             await self.plugin._price_save_task
+        if self.plugin._installed_version_save_task:
+            await self.plugin._installed_version_save_task
         await self.plugin._stop_hungarian_curator_refresh()
         self.directory.cleanup()
 
@@ -1431,6 +1434,76 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         reloaded = self.plugin_type()
         await reloaded._load_settings()
         self.assertTrue((await reloaded.get_settings())["show_installed_builds"])
+
+    async def test_local_game_version_is_cached_until_steam_build_changes(self):
+        library = Path(self.directory.name) / "SteamLibrary"
+        apps = library / "steamapps"
+        game = apps / "common" / "Example Game"
+        game.mkdir(parents=True)
+        manifest = apps / "appmanifest_10.acf"
+
+        def write_manifest(build):
+            manifest.write_text('"AppState" { "appid" "10" "name" "Example Game" '
+                                '"StateFlags" "4" "buildid" "' + build + '" '
+                                '"installdir" "Example Game" }', encoding="utf-8")
+
+        write_manifest("123")
+        (game / "version.txt").write_text("v1.2.3", encoding="utf-8")
+        self.plugin._settings["show_installed_builds"] = True
+        with patch.object(self.plugin_type, "_steam_library_paths", return_value=[library]):
+            first = await self.plugin.get_installed_builds(["10"])
+            self.assertEqual(first["versions"]["10"], {"version": "1.2.3", "source": "game"})
+            (game / "version.txt").write_text("2.0.0", encoding="utf-8")
+            cached = await self.plugin.get_installed_builds(["10"])
+            self.assertEqual(cached["versions"], first["versions"])
+            write_manifest("124")
+            changed = await self.plugin.get_installed_builds(["10"])
+            self.assertEqual(changed["versions"]["10"]["version"], "2.0.0")
+            if self.plugin._installed_version_save_task:
+                await self.plugin._installed_version_save_task
+            reloaded = self.plugin_type()
+            await reloaded._load_installed_version_cache()
+            reloaded._settings["show_installed_builds"] = True
+            (game / "version.txt").unlink()
+            self.assertEqual((await reloaded.get_installed_builds(["10"]))["versions"], changed["versions"])
+            if reloaded._installed_version_save_task:
+                await reloaded._installed_version_save_task
+
+    async def test_unreal_project_version_and_unrelated_executable_are_distinguished(self):
+        scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
+        game = Path(self.directory.name) / "Game"
+        (game / "Config").mkdir(parents=True)
+        (game / "Config" / "DefaultGame.ini").write_text("[GeneralProjectSettings]\nProjectVersion=3.4.5\n", encoding="utf-8")
+        self.assertEqual(scanner.scan(game, "Game"), ("3.4.5", "project"))
+        (game / "Config" / "DefaultGame.ini").unlink()
+        (game / "UnityCrashHandler64.exe").write_bytes(b"MZ" + b"\0" * 510)
+        self.assertEqual(scanner.scan(game, "Game"), ("", ""))
+
+    async def test_proton_executable_product_version_is_labeled_as_file_version(self):
+        scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
+        game = Path(self.directory.name) / "Example Game"
+        game.mkdir()
+        image = bytearray(0x600)
+        image[:2] = b"MZ"
+        struct.pack_into("<I", image, 0x3c, 0x80)
+        image[0x80:0x84] = b"PE\0\0"
+        struct.pack_into("<H", image, 0x86, 1)
+        struct.pack_into("<H", image, 0x94, 224)
+        struct.pack_into("<H", image, 0x98, 0x10b)
+        struct.pack_into("<II", image, 0x98 + 96 + 16, 0x1000, 0x200)
+        struct.pack_into("<IIII", image, 0x178 + 8, 0x200, 0x1000, 0x200, 0x200)
+        struct.pack_into("<HII", image, 0x200 + 14, 1, 16, 0x80000020)
+        struct.pack_into("<HII", image, 0x220 + 14, 1, 1, 0x80000040)
+        struct.pack_into("<HII", image, 0x240 + 14, 1, 1033, 0x60)
+        struct.pack_into("<II", image, 0x260, 0x1080, 100)
+        key = "VS_VERSION_INFO".encode("utf-16le") + b"\0\0"
+        struct.pack_into("<HHH", image, 0x280, 100, 52, 0)
+        image[0x286:0x286 + len(key)] = key
+        fixed = 0x280 + ((6 + len(key) + 3) & ~3)
+        struct.pack_into("<I", image, fixed, 0xfeef04bd)
+        struct.pack_into("<II", image, fixed + 16, (2 << 16) | 4, 7 << 16)
+        (game / "ExampleGame.exe").write_bytes(image)
+        self.assertEqual(scanner.scan(game, "Example Game"), ("2.4.7", "file"))
 
     def prepare_boosteroid_watch(self):
         self.plugin._gfn_app_ids = {"1"}

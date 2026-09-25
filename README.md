@@ -206,3 +206,7 @@ A „Jelvények és méret” beállítások között külön kapcsolóval megje
 ## 1.0.112: Enhanced és Deluxe árak
 
 Az AKS-keresés a pontos Steam-cím után az Enhanced és Deluxe névváltozatokat is ellenőrzi. Ha csak az alapjáték AKS-oldala található, kizárólag a címben jelölt kiadás árát mutatja; a Standard, Enhanced és Deluxe ajánlatok nem keverednek. A korábban elmentett negatív találatokat ezeknél a címeknél újraellenőrzi. A Decky plugint és az Ubuntu árszervert is frissíteni kell.
+
+## 1.0.113: helyi játékverzió SteamOS-on
+
+A telepített játékok kapcsolható könyvtári sora először a játék saját kis méretű verziófájljait és az Unreal `ProjectVersion` mezőjét keresi. Ezeket „Játékverzió”, illetve „Projektverzió” felirattal különbözteti meg. Protonos játékoknál a megfelelő futtatható fájl beágyazott verzióját külön „Fájlverzió” jelöléssel mutatja; ha nincs egyértelmű találat, a Steam BuildID marad. A vizsgálat a Deck helyi fájljain történik, hálózati kérés nélkül, és az eredmény a BuildID megváltozásáig gyorsítótárban marad. Nem minden játék tárolja a menüben látható verziót kiolvasható formában. Csak a Decky plugint kell frissíteni.

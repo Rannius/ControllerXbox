@@ -17,6 +17,7 @@ import random
 import re
 import shutil
 import ssl
+import struct
 import subprocess
 import tempfile
 import threading
@@ -62,6 +63,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
+INSTALLED_VERSION_CACHE_SCHEMA = 1
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -160,6 +162,228 @@ class HungarianCuratorParser:
             if self._depth == 0:
                 self.records.append(self._record)
                 self._record = None
+
+
+class InstalledGameVersionScanner:
+    """Read bounded, local version clues without starting the game or Proton."""
+
+    VERSION = re.compile(r"v?(\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?)\Z", re.IGNORECASE)
+
+    @classmethod
+    def _clean_version(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        match = cls.VERSION.fullmatch(value.strip())
+        if not match or len(match.group(1)) > 40:
+            return ""
+        return match.group(1) if any(int(part) for part in re.findall(r"\d+", match.group(1).split("-")[0].split("+")[0])) else ""
+
+    @staticmethod
+    def _inside(root: Path, path: Path) -> bool:
+        try:
+            return os.path.commonpath((str(root.resolve()), str(path.resolve()))) == str(root.resolve())
+        except (OSError, ValueError):
+            return False
+
+    @classmethod
+    def _small_text(cls, root: Path, relative: str) -> str:
+        path = root / relative
+        try:
+            if not cls._inside(root, path) or not path.is_file() or path.stat().st_size > 64 * 1024:
+                return ""
+            return path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            return ""
+
+    @classmethod
+    def _declared_version(cls, root: Path) -> Tuple[str, str]:
+        for relative in ("version.json", "game_version.json", "build_info.json", "buildinfo.json"):
+            contents = cls._small_text(root, relative)
+            if not contents:
+                continue
+            try:
+                payload = json.loads(contents)
+            except ValueError:
+                continue
+            if isinstance(payload, dict):
+                for key in ("gameVersion", "game_version", "productVersion", "version"):
+                    version = cls._clean_version(payload.get(key))
+                    if version:
+                        return version, "game"
+        for relative in ("version.txt", "game_version.txt", "VERSION"):
+            contents = cls._small_text(root, relative).strip()
+            if not contents:
+                continue
+            version = cls._clean_version(contents)
+            if not version:
+                match = re.fullmatch(r"(?:game\s+)?version\s*[:=]\s*(.+)", contents, re.IGNORECASE)
+                version = cls._clean_version(match.group(1)) if match else ""
+            if version:
+                return version, "game"
+        # Unreal projects may ship this text file beside their packed assets.
+        for relative in ("Config/DefaultGame.ini", "DefaultGame.ini"):
+            contents = cls._small_text(root, relative)
+            match = re.search(r"(?im)^\s*ProjectVersion\s*=\s*([^\r\n;]+)", contents)
+            version = cls._clean_version(match.group(1).strip().strip('"')) if match else ""
+            if version:
+                return version, "project"
+        return "", ""
+
+    @staticmethod
+    def _pe_product_version(path: Path) -> str:
+        """Read the fixed PRODUCTVERSION in a PE VERSIONINFO resource."""
+        try:
+            with path.open("rb") as stream:
+                size = stream.seek(0, os.SEEK_END)
+                if size < 512 or size > 256 * 1024 * 1024:
+                    return ""
+
+                def read_at(offset: int, count: int) -> bytes:
+                    if offset < 0 or count < 0 or count > 64 * 1024 or offset + count > size:
+                        return b""
+                    stream.seek(offset)
+                    return stream.read(count)
+
+                dos = read_at(0, 64)
+                if dos[:2] != b"MZ":
+                    return ""
+                pe = struct.unpack_from("<I", dos, 0x3c)[0]
+                header = read_at(pe, 24)
+                if len(header) != 24 or header[:4] != b"PE\0\0":
+                    return ""
+                sections = struct.unpack_from("<H", header, 6)[0]
+                optional_size = struct.unpack_from("<H", header, 20)[0]
+                if not 1 <= sections <= 96 or not 96 <= optional_size <= 1024:
+                    return ""
+                optional = read_at(pe + 24, optional_size)
+                magic = struct.unpack_from("<H", optional, 0)[0]
+                directory_offset = 96 if magic == 0x10b else 112 if magic == 0x20b else -1
+                if directory_offset < 0 or directory_offset + 24 > len(optional):
+                    return ""
+                resource_rva, resource_size = struct.unpack_from("<II", optional, directory_offset + 16)
+                if not resource_rva or not 0 < resource_size <= 16 * 1024 * 1024:
+                    return ""
+                table = read_at(pe + 24 + optional_size, sections * 40)
+                if len(table) != sections * 40:
+                    return ""
+
+                def file_offset(rva: int) -> int:
+                    for index in range(sections):
+                        _, address, raw_size, raw_offset = struct.unpack_from("<IIII", table, index * 40 + 8)
+                        if address <= rva < address + raw_size:
+                            return raw_offset + rva - address
+                    return -1
+
+                base = file_offset(resource_rva)
+                if base < 0:
+                    return ""
+
+                def resource_at(relative: int, count: int) -> bytes:
+                    if relative < 0 or relative + count > resource_size:
+                        return b""
+                    return read_at(base + relative, count)
+
+                directory = 0
+                for depth in range(3):
+                    descriptor = resource_at(directory, 16)
+                    if len(descriptor) != 16:
+                        return ""
+                    named, numbered = struct.unpack_from("<HH", descriptor, 12)
+                    if named + numbered > 256:
+                        return ""
+                    selected = None
+                    for index in range(named + numbered):
+                        entry = resource_at(directory + 16 + index * 8, 8)
+                        if len(entry) != 8:
+                            return ""
+                        name, target = struct.unpack("<II", entry)
+                        if depth == 0 and name != 16:
+                            continue
+                        selected = target
+                        break
+                    if selected is None:
+                        return ""
+                    if depth < 2:
+                        if not selected & 0x80000000:
+                            return ""
+                        directory = selected & 0x7fffffff
+                    else:
+                        if selected & 0x80000000:
+                            return ""
+                        data_entry = resource_at(selected, 16)
+                        if len(data_entry) != 16:
+                            return ""
+                        data_rva, data_size = struct.unpack_from("<II", data_entry)
+                        if not 0 < data_size <= 64 * 1024:
+                            return ""
+                        data = read_at(file_offset(data_rva), data_size)
+                        key = "VS_VERSION_INFO".encode("utf-16le") + b"\0\0"
+                        if len(data) < 6 + len(key) + 24 or data[6:6 + len(key)] != key:
+                            return ""
+                        value_at = (6 + len(key) + 3) & ~3
+                        if struct.unpack_from("<I", data, value_at)[0] != 0xfeef04bd:
+                            return ""
+                        high, low = struct.unpack_from("<II", data, value_at + 16)
+                        parts = [high >> 16, high & 0xffff, low >> 16, low & 0xffff]
+                        if not any(parts):
+                            return ""
+                        while len(parts) > 2 and parts[-1] == 0:
+                            parts.pop()
+                        return ".".join(str(part) for part in parts)
+        except (OSError, ValueError, struct.error):
+            pass
+        return ""
+
+    @classmethod
+    def scan(cls, root: Path, title: str) -> Tuple[str, str]:
+        version, source = cls._declared_version(root)
+        if version:
+            return version, source
+        try:
+            children = []
+            for child in root.iterdir():
+                children.append(child)
+                if len(children) >= 100:
+                    break
+        except OSError:
+            return "", ""
+        for child in children[:16]:
+            if child.is_dir() and cls._inside(root, child) and re.search(r"[a-z0-9]", child.name, re.IGNORECASE):
+                # Packaged Unreal projects commonly have Project/Config beside the launcher.
+                contents = cls._small_text(child, "Config/DefaultGame.ini")
+                match = re.search(r"(?im)^\s*ProjectVersion\s*=\s*([^\r\n;]+)", contents)
+                nested = cls._clean_version(match.group(1).strip().strip('"')) if match else ""
+                if nested:
+                    return nested, "project"
+        executables = [path for path in children if path.suffix.lower() == ".exe" and path.is_file()]
+        for child in children[:16]:
+            folder = child / "Binaries" / "Win64"
+            if child.is_dir() and cls._inside(root, folder) and folder.is_dir():
+                try:
+                    executables.extend(path for path in folder.iterdir() if path.name.lower().endswith("-win64-shipping.exe"))
+                except OSError:
+                    pass
+        ignored = ("unitycrashhandler", "crashreport", "ue4prereq", "vc_redist", "redist", "unins", "setup")
+        executables = [path for path in executables[:32] if cls._inside(root, path)
+                       and not any(path.stem.lower().startswith(word) for word in ignored)
+                       and not path.stem.lower().endswith("launcher")]
+        title_key = re.sub(r"[^a-z0-9]", "", title.lower())
+        root_key = re.sub(r"[^a-z0-9]", "", root.name.lower())
+        candidates = []
+        for path in executables:
+            stem = path.stem.lower()
+            if stem.endswith("-win64-shipping"):
+                stem = stem[:-len("-win64-shipping")]
+            stem = re.sub(r"[^a-z0-9]", "", stem)
+            if len(stem) >= 5 and any(key and (key in stem or stem in key) for key in (title_key, root_key)):
+                candidates.append(path)
+        if not candidates and len(executables) == 1:
+            candidates = executables
+        for path in candidates[:3]:
+            version = cls._pe_product_version(path)
+            if version:
+                return version, "file"
+        return "", ""
 
 
 class Plugin:
@@ -268,6 +492,11 @@ class Plugin:
         self._gfn_cache_path = Path(settings_directory) / "geforce-now-catalog-cache.json"
         self._boosteroid_cache_path = Path(settings_directory) / "boosteroid-catalog-cache.json"
         self._settings_path = Path(settings_directory) / "controller-xbox-settings.json"
+        self._installed_version_cache_path = Path(settings_directory) / "installed-game-versions.json"
+        self._installed_version_cache: Dict[str, Dict[str, str]] = {}
+        self._installed_version_lock = asyncio.Lock()
+        self._installed_version_save_task: Optional[asyncio.Task] = None
+        self._installed_version_dirty = False
         self._notification_state_path = Path(settings_directory) / "controller-xbox-notifications.json"
         self._watchlist_path = Path(settings_directory) / "controller-xbox-watchlist.json"
         self._notification_history_path = Path(settings_directory) / "controller-xbox-notification-history.json"
@@ -290,6 +519,7 @@ class Plugin:
         await self._load_gfn_cache()
         await self._load_boosteroid_cache()
         await self._load_settings()
+        await self._load_installed_version_cache()
         await self._load_watchlist()
         decky.logger.info("ControllerXbox backend loaded")
 
@@ -310,6 +540,10 @@ class Plugin:
         await self._save_gfn_cache()
         await self._save_boosteroid_cache()
         await self._save_settings()
+        if self._installed_version_save_task:
+            await self._installed_version_save_task
+        if self._installed_version_dirty:
+            await self._save_installed_version_cache()
         await self._save_watchlist()
 
     @staticmethod
@@ -2166,6 +2400,46 @@ class Plugin:
     async def get_settings(self) -> Dict[str, Any]:
         return {"success": True, **self._settings}
 
+    async def _load_installed_version_cache(self) -> None:
+        def read() -> Dict[str, Dict[str, str]]:
+            try:
+                if self._installed_version_cache_path.stat().st_size > 1024 * 1024:
+                    return {}
+                payload = json.loads(self._installed_version_cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return {}
+            if not isinstance(payload, dict) or payload.get("schema_version") != INSTALLED_VERSION_CACHE_SCHEMA:
+                return {}
+            entries = payload.get("entries")
+            if not isinstance(entries, dict):
+                return {}
+            return {app_id: entry for app_id, entry in list(entries.items())[:2000]
+                    if isinstance(app_id, str) and re.fullmatch(r"[1-9]\d{0,9}", app_id)
+                    and isinstance(entry, dict) and re.fullmatch(r"[1-9]\d{0,19}", str(entry.get("build", "")))
+                    and isinstance(entry.get("version"), str) and len(entry["version"]) <= 40
+                    and entry.get("source") in ("", "game", "project", "file")}
+
+        self._installed_version_cache = await self._run_blocking(read)
+
+    async def _save_installed_version_cache(self) -> None:
+        self._installed_version_dirty = False
+        entries = dict(list(self._installed_version_cache.items())[-2000:])
+        payload = json.dumps({"schema_version": INSTALLED_VERSION_CACHE_SCHEMA, "entries": entries},
+                             ensure_ascii=False, separators=(",", ":"))
+        try:
+            await self._run_blocking(self._write_file_atomically, self._installed_version_cache_path,
+                                     "installed-versions-", payload)
+        except OSError as error:
+            self._installed_version_dirty = True
+            decky.logger.warning("Installed version cache save failed: %s", error)
+
+    async def _save_installed_version_later(self) -> None:
+        await asyncio.sleep(1)
+        while self._installed_version_dirty:
+            await self._save_installed_version_cache()
+            if self._installed_version_dirty:
+                break
+
     @staticmethod
     def _steam_library_paths() -> List[Path]:
         home = Path.home()
@@ -2202,8 +2476,11 @@ class Plugin:
         return libraries[:32]
 
     @classmethod
-    def _read_installed_builds(cls, app_ids: List[str]) -> Dict[str, str]:
+    def _read_installed_builds(cls, app_ids: List[str], cached: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
         builds: Dict[str, str] = {}
+        versions: Dict[str, Dict[str, str]] = {}
+        updates: Dict[str, Dict[str, str]] = {}
+        cached = cached or {}
         for library in cls._steam_library_paths():
             if len(builds) == len(app_ids):
                 break
@@ -2223,7 +2500,23 @@ class Plugin:
                 if (game and game.group(1) == app_id and state and int(state.group(1)) & 4
                         and build and int(build.group(1)) > 0):
                     builds[app_id] = build.group(1)
-        return builds
+                    previous = cached.get(app_id, {})
+                    if previous.get("build") == build.group(1):
+                        if previous.get("version"):
+                            versions[app_id] = {"version": previous["version"], "source": previous["source"]}
+                        continue
+                    installed = re.search(r'"installdir"\s*"([^"\\/]{1,160})"', contents, re.IGNORECASE)
+                    title = re.search(r'"name"\s*"([^"\r\n]{1,160})"', contents, re.IGNORECASE)
+                    version, source = "", ""
+                    if installed and installed.group(1) not in (".", ".."):
+                        common = library / "steamapps" / "common"
+                        game_dir = common / installed.group(1)
+                        if InstalledGameVersionScanner._inside(common, game_dir) and game_dir.is_dir():
+                            version, source = InstalledGameVersionScanner.scan(game_dir, title.group(1) if title else installed.group(1))
+                            updates[app_id] = {"build": build.group(1), "version": version, "source": source}
+                    if version:
+                        versions[app_id] = {"version": version, "source": source}
+        return {"builds": builds, "versions": versions, "updates": updates}
 
     async def get_installed_builds(self, app_ids: Any) -> Dict[str, Any]:
         if (not isinstance(app_ids, list) or len(app_ids) > 100 or
@@ -2231,8 +2524,15 @@ class Plugin:
             return {"success": False, "error": "Érvénytelen Steam-játéklista."}
         if not self._settings.get("show_installed_builds", False):
             return {"success": True, "builds": {}}
-        builds = await self._run_blocking(self._read_installed_builds, list(dict.fromkeys(app_ids)))
-        return {"success": True, "builds": builds}
+        async with self._installed_version_lock:
+            result = await self._run_blocking(self._read_installed_builds, list(dict.fromkeys(app_ids)),
+                                              dict(self._installed_version_cache))
+            if result["updates"]:
+                self._installed_version_cache.update(result["updates"])
+                self._installed_version_dirty = True
+                if not self._installed_version_save_task or self._installed_version_save_task.done():
+                    self._installed_version_save_task = asyncio.create_task(self._save_installed_version_later())
+        return {"success": True, "builds": result["builds"], "versions": result["versions"]}
 
     async def set_store_tile_prices(self, enabled: Any) -> Dict[str, Any]:
         if not isinstance(enabled, bool):
