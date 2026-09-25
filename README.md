@@ -154,3 +154,7 @@ A webes Steam-áruház csempéin az AKS/GG ársáv a borítókép aljára kerül
 ## 1.0.98: főoldali ársáv és rövidebb árleírás
 
 A főoldali kiemelt ajánlatok AKS/GG ársávja a Steam-ár melletti szabad helyre kerül, így nem takarja a játék képét vagy az eredeti árat. A kívánságlista elrendezése változatlan. A játék adatlapján az ár lenyitható részében az ajánlatok és ellenőrzési időpont rövidebben jelennek meg. Csak a Decky plugint kell frissíteni.
+
+## 1.0.99: pontosabb AKS-címpárosítás
+
+Ha nincs pontos katalógustalálat, a Steam-cím önálló római sorszámát arab számként is ellenőrizzük, például Hades II → Hades 2. A kötőjelek és a legtöbb más írásjel eddig is kimaradt az összehasonlításból; az aláhúzásos címekhez is van tartalék egyezés. A korábban mentett negatív találatokat az érintett címeknél egyszer újraellenőrizzük. Az eredmény továbbra is csak egyértelmű katalógusegyezésnél jelenik meg. A Decky plugint és a saját Ubuntu árszervert is frissíteni kell.

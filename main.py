@@ -27,7 +27,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import decky
 
@@ -451,14 +451,19 @@ class Plugin:
                 "title": entry["title"], "url": entry["url"], "checked_at": entry["checked_at"],
                 "currency": "EUR", "preferred_only": self._price_preferences.get("restrict_merchants", bool(self._price_preferences["merchants"]))}
 
-    @staticmethod
-    def _valid_price_entry(entry: Any) -> bool:
+    @classmethod
+    def _valid_price_entry(cls, entry: Any) -> bool:
         if (not isinstance(entry, dict) or "error" in entry or not isinstance(entry.get("title"), str)
                 or type(entry.get("checked_at")) not in (int, float)
                 or not 0 < entry["checked_at"] <= time.time() + 60):
             return False
         if "skipped" in entry:
             return entry["skipped"] in ("free", "unreleased", "release_unknown")
+        # Recheck older negative matches with sequel numerals or punctuation once.
+        if (entry.get("not_found") is True and entry.get("title_variants_checked") is not True
+                and (cls._aks_roman_variant(entry["title"]) != entry["title"]
+                     or re.search(r"[^\w\s]", entry["title"]))):
+            return False
         data = entry.get("data")
         valid_url = isinstance(entry.get("url"), str) and bool(re.fullmatch(
             r"https://www\.allkeyshop\.com/blog/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+/", entry["url"]))
@@ -1131,6 +1136,44 @@ class Plugin:
         return " ".join(html.unescape(value).replace("™", "").replace("®", "").split())
 
     @staticmethod
+    def _aks_roman_variant(title: str) -> str:
+        # Only complete, canonical uppercase numeral words can be sequels.
+        # Leave a leading "I" (the English pronoun) alone.
+        def replace(match: Any) -> str:
+            token = match.group()
+            if token == "I" and (match.start() == 0 or not re.match(r"\s*(?:$|[:\-–—])", title[match.end():])):
+                return token
+            values = {"I": 1, "V": 5, "X": 10}
+            number = 0
+            for index, letter in enumerate(token):
+                value = values[letter]
+                number += -value if index + 1 < len(token) and value < values[token[index + 1]] else value
+            if not 1 <= number <= 39:
+                return token
+            rest, canonical = number, ""
+            for value, glyph in ((10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")):
+                while rest >= value:
+                    canonical += glyph
+                    rest -= value
+            return str(number) if token == canonical else token
+
+        return re.sub(r"(?<!\w)[IVX]+(?!\w)", replace, title)
+
+    @classmethod
+    def _aks_catalog_match(cls, catalog: Dict[str, Optional[str]], title: str) -> Tuple[Optional[str], bool]:
+        exact = cls._aks_title(title)
+        if exact in catalog:
+            return catalog[exact], True
+        roman = cls._aks_title(cls._aks_roman_variant(title))
+        # Python considers underscore a word character, unlike other punctuation.
+        # Try it only after the exact key, without changing the stored catalog.
+        alternatives = {roman, exact.replace("_", ""), roman.replace("_", "")}
+        candidates = {catalog[key] for key in alternatives - {exact} if key in catalog}
+        if candidates:
+            return (candidates.pop() if len(candidates) == 1 else None), True
+        return None, False
+
+    @staticmethod
     def _retry_after(headers: Any) -> float:
         value = str((headers or {}).get("Retry-After", "")).strip()
         if value.isdigit():
@@ -1472,17 +1515,18 @@ class Plugin:
             self._aks_matches.pop(app_id, None)
             match = None
         # New catalog data can invalidate an existing match before its seven-day TTL.
-        if match and self._aks_catalog and self._aks_catalog.get(self._aks_title(title)) != match["product_id"]:
+        if match and self._aks_catalog and self._aks_catalog_match(self._aks_catalog, title)[0] != match["product_id"]:
             self._aks_matches.pop(app_id, None)
             match = None
         for attempt in range(2):
             if match is None:
                 catalog = self._load_aks_catalog(force=attempt > 0)
-                product_id = catalog.get(self._aks_title(title))
+                product_id, catalog_has_title = self._aks_catalog_match(catalog, title)
                 if not product_id:
                     return {"title": title, "url": "https://www.allkeyshop.com/", "source": "aks_history",
                             "history_version": AKS_HISTORY_VERSION,
-                            "not_found": True, "match_status": "ambiguous" if self._aks_title(title) in catalog else "missing",
+                            "not_found": True, "title_variants_checked": True,
+                            "match_status": "ambiguous" if catalog_has_title else "missing",
                             "data": {"prices": [], "merchants": {}, "regions": {}, "editions": {}},
                             "checked_at": time.time()}
                 match = {"title": title, "product_id": product_id, "checked_at": time.time()}

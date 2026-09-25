@@ -796,6 +796,45 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
                 index = self.plugin._load_aks_catalog(force=True)
             self.assertFalse(index.get(self.plugin._aks_title("Solarpunk™")))
 
+    def test_roman_sequel_uses_exact_title_first_then_numeric_catalog_title(self):
+        title = "Hades II"
+        catalog = {self.plugin._aks_title("Hades 2"): "128119"}
+        self.assertEqual(self.plugin._aks_roman_variant(title), "Hades 2")
+        self.assertEqual(self.plugin._aks_roman_variant("Final Fantasy VII"), "Final Fantasy 7")
+        self.assertEqual(self.plugin._aks_roman_variant("I Am Alive"), "I Am Alive")
+        self.assertEqual(self.plugin._aks_catalog_match(catalog, title), ("128119", True))
+        catalog[self.plugin._aks_title(title)] = "200"
+        self.assertEqual(self.plugin._aks_catalog_match(catalog, title), ("200", True))
+        catalog.pop(self.plugin._aks_title(title))
+        catalog[self.plugin._aks_title("Hades 2")] = None
+        self.assertEqual(self.plugin._aks_catalog_match(catalog, title), (None, True))
+
+        self.plugin._price_metadata["10"] = self.price_metadata(title=title)
+        self.plugin._aks_catalog = {self.plugin._aks_title("Hades 2"): "128119"}
+        self.plugin._aks_catalog_checked_at = time.time()
+        with patch.object(self.plugin, "_aks_read", return_value=json.dumps(self.history_fixture())) as fetch:
+            result = self.plugin._fetch_aks_game("10")
+        self.assertEqual(result["title"], title)
+        self.assertIn("normalised_name=128119", fetch.call_args.args[0])
+        self.assertEqual(self.plugin._aks_matches["10"]["product_id"], "128119")
+
+    def test_old_roman_title_catalog_miss_is_rechecked(self):
+        entry = {"title": "Hades II", "url": "https://www.allkeyshop.com/", "source": "aks_history",
+                 "history_version": 2, "not_found": True, "checked_at": time.time(),
+                 "data": {"prices": [], "merchants": {}, "regions": {}, "editions": {}}}
+        self.assertFalse(self.plugin._valid_price_entry(entry))
+        self.assertTrue(self.plugin._valid_price_entry({**entry, "title_variants_checked": True}))
+        dlc = {**entry, "title": "Euro Truck Simulator 2 - West Balkans"}
+        self.assertFalse(self.plugin._valid_price_entry(dlc))
+        self.assertTrue(self.plugin._valid_price_entry({**dlc, "title_variants_checked": True}))
+        self.assertEqual(self.plugin._aks_title(dlc["title"]),
+                         self.plugin._aks_title("Euro Truck Simulator 2 West Balkans"))
+        self.assertEqual(self.plugin._aks_catalog_match(
+            {self.plugin._aks_title("Euro Truck Simulator 2 West Balkans"): "120863"}, dlc["title"]),
+            ("120863", True))
+        self.assertEqual(self.plugin._aks_catalog_match(
+            {self.plugin._aks_title("Game Name"): "25"}, "Game_Name"), ("25", True))
+
     async def test_day_price_cache_serves_twenty_three_hours_then_refreshes(self):
         self.plugin._price_cache["10"] = {"title": "Example", "url": "https://www.allkeyshop.com/blog/buy-example-cd-key-compare-prices/",
             "data": self.aks_fixture(), "checked_at": time.time() - 23 * 3600}
