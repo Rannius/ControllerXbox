@@ -847,7 +847,7 @@ function buildTilePricesScript(url, values) {
   })();`;
 }
 const prices = new Map();
-let fetching = false;
+let fetching$1 = false;
 let hydrating = false;
 let serviceFailure;
 let revision = 0;
@@ -876,7 +876,7 @@ function visiblePrice(id) {
     return serviceFailure && serviceFailure.expires > Date.now() ? serviceFailure.value : undefined;
 }
 function isPriceHydrating(id) { return !prices.has(id) && (!cacheChecked.has(id) || priceHydrating.has(id)); }
-function resetPriceView() { prices.clear(); serviceFailure = undefined; revision++; fetching = false; hydrating = false; currentApp = ""; tileIds = []; tileUrl = ""; sentTileUrl = ""; sentTileModels.clear(); visibleApps.clear(); refreshQueue.clear(); cacheChecked.clear(); priceHydrating.clear(); }
+function resetPriceView() { prices.clear(); serviceFailure = undefined; revision++; fetching$1 = false; hydrating = false; currentApp = ""; tileIds = []; tileUrl = ""; sentTileUrl = ""; sentTileModels.clear(); visibleApps.clear(); refreshQueue.clear(); cacheChecked.clear(); priceHydrating.clear(); }
 function updatePriceView(url, send, visibleTileIds = [], pagePriceStateReady = true) {
     let id = "";
     try {
@@ -986,9 +986,9 @@ function updatePriceView(url, send, visibleTileIds = [], pagePriceStateReady = t
     const pending = [...refreshQueue];
     const requestId = id && needsRequest(id) ? id : pending.find(app => !prices.has(app)) ??
         pending[0] ?? tileIds.find(needsRequest);
-    if (!requestId || fetching)
+    if (!requestId || fetching$1)
         return;
-    fetching = true;
+    fetching$1 = true;
     const requestRevision = revision;
     void (async () => {
         if (!visibleApps.has(requestId))
@@ -1027,7 +1027,7 @@ function updatePriceView(url, send, visibleTileIds = [], pagePriceStateReady = t
             renderTiles();
         notifyPriceResults();
     }).finally(() => { if (requestRevision === revision)
-        fetching = false; });
+        fetching$1 = false; });
 }
 function refreshVisiblePrice(appId, url, send) {
     const existing = manualRefreshes.get(appId);
@@ -1108,11 +1108,11 @@ const storeBadgeDockCleanupScript = `
 
 // One shared queue/timer for native Store cards, never one network loop per card.
 const cards = new Map();
-let timer;
+let timer$1;
 let unsubscribe;
 function stopNativePriceTiles() {
-    clearInterval(timer);
-    timer = undefined;
+    clearInterval(timer$1);
+    timer$1 = undefined;
     unsubscribe?.();
     unsubscribe = undefined;
     for (const node of cards.keys()) {
@@ -1175,10 +1175,10 @@ function NativeTilePrice({ appId, enabled }) {
         cards.set(node, card);
         const observer = Observer ? new Observer(entries => { card.intersects = entries.some(entry => entry.isIntersecting); tick(); }) : undefined;
         observer?.observe(node);
-        if (!timer) {
+        if (!timer$1) {
             unsubscribe = subscribePriceResults(renderNativePrices);
             tick();
-            timer = setInterval(tick, 1500);
+            timer$1 = setInterval(tick, 1500);
         }
         return () => {
             observer?.disconnect();
@@ -1195,6 +1195,182 @@ function NativeTilePrice({ appId, enabled }) {
             background: "#162634", color: "#dce6ed", font: "11px/19px Arial,sans-serif",
             whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", pointerEvents: "none",
             visibility: label ? "visible" : "hidden" }, children: label });
+}
+
+const getInstalledBuilds = callable("get_installed_builds");
+const CACHE_MS = 5 * 60 * 1000;
+const cache = new Map();
+const queued = new Set();
+const mounted = new Map();
+const listeners = new Set();
+let enabled = false;
+let inStore = false;
+let timer;
+let refreshTimer;
+let fetching = false;
+function notify() { for (const listener of listeners)
+    listener(); }
+function configureInstalledBuilds(show, store) {
+    const changed = enabled !== show || inStore !== store;
+    enabled = show;
+    inStore = store;
+    if (!show || store) {
+        queued.clear();
+        clearTimeout(timer);
+        timer = undefined;
+        clearInterval(refreshTimer);
+        refreshTimer = undefined;
+    }
+    if (changed)
+        notify();
+}
+function stopInstalledBuilds() {
+    configureInstalledBuilds(false, false);
+    cache.clear();
+    mounted.clear();
+    listeners.clear();
+}
+function trackBuild(appId) {
+    mounted.set(appId, (mounted.get(appId) ?? 0) + 1);
+    if (!refreshTimer)
+        refreshTimer = setInterval(() => {
+            for (const id of mounted.keys())
+                queueBuild(id);
+        }, CACHE_MS);
+    return () => {
+        const count = (mounted.get(appId) ?? 1) - 1;
+        if (count)
+            mounted.set(appId, count);
+        else {
+            mounted.delete(appId);
+            queued.delete(appId);
+        }
+        if (!mounted.size) {
+            clearInterval(refreshTimer);
+            refreshTimer = undefined;
+        }
+    };
+}
+function queueBuild(appId) {
+    const cached = cache.get(appId);
+    if (!enabled || inStore || (cached && cached.expires > Date.now()))
+        return;
+    queued.add(appId);
+    if (!fetching && !timer)
+        timer = setTimeout(() => void flushBuilds(), 120);
+}
+async function flushBuilds() {
+    timer = undefined;
+    if (fetching || !enabled || inStore || !queued.size)
+        return;
+    fetching = true;
+    const ids = Array.from(queued).slice(0, 100);
+    for (const id of ids)
+        queued.delete(id);
+    try {
+        const response = await getInstalledBuilds(ids);
+        if (response.success) {
+            const expires = Date.now() + CACHE_MS;
+            for (const id of ids) {
+                const build = response.builds?.[id];
+                cache.set(id, { build: typeof build === "string" && /^\d{1,20}$/.test(build) ? build : "", expires });
+            }
+            notify();
+        }
+    }
+    catch { /* A következő megnyitáskor ismét megpróbáljuk. */ }
+    finally {
+        fetching = false;
+        if (queued.size && enabled && !inStore)
+            timer = setTimeout(() => void flushBuilds(), 120);
+    }
+}
+function findTileHost(marker) {
+    let candidate = marker.parentElement;
+    let best = null;
+    let bestWidth = 0;
+    for (let depth = 0; candidate && depth < 7; depth++, candidate = candidate.parentElement) {
+        const rect = candidate.getBoundingClientRect();
+        if (rect.width > 520 || rect.height > 700)
+            break;
+        if (rect.width < 90 || rect.height < 90)
+            continue;
+        if (candidate.querySelectorAll("[data-dpb-build-marker]").length > 1 || (best && rect.width > bestWidth * 1.25))
+            break;
+        best = candidate;
+        bestWidth = rect.width;
+    }
+    return best;
+}
+function InstalledBuildLabel({ appId, installedHint }) {
+    const id = String(appId);
+    const [view, setView] = SP_REACT.useState(() => ({ enabled, inStore }));
+    const [result, setResult] = SP_REACT.useState(() => ({ id, build: cache.get(id)?.build ?? "", resolved: cache.has(id) }));
+    const marker = SP_REACT.useRef(null);
+    const label = SP_REACT.useRef(null);
+    const build = result.id === id ? result.build : cache.get(id)?.build ?? "";
+    const resolved = result.id === id ? result.resolved : cache.has(id);
+    const active = view.enabled && !view.inStore && installedHint !== false;
+    const showArea = active && (Boolean(build) || (installedHint === true && !resolved));
+    SP_REACT.useEffect(() => {
+        const listener = () => {
+            setView(current => current.enabled === enabled && current.inStore === inStore ? current : { enabled, inStore });
+            const next = { id, build: cache.get(id)?.build ?? "", resolved: cache.has(id) };
+            setResult(current => current.id === next.id && current.build === next.build && current.resolved === next.resolved ? current : next);
+        };
+        listeners.add(listener);
+        listener();
+        const untrack = active ? trackBuild(id) : undefined;
+        if (active)
+            queueBuild(id);
+        return () => { listeners.delete(listener); untrack?.(); };
+    }, [id, active]);
+    SP_REACT.useLayoutEffect(() => {
+        const element = marker.current;
+        if (!showArea || !element)
+            return;
+        const host = findTileHost(element);
+        if (!host)
+            return;
+        const style = host.style;
+        const saved = Object.fromEntries(["position", "overflow", "margin-bottom"].map(key => [key, { value: style.getPropertyValue(key), priority: style.getPropertyPriority(key) }]));
+        const computed = element.ownerDocument.defaultView.getComputedStyle(host);
+        if (computed.position === "static")
+            style.setProperty("position", "relative");
+        if (computed.overflow === "hidden")
+            style.setProperty("overflow", "visible");
+        if ((parseFloat(computed.marginBottom) || 0) < 28)
+            style.setProperty("margin-bottom", "28px");
+        const row = element.ownerDocument.createElement("span");
+        row.className = "dpb-installed-build";
+        row.style.cssText = "position:absolute;top:calc(100% + 3px);left:0;width:100%;height:23px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:2px 6px;font:11px/19px Arial,sans-serif;pointer-events:none;z-index:2";
+        row.textContent = build ? "Build: " + build : "";
+        row.style.visibility = build ? "visible" : "hidden";
+        host.appendChild(row);
+        label.current = row;
+        return () => {
+            if (label.current === row)
+                label.current = null;
+            row.remove();
+            for (const [key, old] of Object.entries(saved)) {
+                const current = style.getPropertyValue(key);
+                if (current === (key === "position" ? "relative" : key === "overflow" ? "visible" : "28px")) {
+                    if (old.value)
+                        style.setProperty(key, old.value, old.priority);
+                    else
+                        style.removeProperty(key);
+                }
+            }
+        };
+    }, [showArea, id]);
+    SP_REACT.useLayoutEffect(() => {
+        if (!label.current)
+            return;
+        label.current.textContent = build ? "Build: " + build : "";
+        label.current.style.visibility = build ? "visible" : "hidden";
+        label.current.title = build ? "Telepített Steam-build: " + build : "";
+    }, [build]);
+    return active ? SP_JSX.jsx("span", { ref: marker, "data-dpb-build-marker": "true", style: { display: "none" } }) : null;
 }
 
 const HUNGARIAN_COLLECTION_NAME = "🇭🇺 Magyar nyelvű játékok";
@@ -1547,6 +1723,7 @@ let badgeVisibility = {
     show_gfn_badges: true,
     show_boosteroid_badges: true,
     show_hungarian_badges: true,
+    show_installed_builds: false,
 };
 let notificationPreferences = {
     notify_gfn_additions: true,
@@ -1616,6 +1793,7 @@ async function reloadUpdatedPlugin() {
 }
 function applyBadgeVisibility(next) {
     badgeVisibility = next;
+    configureInstalledBuilds(pluginActive && next.show_installed_builds, nativeTilesInStore);
     hungarianCollection.setEnabled(pluginActive && next.show_hungarian_badges);
     if (!next.show_hungarian_badges && curatorBadgeTimer !== undefined) {
         window.clearTimeout(curatorBadgeTimer);
@@ -1688,6 +1866,7 @@ async function loadBadgeVisibility() {
                 show_gfn_badges: response.show_gfn_badges,
                 show_boosteroid_badges: response.show_boosteroid_badges,
                 show_hungarian_badges: response.show_hungarian_badges ?? true,
+                show_installed_builds: response.show_installed_builds ?? false,
                 library_badge_percent: response.library_badge_percent ?? 100,
                 store_badge_percent: response.store_badge_percent ?? 100,
                 store_badge_sides: response.store_badge_sides,
@@ -2967,6 +3146,7 @@ function patchSteamStore() {
             if (nextNativeStore !== nativeTilesInStore || nextNativePrices !== nativePriceTilesEnabled) {
                 nativeTilesInStore = nextNativeStore;
                 nativePriceTilesEnabled = nextNativePrices;
+                configureInstalledBuilds(pluginActive && badgeVisibility.show_installed_builds, nativeTilesInStore);
                 for (const listener of supportListeners)
                     listener();
             }
@@ -3010,7 +3190,7 @@ function NativeStoreTilePrice({ appId }) {
     }, []);
     return SP_JSX.jsx(NativeTilePrice, { appId: String(appId), enabled: enabled });
 }
-function appendBadgeToTile(result, appId) {
+function appendBadgeToTile(result, appId, installedHint) {
     const row = DFL.findInReactTree(result, (node) => {
         const className = node?.props?.className;
         return typeof className === "string" && className.includes(tileIconRowClass);
@@ -3023,12 +3203,13 @@ function appendBadgeToTile(result, appId) {
         return result;
     const badge = SP_REACT.createElement(XboxTileBadge, { key: BADGE_KEY, appId });
     const price = SP_REACT.createElement(NativeStoreTilePrice, { key: BADGE_KEY + "-price", appId });
+    const build = SP_REACT.createElement(InstalledBuildLabel, { key: BADGE_KEY + "-build", appId, installedHint });
     if (Array.isArray(props.children))
-        props.children.push(badge, price);
+        props.children.push(badge, price, build);
     else if (props.children !== undefined && props.children !== null)
-        props.children = [props.children, badge, price];
+        props.children = [props.children, badge, price, build];
     else
-        props.children = [badge, price];
+        props.children = [badge, price, build];
     return result;
 }
 function resolveOriginalTileType(self) {
@@ -3049,7 +3230,13 @@ function wrappedTileType(...args) {
         const app = args[0]?.app;
         if (!app || !Number.isInteger(app.appid) || app.appid <= 0 || app.BIsModOrShortcut?.())
             return result;
-        return appendBadgeToTile(result, app.appid);
+        let installedHint;
+        try {
+            if (typeof app.BIsInstalled === "function")
+                installedHint = app.BIsInstalled();
+        }
+        catch { /* The manifest check is authoritative if Steam has no tile hint. */ }
+        return appendBadgeToTile(result, app.appid, installedHint);
     }
     catch (error) {
         console.debug("ControllerXbox tile injection skipped", error);
@@ -3310,11 +3497,12 @@ function Content() {
             const detail = event.detail;
             if (!detail)
                 return;
-            if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean" || typeof detail.show_hungarian_badges === "boolean") {
+            if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean" || typeof detail.show_hungarian_badges === "boolean" || typeof detail.show_installed_builds === "boolean") {
                 setVisibility((current) => ({
                     show_gfn_badges: detail.show_gfn_badges ?? current.show_gfn_badges,
                     show_boosteroid_badges: detail.show_boosteroid_badges ?? current.show_boosteroid_badges,
                     show_hungarian_badges: detail.show_hungarian_badges ?? current.show_hungarian_badges,
+                    show_installed_builds: detail.show_installed_builds ?? current.show_installed_builds,
                     library_badge_percent: detail.library_badge_percent ?? current.library_badge_percent,
                     store_badge_percent: detail.store_badge_percent ?? current.store_badge_percent,
                     store_badge_sides: detail.store_badge_sides ?? current.store_badge_sides,
@@ -3352,15 +3540,18 @@ function Content() {
         const previous = visibility;
         setSettingsWorking(true);
         setVisibility(next);
-        applyBadgeVisibility(next);
+        // The backend must save this switch before local manifest reads start.
+        if (!next.show_installed_builds || previous.show_installed_builds)
+            applyBadgeVisibility(next);
         try {
-            const response = await withBackendTimeout(setBadgeVisibility(next.show_gfn_badges, next.show_boosteroid_badges, next.show_hungarian_badges));
+            const response = await withBackendTimeout(setBadgeVisibility(next.show_gfn_badges, next.show_boosteroid_badges, next.show_hungarian_badges, next.show_installed_builds));
             if (!response.success)
                 throw new Error(response.error || "A beállítás mentése sikertelen.");
             applyBadgeVisibility({
                 show_gfn_badges: response.show_gfn_badges,
                 show_boosteroid_badges: response.show_boosteroid_badges,
                 show_hungarian_badges: response.show_hungarian_badges ?? true,
+                show_installed_builds: response.show_installed_builds ?? false,
                 library_badge_percent: response.library_badge_percent ?? 100,
                 store_badge_percent: response.store_badge_percent ?? 100,
                 store_badge_sides: response.store_badge_sides,
@@ -3599,7 +3790,7 @@ function Content() {
     if (page === "settings")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsBadges"), children: "Jelv\u00E9nyek \u00E9s m\u00E9ret" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsStore"), children: "\u00C1ruh\u00E1zi elhelyez\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsPrices"), children: "J\u00E1t\u00E9k\u00E1rak" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsNotifications"), children: "\u00C9rtes\u00EDt\u00E9sek" }) })] });
     if (page === "settingsBadges")
-        return SP_JSX.jsxs(DFL.PanelSection, { title: "Jelv\u00E9nyek \u00E9s m\u00E9ret", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "\u2190 Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Steam \u00E9s Magyar Felirat adatok alapj\u00E1n. Magyar gy\u0171jtem\u00E9nyt is k\u00E9sz\u00EDt; kikapcsolva az megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(BadgeSizeSettings, { initial: { library_badge_percent: visibility.library_badge_percent ?? 100,
+        return SP_JSX.jsxs(DFL.PanelSection, { title: "Jelv\u00E9nyek \u00E9s m\u00E9ret", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "\u2190 Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Steam \u00E9s Magyar Felirat adatok alapj\u00E1n. Magyar gy\u0171jtem\u00E9nyt is k\u00E9sz\u00EDt; kikapcsolva az megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Telep\u00EDtett j\u00E1t\u00E9kok buildsz\u00E1ma", description: "A k\u00F6nyvt\u00E1ri csempe alatt a helyben telep\u00EDtett Steam-build azonos\u00EDt\u00F3ja l\u00E1tszik.", checked: visibility.show_installed_builds, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_installed_builds: checked }) }) }), SP_JSX.jsx(BadgeSizeSettings, { initial: { library_badge_percent: visibility.library_badge_percent ?? 100,
                         store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes })] });
     if (page === "settingsStore")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "\u00C1ruh\u00E1zi elhelyez\u00E9s", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "\u2190 Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: "A j\u00E1t\u00E9koldalon megjelen\u0151 jelv\u00E9nyek oldala." }) }), [['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']].map(([key, label]) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: label + ' – bal oldalon', description: "Kikapcsolva jobbra ker\u00FCl.", checked: (visibility.store_badge_sides?.[key] ?? 'right') === 'left', disabled: settingsWorking, onChange: async (checked) => {
@@ -3678,6 +3869,7 @@ var index = DFL.definePlugin(() => {
         onDismount: () => {
             pluginActive = false;
             stopNativePriceTiles();
+            stopInstalledBuilds();
             resumeRefresh.stop();
             if (settingsRetryTimer !== undefined)
                 window.clearTimeout(settingsRetryTimer);

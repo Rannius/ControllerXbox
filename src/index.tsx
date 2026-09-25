@@ -8,6 +8,7 @@ import { AllKeyShopSettings, AllKeyShopMerchants, PriceCacheStatus, refreshVisib
 import { storeBadgeDockScript, storeBadgeDockCleanupScript } from "./storeBadgeDock";
 import { storePriceTilesScript } from "./storePriceTiles";
 import { NativeTilePrice, stopNativePriceTiles } from "./NativeTilePrice";
+import { configureInstalledBuilds, InstalledBuildLabel, stopInstalledBuilds } from "./InstalledBuilds";
 import { HungarianCollection, readyCollectionStore } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
@@ -94,6 +95,7 @@ type BadgeVisibility = {
   show_gfn_badges: boolean;
   show_boosteroid_badges: boolean;
   show_hungarian_badges: boolean;
+  show_installed_builds: boolean;
 };
 type NotificationPreferences = {
   notify_gfn_additions: boolean;
@@ -154,6 +156,7 @@ type BoosteroidState = "loading" | "available" | "maintenance" | "not_available"
 type TileOverview = {
   appid: number;
   BIsModOrShortcut?: () => boolean;
+  BIsInstalled?: () => boolean;
 };
 type TileProps = { app?: TileOverview };
 type TileRender = (this: unknown, ...args: unknown[]) => ReactElement;
@@ -223,7 +226,7 @@ const setBadgeSizes = callable<[library: number, store: number], SettingsRespons
 const getCuratorProgress = callable<[], CuratorProgress>("get_hungarian_curator_progress");
 const loadCuratorProgress = () => withBackendTimeout(getCuratorProgress());
 const getSettings = callable<[], SettingsResponse>("get_settings");
-const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean, showHungarianBadges: boolean], SettingsResponse>("set_badge_visibility");
+const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean, showHungarianBadges: boolean, showInstalledBuilds: boolean], SettingsResponse>("set_badge_visibility");
 const setNotificationPreferences = callable<[
   notifyGfnAdditions: boolean,
   notifyBoosteroidAdditions: boolean,
@@ -292,6 +295,7 @@ let badgeVisibility: BadgeVisibility = {
   show_gfn_badges: true,
   show_boosteroid_badges: true,
   show_hungarian_badges: true,
+  show_installed_builds: false,
 };
 let notificationPreferences: NotificationPreferences = {
   notify_gfn_additions: true,
@@ -361,6 +365,7 @@ async function reloadUpdatedPlugin(): Promise<"reloaded" | "restarting" | "faile
 
 function applyBadgeVisibility(next: BadgeVisibility): void {
   badgeVisibility = next;
+  configureInstalledBuilds(pluginActive && next.show_installed_builds, nativeTilesInStore);
   hungarianCollection.setEnabled(pluginActive && next.show_hungarian_badges);
   if (!next.show_hungarian_badges && curatorBadgeTimer !== undefined) {
     window.clearTimeout(curatorBadgeTimer);
@@ -426,6 +431,7 @@ async function loadBadgeVisibility(): Promise<void> {
         show_gfn_badges: response.show_gfn_badges,
         show_boosteroid_badges: response.show_boosteroid_badges,
         show_hungarian_badges: response.show_hungarian_badges ?? true,
+        show_installed_builds: response.show_installed_builds ?? false,
         library_badge_percent: response.library_badge_percent ?? 100,
         store_badge_percent: response.store_badge_percent ?? 100,
         store_badge_sides: response.store_badge_sides,
@@ -1721,6 +1727,7 @@ function patchSteamStore(): () => void {
       if (nextNativeStore !== nativeTilesInStore || nextNativePrices !== nativePriceTilesEnabled) {
         nativeTilesInStore = nextNativeStore;
         nativePriceTilesEnabled = nextNativePrices;
+        configureInstalledBuilds(pluginActive && badgeVisibility.show_installed_builds, nativeTilesInStore);
         for (const listener of supportListeners) listener();
       }
       const inStore = pathname === "/steamweb" || pathname.startsWith("/steamweb/");
@@ -1760,7 +1767,7 @@ function NativeStoreTilePrice({ appId }: { appId: number }) {
   return <NativeTilePrice appId={String(appId)} enabled={enabled} />;
 }
 
-function appendBadgeToTile(result: ReactElement, appId: number): ReactElement {
+function appendBadgeToTile(result: ReactElement, appId: number, installedHint?: boolean): ReactElement {
   const row = findInReactTree(result, (node: any) => {
     const className = node?.props?.className;
     return typeof className === "string" && className.includes(tileIconRowClass);
@@ -1771,9 +1778,10 @@ function appendBadgeToTile(result: ReactElement, appId: number): ReactElement {
   if (existing.some((child: any) => child?.key === BADGE_KEY)) return result;
   const badge = createElement(XboxTileBadge, { key: BADGE_KEY, appId });
   const price = createElement(NativeStoreTilePrice, { key: BADGE_KEY + "-price", appId });
-  if (Array.isArray(props.children)) props.children.push(badge, price);
-  else if (props.children !== undefined && props.children !== null) props.children = [props.children, badge, price];
-  else props.children = [badge, price];
+  const build = createElement(InstalledBuildLabel, { key: BADGE_KEY + "-build", appId, installedHint });
+  if (Array.isArray(props.children)) props.children.push(badge, price, build);
+  else if (props.children !== undefined && props.children !== null) props.children = [props.children, badge, price, build];
+  else props.children = [badge, price, build];
   return result;
 }
 
@@ -1794,7 +1802,10 @@ function wrappedTileType(this: unknown, ...args: unknown[]): ReactElement {
   try {
     const app = (args[0] as TileProps | undefined)?.app;
     if (!app || !Number.isInteger(app.appid) || app.appid <= 0 || app.BIsModOrShortcut?.()) return result;
-    return appendBadgeToTile(result, app.appid);
+    let installedHint: boolean | undefined;
+    try { if (typeof app.BIsInstalled === "function") installedHint = app.BIsInstalled(); }
+    catch { /* The manifest check is authoritative if Steam has no tile hint. */ }
+    return appendBadgeToTile(result, app.appid, installedHint);
   } catch (error) {
     console.debug("ControllerXbox tile injection skipped", error);
     return result;
@@ -2003,11 +2014,12 @@ function Content() {
     const onSettingsChanged = (event: Event) => {
       const detail = (event as CustomEvent<Partial<PluginSettings>>).detail;
       if (!detail) return;
-      if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean" || typeof detail.show_hungarian_badges === "boolean") {
+      if (typeof detail.show_gfn_badges === "boolean" || typeof detail.show_boosteroid_badges === "boolean" || typeof detail.show_hungarian_badges === "boolean" || typeof detail.show_installed_builds === "boolean") {
         setVisibility((current) => ({
           show_gfn_badges: detail.show_gfn_badges ?? current.show_gfn_badges,
           show_boosteroid_badges: detail.show_boosteroid_badges ?? current.show_boosteroid_badges,
           show_hungarian_badges: detail.show_hungarian_badges ?? current.show_hungarian_badges,
+          show_installed_builds: detail.show_installed_builds ?? current.show_installed_builds,
           library_badge_percent: detail.library_badge_percent ?? current.library_badge_percent,
           store_badge_percent: detail.store_badge_percent ?? current.store_badge_percent,
           store_badge_sides: detail.store_badge_sides ?? current.store_badge_sides,
@@ -2049,16 +2061,18 @@ function Content() {
     const previous = visibility;
     setSettingsWorking(true);
     setVisibility(next);
-    applyBadgeVisibility(next);
+    // The backend must save this switch before local manifest reads start.
+    if (!next.show_installed_builds || previous.show_installed_builds) applyBadgeVisibility(next);
     try {
       const response = await withBackendTimeout(
-        setBadgeVisibility(next.show_gfn_badges, next.show_boosteroid_badges, next.show_hungarian_badges),
+        setBadgeVisibility(next.show_gfn_badges, next.show_boosteroid_badges, next.show_hungarian_badges, next.show_installed_builds),
       );
       if (!response.success) throw new Error(response.error || "A beállítás mentése sikertelen.");
       applyBadgeVisibility({
         show_gfn_badges: response.show_gfn_badges,
         show_boosteroid_badges: response.show_boosteroid_badges,
         show_hungarian_badges: response.show_hungarian_badges ?? true,
+        show_installed_builds: response.show_installed_builds ?? false,
         library_badge_percent: response.library_badge_percent ?? 100,
         store_badge_percent: response.store_badge_percent ?? 100,
         store_badge_sides: response.store_badge_sides,
@@ -2319,6 +2333,13 @@ function Content() {
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked })}
     /></PanelSectionRow>
+    <PanelSectionRow><ToggleField
+      label="Telepített játékok buildszáma"
+      description="A könyvtári csempe alatt a helyben telepített Steam-build azonosítója látszik."
+      checked={visibility.show_installed_builds}
+      disabled={settingsWorking}
+      onChange={(checked) => void updateVisibility({ ...visibility, show_installed_builds: checked })}
+    /></PanelSectionRow>
     <BadgeSizeSettings initial={{ library_badge_percent: visibility.library_badge_percent ?? 100,
       store_badge_percent: visibility.store_badge_percent ?? 100 }} save={saveSizes} />
   </PanelSection>;
@@ -2534,6 +2555,7 @@ export default definePlugin(() => {
     onDismount: () => {
       pluginActive = false;
       stopNativePriceTiles();
+      stopInstalledBuilds();
       resumeRefresh.stop();
       if (settingsRetryTimer !== undefined) window.clearTimeout(settingsRetryTimer);
       settingsRetryTimer = undefined;

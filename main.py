@@ -246,6 +246,7 @@ class Plugin:
             "show_gfn_badges": True,
             "show_boosteroid_badges": True,
             "show_hungarian_badges": True,
+            "show_installed_builds": False,
             "notify_gfn_additions": True,
             "notify_boosteroid_additions": True,
             "notify_boosteroid_maintenance": True,
@@ -2071,6 +2072,7 @@ class Plugin:
                     "show_gfn_badges",
                     "show_boosteroid_badges",
                     "show_hungarian_badges",
+                    "show_installed_builds",
                     "notify_gfn_additions",
                     "notify_boosteroid_additions",
                     "notify_boosteroid_maintenance",
@@ -2106,6 +2108,74 @@ class Plugin:
     async def get_settings(self) -> Dict[str, Any]:
         return {"success": True, **self._settings}
 
+    @staticmethod
+    def _steam_library_paths() -> List[Path]:
+        home = Path.home()
+        candidates = [home / ".local/share/Steam", home / ".steam/steam",
+                      Path("/home/deck/.local/share/Steam"), Path("/home/deck/.steam/steam")]
+        libraries: List[Path] = []
+        seen: Set[str] = set()
+
+        def add(path: Path) -> None:
+            try:
+                resolved = path.resolve()
+                if resolved.is_dir() and str(resolved) not in seen:
+                    seen.add(str(resolved))
+                    libraries.append(resolved)
+            except OSError:
+                pass
+
+        for root in candidates:
+            add(root)
+            folders = root / "steamapps/libraryfolders.vdf"
+            try:
+                if folders.stat().st_size > 1024 * 1024:
+                    continue
+                contents = folders.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for match in re.finditer(r'"path"\s*"((?:\\.|[^"\\])*)"', contents, re.IGNORECASE):
+                value = re.sub(r'\\([\\"])', r'\1', match.group(1))
+                path = Path(value)
+                if path.is_absolute():
+                    add(path)
+                if len(libraries) >= 32:
+                    break
+        return libraries[:32]
+
+    @classmethod
+    def _read_installed_builds(cls, app_ids: List[str]) -> Dict[str, str]:
+        builds: Dict[str, str] = {}
+        for library in cls._steam_library_paths():
+            if len(builds) == len(app_ids):
+                break
+            for app_id in app_ids:
+                if app_id in builds:
+                    continue
+                manifest = library / "steamapps" / ("appmanifest_" + app_id + ".acf")
+                try:
+                    if manifest.stat().st_size > 128 * 1024:
+                        continue
+                    contents = manifest.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                game = re.search(r'"appid"\s*"(\d+)"', contents, re.IGNORECASE)
+                state = re.search(r'"StateFlags"\s*"(\d+)"', contents, re.IGNORECASE)
+                build = re.search(r'"buildid"\s*"(\d{1,20})"', contents, re.IGNORECASE)
+                if (game and game.group(1) == app_id and state and int(state.group(1)) & 4
+                        and build and int(build.group(1)) > 0):
+                    builds[app_id] = build.group(1)
+        return builds
+
+    async def get_installed_builds(self, app_ids: Any) -> Dict[str, Any]:
+        if (not isinstance(app_ids, list) or len(app_ids) > 100 or
+                any(not isinstance(app_id, str) or not re.fullmatch(r"[1-9]\d{0,9}", app_id) for app_id in app_ids)):
+            return {"success": False, "error": "Érvénytelen Steam-játéklista."}
+        if not self._settings.get("show_installed_builds", False):
+            return {"success": True, "builds": {}}
+        builds = await self._run_blocking(self._read_installed_builds, list(dict.fromkeys(app_ids)))
+        return {"success": True, "builds": builds}
+
     async def set_store_tile_prices(self, enabled: Any) -> Dict[str, Any]:
         if not isinstance(enabled, bool):
             return {"success": False, "error": "Érvénytelen kapcsolóérték."}
@@ -2139,9 +2209,10 @@ class Plugin:
         return {"success": True, **self._settings}
 
     async def set_badge_visibility(self, show_gfn_badges: Any, show_boosteroid_badges: Any,
-                                   show_hungarian_badges: Any = None) -> Dict[str, Any]:
+                                   show_hungarian_badges: Any = None, show_installed_builds: Any = None) -> Dict[str, Any]:
         if (not isinstance(show_gfn_badges, bool) or not isinstance(show_boosteroid_badges, bool)
-                or (show_hungarian_badges is not None and not isinstance(show_hungarian_badges, bool))):
+                or (show_hungarian_badges is not None and not isinstance(show_hungarian_badges, bool))
+                or (show_installed_builds is not None and not isinstance(show_installed_builds, bool))):
             return {"success": False, "error": "A jelvénybeállítás értéke érvénytelen."}
         self._settings.update({
             "show_gfn_badges": show_gfn_badges,
@@ -2149,6 +2220,8 @@ class Plugin:
         })
         if show_hungarian_badges is not None:
             self._settings["show_hungarian_badges"] = show_hungarian_badges
+        if show_installed_builds is not None:
+            self._settings["show_installed_builds"] = show_installed_builds
         await self._save_settings()
         return {"success": True, **self._settings}
 

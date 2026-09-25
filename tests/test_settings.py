@@ -1363,6 +1363,33 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(settings["show_boosteroid_badges"])
         self.assertTrue(settings["show_hungarian_badges"])
 
+    async def test_installed_builds_are_local_optional_and_persisted(self):
+        home = Path(self.directory.name) / "home"
+        primary = home / ".local" / "share" / "Steam"
+        external = Path(self.directory.name) / "External Steam"
+        (primary / "steamapps").mkdir(parents=True)
+        (external / "steamapps").mkdir(parents=True)
+        escaped_external = str(external).replace("\\", "\\\\")
+        (primary / "steamapps" / "libraryfolders.vdf").write_text(
+            '"libraryfolders" { "1" { "path" "' + escaped_external + '" } }', encoding="utf-8")
+        with patch("pathlib.Path.home", return_value=home):
+            self.assertIn(external.resolve(), self.plugin._steam_library_paths())
+        library = Path(self.directory.name) / "SteamLibrary" / "steamapps"
+        library.mkdir(parents=True)
+        (library / "appmanifest_10.acf").write_text('"AppState"\n{\n"appid" "10"\n"StateFlags" "4"\n"buildid" "123456"\n}', encoding="utf-8")
+        (library / "appmanifest_20.acf").write_text('"AppState"\n{\n"appid" "20"\n"StateFlags" "2"\n"buildid" "789"\n}', encoding="utf-8")
+        (library / "appmanifest_30.acf").write_text('"AppState"\n{\n"appid" "99"\n"StateFlags" "4"\n"buildid" "456"\n}', encoding="utf-8")
+        with patch.object(self.plugin_type, "_steam_library_paths", return_value=[library.parent]) as folders:
+            self.assertEqual((await self.plugin.get_installed_builds(["10"]))["builds"], {})
+            folders.assert_not_called()
+            self.assertTrue((await self.plugin.set_badge_visibility(True, True, True, True))["show_installed_builds"])
+            result = await self.plugin.get_installed_builds(["10", "20", "30", "40"])
+            self.assertEqual(result["builds"], {"10": "123456"})
+            self.assertFalse((await self.plugin.get_installed_builds(["../10"]))["success"])
+        reloaded = self.plugin_type()
+        await reloaded._load_settings()
+        self.assertTrue((await reloaded.get_settings())["show_installed_builds"])
+
     def prepare_boosteroid_watch(self):
         self.plugin._gfn_app_ids = {"1"}
         self.plugin._gfn_checked_at = time.time()
