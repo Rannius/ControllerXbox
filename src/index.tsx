@@ -6,6 +6,8 @@ import { HungarianProgress, CuratorProgress } from "./HungarianProgress";
 import { CatalogStatus } from "./CatalogStatus";
 import { AllKeyShopSettings, AllKeyShopMerchants, PriceCacheStatus, tilePriceCleanupScript, resetPriceView, updatePriceView } from "./AllKeyShop";
 import { storeBadgeDockScript, storeBadgeDockCleanupScript } from "./storeBadgeDock";
+import { storePriceTilesScript } from "./storePriceTiles";
+import { NativeTilePrice, stopNativePriceTiles } from "./NativeTilePrice";
 import { HungarianCollection, readyCollectionStore } from "./hungarianCollection";
 import { afterPatch, appDetailsClasses, ButtonItem, createReactTreePatcher, definePlugin, findInReactTree, findModuleExport, PanelSection, PanelSectionRow, staticClasses, TextField, ToggleField } from "@decky/ui";
 import { callable, fetchNoCors, routerHook, toaster } from "@decky/api";
@@ -265,6 +267,7 @@ let tileIconRowClass = "";
 let storeWebSocket: WebSocket | null = null;
 let storeMounted = false;
 let nativeTilesInStore = false;
+let nativePriceTilesEnabled = false;
 let storeWebSocketReady = false;
 let storeMessageId = 1;
 let storeScanTimer: number | undefined;
@@ -1285,8 +1288,8 @@ function buildStoreScanScript(): string {
   return `
     (function() {
       const ids = new Set();
-
-
+      ${storePriceTilesScript}
+      const tileIds = Array.from(new Set(collectPriceTiles().map(item => item.id))).slice(0, 80);
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       if (pageMatch) ids.add(pageMatch[1]);
       const nodes = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
@@ -1305,7 +1308,7 @@ function buildStoreScanScript(): string {
       const watchActions = Array.isArray(window.__controllerXboxWatchActions)
         ? window.__controllerXboxWatchActions.splice(0, 20).map(String)
         : [];
-      return { url: location.href, appIds: Array.from(ids), watchActions };
+      return { url: location.href, appIds: Array.from(ids), tileIds, watchActions };
     })();
   `;
 }
@@ -1520,7 +1523,7 @@ async function scanStorePage(): Promise<void> {
   if (!storeMounted || !storeWebSocketReady) return;
   try {
     const result = await sendStoreRuntime(buildStoreScanScript(), true) as StorePageScan | undefined;
-    updatePriceView(result?.url ?? "", sendStoreRuntime);
+    updatePriceView(result?.url ?? "", sendStoreRuntime, Array.isArray(result?.tileIds) ? result.tileIds : []);
     priceWishlist.scan(sendStoreRuntime);
     const nextIds = new Set(
       (Array.isArray(result?.appIds) ? result.appIds : [])
@@ -1649,8 +1652,10 @@ function patchSteamStore(): () => void {
     const history = historyModule?.m_history;
     const handleLocation = (pathname: string) => {
       const nextNativeStore = /^\/(store|steamweb)(\/|$)/.test(pathname);
-      if (nextNativeStore !== nativeTilesInStore) {
+      const nextNativePrices = /^\/store(\/|$)/.test(pathname);
+      if (nextNativeStore !== nativeTilesInStore || nextNativePrices !== nativePriceTilesEnabled) {
         nativeTilesInStore = nextNativeStore;
+        nativePriceTilesEnabled = nextNativePrices;
         for (const listener of supportListeners) listener();
       }
       const inStore = pathname === "/steamweb" || pathname.startsWith("/steamweb/");
@@ -1679,6 +1684,17 @@ function patchSteamStore(): () => void {
   };
 }
 
+function NativeStoreTilePrice({ appId }: { appId: number }) {
+  const [enabled, setEnabled] = useState(nativePriceTilesEnabled);
+  useEffect(() => {
+    const listener = () => setEnabled(nativePriceTilesEnabled);
+    supportListeners.add(listener);
+    listener();
+    return () => { supportListeners.delete(listener); };
+  }, []);
+  return <NativeTilePrice appId={String(appId)} enabled={enabled} />;
+}
+
 function appendBadgeToTile(result: ReactElement, appId: number): ReactElement {
   const row = findInReactTree(result, (node: any) => {
     const className = node?.props?.className;
@@ -1689,9 +1705,10 @@ function appendBadgeToTile(result: ReactElement, appId: number): ReactElement {
   const existing = Array.isArray(props.children) ? props.children : [props.children];
   if (existing.some((child: any) => child?.key === BADGE_KEY)) return result;
   const badge = createElement(XboxTileBadge, { key: BADGE_KEY, appId });
-  if (Array.isArray(props.children)) props.children.push(badge);
-  else if (props.children !== undefined && props.children !== null) props.children = [props.children, badge];
-  else props.children = [badge];
+  const price = createElement(NativeStoreTilePrice, { key: BADGE_KEY + "-price", appId });
+  if (Array.isArray(props.children)) props.children.push(badge, price);
+  else if (props.children !== undefined && props.children !== null) props.children = [props.children, badge, price];
+  else props.children = [badge, price];
   return result;
 }
 
@@ -2438,6 +2455,7 @@ export default definePlugin(() => {
     icon: <span>✓</span>,
     onDismount: () => {
       pluginActive = false;
+      stopNativePriceTiles();
       resumeRefresh.stop();
       if (settingsRetryTimer !== undefined) window.clearTimeout(settingsRetryTimer);
       settingsRetryTimer = undefined;

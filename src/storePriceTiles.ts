@@ -1,8 +1,7 @@
 export function allowsStoreTilePrices(url: string): boolean {
   try {
     const parsed = new URL(url);
-    return parsed.protocol === "https:" && parsed.hostname === "store.steampowered.com"
-      && !/^\/(?:home\/?|index\.php)?$/.test(parsed.pathname);
+    return parsed.protocol === "https:" && parsed.hostname === "store.steampowered.com";
   } catch { return false; }
 }
 
@@ -11,8 +10,8 @@ export const storePriceTilesScript = `
   function collectPriceTiles() {
     if (!(${allowsStoreTilePrices.toString()})(location.href)) return [];
     const found = new Map();
-    const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,[data-ds-appid]';
-    for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid]')) {
+    const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,.wishlist_row,[data-ds-appid],[data-app-id]';
+    for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid],.wishlist_row[data-app-id]')) {
       if (node.closest('#global_header,#store_header,.game_area_purchase,.game_area_purchase_game,#deck-play-badges-price,.dpb-tile-price,[data-ds-bundleid],[data-ds-packageid]')) continue;
       const link = node.matches('a[href*="/app/"]') ? node : node.querySelector('a[href*="/app/"]');
       const href = link?.getAttribute('href') || '';
@@ -20,7 +19,7 @@ export const storePriceTilesScript = `
       if (href) {
         try { const url = new URL(href, location.href); if (url.hostname !== 'store.steampowered.com') continue; linkedId = url.pathname.match(/^\\/app\\/(\\d+)/)?.[1] || ''; } catch { continue; }
       }
-      const raw = node.getAttribute('data-ds-appid') || '';
+      const raw = node.getAttribute('data-ds-appid') || node.getAttribute('data-app-id') || '';
       const id = linkedId || (/^\\d+$/.test(raw) ? raw : '');
       if (!id || Number(id) <= 0) continue;
       let host = link || node;

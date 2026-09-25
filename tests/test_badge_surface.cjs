@@ -10,7 +10,7 @@ test('native Store home and web Store use Store size; navigating back restores L
   let navigate;let signals=0;let connections=0;
   const history={location:{pathname:'/library'},listen:fn=>{navigate=fn;return ()=>{};}};
   const context=vm.createContext({
-    nativeTilesInStore:false,storeMounted:false,supportListeners:new Set([()=>signals++]),
+    nativeTilesInStore:false,nativePriceTilesEnabled:false,storeMounted:false,supportListeners:new Set([()=>signals++]),
     findModuleExport:()=>({m_history:history}),window:{location:{pathname:'/library'}},
     renderStoreBadges:()=>{},connectToStoreDebugger:()=>connections++,disconnectStoreDebugger:()=>{},
     console,
@@ -33,7 +33,7 @@ test('native Store home and web Store use Store size; navigating back restores L
   navigate({pathname:'/steamweb'});
   assert.ok(Math.abs(scale()-.88*1.75)<1e-9);assert.equal(connections,1);
   navigate({pathname:'/library/home'});
-  assert.ok(Math.abs(scale()-.88*.8)<1e-9);assert.equal(signals,2);
+  assert.ok(Math.abs(scale()-.88*.8)<1e-9);assert.equal(signals,3);
   navigate({pathname:'/storefront-unrelated'});
   assert.equal(context.nativeTilesInStore,false);
   stop();

@@ -87,22 +87,22 @@ test('successful prices remain fresh for 24 hours and refresh only on reappearan
  f.api.updatePriceView(url,f.send,[]);await f.drain();f.api.updatePriceView(url,f.send,['10']);await f.drain();assert.equal(f.requests.length,2);
 });
 
-test('store homepage never queues tile prices, including navigation from search',async()=>{
- const f=fixture();
- for(const path of ['/', '/?l=hungarian', '/home/', '/index.php']) {
-  f.api.updatePriceView('https://store.steampowered.com'+path,f.send,['10','20']);await f.drain();
-  assert.equal(f.requests.length,0);
+test('home and wishlist use the shared visible queue without starving cards after the fourth',async()=>{
+ for(const path of ['/', '/?l=hungarian', '/home/', '/index.php', '/wishlist/id/example/', '/wishlist/profiles/76561198000000000/']) {
+  const f=fixture(), url='https://store.steampowered.com'+path, ids=['10','20','30','40','50','60','70'];
+  for(let i=0;i<ids.length;i++) {
+   f.api.updatePriceView(url,f.send,ids);await f.drain();
+   assert.equal(f.requests.length,i+1);assert.equal(f.requests[i].id,ids[i]);
+   f.api.updatePriceView(url,f.send,ids);await f.drain();assert.equal(f.requests.length,i+1);
+   f.requests[i].resolve({success:true,checked_at:f.clock.now/1000,offers:[]});await f.drain();
+  }
+  f.api.updatePriceView('https://store.steampowered.com/wishlist/',f.send,ids);await f.drain();
+  assert.equal(f.requests.length,ids.length,'fresh cache reused between Store pages');
  }
- f.api.updatePriceView('https://store.steampowered.com/search/',f.send,['10','20']);await f.drain();
- assert.equal(f.requests.length,1);
- f.api.updatePriceView('https://store.steampowered.com/',f.send,['10','20']);await f.drain();
+ const f=fixture();f.api.updatePriceView('https://store.steampowered.com/',f.send,['10','20']);await f.drain();
+ f.api.updatePriceView('https://example.com/',f.send,['20']);await f.drain();
  f.requests[0].resolve({success:true,offers:[]});await f.drain();
- f.api.updatePriceView('https://store.steampowered.com/',f.send,['10','20']);await f.drain();
- assert.equal(f.requests.length,1);
- assert.match(f.scripts.findLast(s=>s.includes('const values =')),/const values = \{\}/);
- f.api.updatePriceView('https://store.steampowered.com/app/30/',f.send);await f.drain();
- assert.equal(f.requests.length,2);assert.equal(f.requests[1].id,'30');
- f.requests[1].resolve({success:true,offers:[]});await f.drain();
+ f.api.updatePriceView('https://example.com/',f.send,['20']);await f.drain();assert.equal(f.requests.length,1);
 });
 
 test('backend cooldown above one minute is respected without premature retries',async()=>{

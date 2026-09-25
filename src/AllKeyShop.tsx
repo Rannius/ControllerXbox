@@ -160,7 +160,7 @@ export function AllKeyShopSettings({ openMerchants }: { openMerchants(): void })
         } catch { setMessage("A szerverkapcsolat nem ellenőrizhető."); } finally { setBusy(false); }
       }}>Mentett szerverkapcsolat tesztelése</ButtonItem></PanelSectionRow>}
     </>}
-    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard / Early Access alapjáték · Global/EU/ROW Steam-kulcsok és opcionálisan Gift. A legutóbbi AKS-adatokból választja a legolcsóbbat; forrásdátum a részletekben. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 24 óráig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás."}</div></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>{message || "EUR · Standard / Early Access alapjáték · Global/EU/ROW Steam-kulcsok és opcionálisan Gift. A legutóbbi AKS-adatokból választja a legolcsóbbat; forrásdátum a részletekben. Account és ismeretlen típus kizárva. A megnyitott játéknál, a főoldali csempéken és a kívánságlistán is megjelenik. Az áruház használata közben a kívánságlista árait is előtölti. Az árakat lemezre menti; 24 óráig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás."}</div></PanelSectionRow>
   </>;
 }
 
@@ -407,7 +407,7 @@ let tileUrl = "";
 let tileIds: string[] = [];
 let visibleApps = new Set<string>();
 const refreshQueue = new Set<string>();
-function visiblePrice(id: string): PriceResult | undefined {
+export function visiblePrice(id: string): PriceResult | undefined {
   const cached = prices.get(id);
   if (cached) return cached.value;
   return serviceFailure && serviceFailure.expires > Date.now() ? serviceFailure.value : undefined;
@@ -419,13 +419,14 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
   const previousApp = currentApp;
   currentApp = id;
   tileUrl = url;
-  tileIds = allowsStoreTilePrices(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
+  tileIds = allowsStoreTilePrices(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value) && Number(value) > 0))).slice(0, 80) : [];
   const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
   for (const app of nextVisible) {
     const entry = prices.get(app);
-    // A currentApp mindig bekerül; csempékre max. 4 elem sorban, hogy ne okozzunk rate-limitet
+    // Queue every visible card once. Requests remain single-flight; limiting the
+    // queue to four starved the remaining cards until they left the viewport.
     if ((!visibleApps.has(app) || (app === id && id !== previousApp)) && (!entry || entry.expires <= Date.now()))
-      if (app === id || refreshQueue.size < 4) refreshQueue.add(app);
+      refreshQueue.add(app);
   }
   for (const app of refreshQueue) if (!nextVisible.has(app)) refreshQueue.delete(app);
   visibleApps = nextVisible;
@@ -481,4 +482,9 @@ export function updatePriceView(url: string, send: (script: string) => Promise<u
     if (currentApp === requestId) void send(buildPricePanelScript(requestId, value)).catch(() => {});
     if (tileIds.length) renderTiles();
   }).finally(() => { fetching = false; });
+}
+
+export const nativePriceUrl = 'https://store.steampowered.com/?dpb_native=1';
+export function clearNativePriceView(): void {
+  if (tileUrl === nativePriceUrl) updatePriceView('', async () => {});
 }

@@ -289,8 +289,7 @@ function CatalogStatus() {
 function allowsStoreTilePrices(url) {
     try {
         const parsed = new URL(url);
-        return parsed.protocol === "https:" && parsed.hostname === "store.steampowered.com"
-            && !/^\/(?:home\/?|index\.php)?$/.test(parsed.pathname);
+        return parsed.protocol === "https:" && parsed.hostname === "store.steampowered.com";
     }
     catch {
         return false;
@@ -301,8 +300,8 @@ const storePriceTilesScript = `
   function collectPriceTiles() {
     if (!(${allowsStoreTilePrices.toString()})(location.href)) return [];
     const found = new Map();
-    const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,[data-ds-appid]';
-    for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid]')) {
+    const cardSelector = '.store_capsule,.tab_item,.search_result_row,.sale_capsule,.dailydeal,.small_cap,.large_cap,.capsule,.wishlist_row,[data-ds-appid],[data-app-id]';
+    for (const node of document.querySelectorAll('a[href*="/app/"],[data-ds-appid],.wishlist_row[data-app-id]')) {
       if (node.closest('#global_header,#store_header,.game_area_purchase,.game_area_purchase_game,#deck-play-badges-price,.dpb-tile-price,[data-ds-bundleid],[data-ds-packageid]')) continue;
       const link = node.matches('a[href*="/app/"]') ? node : node.querySelector('a[href*="/app/"]');
       const href = link?.getAttribute('href') || '';
@@ -310,7 +309,7 @@ const storePriceTilesScript = `
       if (href) {
         try { const url = new URL(href, location.href); if (url.hostname !== 'store.steampowered.com') continue; linkedId = url.pathname.match(/^\\/app\\/(\\d+)/)?.[1] || ''; } catch { continue; }
       }
-      const raw = node.getAttribute('data-ds-appid') || '';
+      const raw = node.getAttribute('data-ds-appid') || node.getAttribute('data-app-id') || '';
       const id = linkedId || (/^\\d+$/.test(raw) ? raw : '');
       if (!id || Number(id) <= 0) continue;
       let host = link || node;
@@ -484,7 +483,7 @@ function AllKeyShopSettings({ openMerchants }) {
                                 finally {
                                     setBusy(false);
                                 }
-                            }, children: "Mentett szerverkapcsolat tesztel\u00E9se" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard / Early Access alapjáték · Global/EU/ROW Steam-kulcsok és opcionálisan Gift. A legutóbbi AKS-adatokból választja a legolcsóbbat; forrásdátum a részletekben. Account és ismeretlen típus kizárva. A megnyitott játék és az áruház használata közben a kívánságlista árait ellenőrzi. Az árakat lemezre menti; 24 óráig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás." }) })] });
+                            }, children: "Mentett szerverkapcsolat tesztel\u00E9se" }) })] }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: message || "EUR · Standard / Early Access alapjáték · Global/EU/ROW Steam-kulcsok és opcionálisan Gift. A legutóbbi AKS-adatokból választja a legolcsóbbat; forrásdátum a részletekben. Account és ismeretlen típus kizárva. A megnyitott játéknál, a főoldali csempéken és a kívánságlistán is megjelenik. Az áruház használata közben a kívánságlista árait is előtölti. Az árakat lemezre menti; 24 óráig frissek. Friss cache esetén nincs hálózati kérés. AKS: 1,5 másodperces alap szünet, szerverhiba esetén fokozatos lassítás." }) })] });
 }
 function AllKeyShopMerchants({ onBack }) {
     const [names, setNames] = SP_REACT.useState([]);
@@ -758,14 +757,14 @@ function updatePriceView(url, send, visibleTileIds = []) {
     const previousApp = currentApp;
     currentApp = id;
     tileUrl = url;
-    tileIds = allowsStoreTilePrices(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value)))) : [];
+    tileIds = allowsStoreTilePrices(url) ? Array.from(new Set(visibleTileIds.filter(value => /^\d+$/.test(value) && Number(value) > 0))).slice(0, 80) : [];
     const nextVisible = new Set([...tileIds, ...(id ? [id] : [])]);
     for (const app of nextVisible) {
         const entry = prices.get(app);
-        // A currentApp mindig bekerül; csempékre max. 4 elem sorban, hogy ne okozzunk rate-limitet
+        // Queue every visible card once. Requests remain single-flight; limiting the
+        // queue to four starved the remaining cards until they left the viewport.
         if ((!visibleApps.has(app) || (app === id && id !== previousApp)) && (!entry || entry.expires <= Date.now()))
-            if (app === id || refreshQueue.size < 4)
-                refreshQueue.add(app);
+            refreshQueue.add(app);
     }
     for (const app of refreshQueue)
         if (!nextVisible.has(app))
@@ -838,6 +837,11 @@ function updatePriceView(url, send, visibleTileIds = []) {
             renderTiles();
     }).finally(() => { fetching = false; });
 }
+const nativePriceUrl = 'https://store.steampowered.com/?dpb_native=1';
+function clearNativePriceView() {
+    if (tileUrl === nativePriceUrl)
+        updatePriceView('', async () => { });
+}
 
 // Two independent rows shared by the icon and price renderers.
 const storeBadgeDockScript = `
@@ -880,6 +884,85 @@ const storeBadgeDockCleanupScript = `
   document.getElementById('deck-play-badges-dock')?.remove();
   document.getElementById('deck-play-badges-dock-right')?.remove();
 `;
+
+// One shared queue/timer for native Store cards, never one network loop per card.
+const cards = new Map();
+let timer;
+function stopNativePriceTiles() {
+    clearInterval(timer);
+    timer = undefined;
+    for (const node of cards.keys()) {
+        node.textContent = "";
+        node.style.visibility = "hidden";
+    }
+    cards.clear();
+    clearNativePriceView();
+}
+function tilePriceLabel(value) {
+    if (value?.disabled || value?.skipped)
+        return "";
+    const source = value?.provider === "gg" ? "GG.deals" : "AKS";
+    if (!value)
+        return source + ": betöltés…";
+    if (!value.success) {
+        const seconds = value.retry_at ? Math.max(0, Math.ceil((value.retry_at - Date.now()) / 1000)) : 0;
+        return source + (value.pending ? ": sorban" : ": várakozás / hiba") + (seconds ? " · " + seconds + " mp" : "");
+    }
+    if (value.provider === "gg") {
+        const price = value.keyshop_price ?? value.retail_price;
+        return price == null ? source + ": nincs ár" : source + ": tájékoztató ár: " + price.toFixed(2) + " €";
+    }
+    const best = value.offers?.[0];
+    return best ? "AKS " + best.price.toFixed(2) + " € · " + best.merchant
+        : value.not_found ? "AKS: nincs a katalógusban" : "AKS: nincs ajánlat";
+}
+function tick() {
+    const visible = Array.from(cards).filter(([node, card]) => {
+        const rect = node.getBoundingClientRect();
+        return node.isConnected && card.intersects && rect.width > 0 && rect.height > 0
+            && rect.bottom > 0 && rect.top < node.ownerDocument.defaultView.innerHeight
+            && rect.right > 0 && rect.left < node.ownerDocument.defaultView.innerWidth;
+    });
+    updatePriceView(nativePriceUrl, async () => { }, visible.map(([, card]) => card.id));
+    for (const [node, card] of visible) {
+        const value = visiblePrice(card.id);
+        const text = tilePriceLabel(value);
+        node.textContent = text;
+        node.style.visibility = text ? "visible" : "hidden";
+        node.title = text + (value?.offers?.[0]?.source_updated_at ? " · AKS-adat: " + value.offers[0].source_updated_at : "");
+    }
+}
+function NativeTilePrice({ appId, enabled }) {
+    const ref = SP_REACT.useRef(null);
+    SP_REACT.useEffect(() => {
+        const node = ref.current;
+        if (!enabled || !node)
+            return;
+        const Observer = node.ownerDocument.defaultView?.IntersectionObserver;
+        const card = { id: appId, intersects: !Observer };
+        cards.set(node, card);
+        const observer = Observer ? new Observer(entries => { card.intersects = entries.some(entry => entry.isIntersecting); }) : undefined;
+        observer?.observe(node);
+        if (!timer) {
+            tick();
+            timer = setInterval(tick, 1500);
+        }
+        return () => {
+            observer?.disconnect();
+            cards.delete(node);
+            if (!cards.size)
+                stopNativePriceTiles();
+        };
+    }, [appId, enabled]);
+    if (!enabled)
+        return null;
+    const label = tilePriceLabel(visiblePrice(appId));
+    return SP_JSX.jsx("span", { ref: ref, style: { position: "absolute", bottom: 0, left: 0, right: 0,
+            height: "25px", zIndex: 101, boxSizing: "border-box", padding: "3px 6px",
+            background: "#162634", color: "#dce6ed", font: "11px/19px Arial,sans-serif",
+            whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", pointerEvents: "none",
+            visibility: label ? "visible" : "hidden" }, children: label });
+}
 
 const HUNGARIAN_COLLECTION_NAME = "🇭🇺 Magyar nyelvű játékok";
 // Steam's userCollections computed getter calls .values() before storage exists.
@@ -1208,6 +1291,7 @@ let tileIconRowClass = "";
 let storeWebSocket = null;
 let storeMounted = false;
 let nativeTilesInStore = false;
+let nativePriceTilesEnabled = false;
 let storeWebSocketReady = false;
 let storeMessageId = 1;
 let storeScanTimer;
@@ -2205,8 +2289,8 @@ function buildStoreScanScript() {
     return `
     (function() {
       const ids = new Set();
-
-
+      ${storePriceTilesScript}
+      const tileIds = Array.from(new Set(collectPriceTiles().map(item => item.id))).slice(0, 80);
       const pageMatch = location.pathname.match(/\\/app\\/(\\d+)/);
       if (pageMatch) ids.add(pageMatch[1]);
       const nodes = document.querySelectorAll('[data-ds-appid], a[href*="/app/"]');
@@ -2225,7 +2309,7 @@ function buildStoreScanScript() {
       const watchActions = Array.isArray(window.__controllerXboxWatchActions)
         ? window.__controllerXboxWatchActions.splice(0, 20).map(String)
         : [];
-      return { url: location.href, appIds: Array.from(ids), watchActions };
+      return { url: location.href, appIds: Array.from(ids), tileIds, watchActions };
     })();
   `;
 }
@@ -2436,7 +2520,7 @@ async function scanStorePage() {
         return;
     try {
         const result = await sendStoreRuntime(buildStoreScanScript(), true);
-        updatePriceView(result?.url ?? "", sendStoreRuntime);
+        updatePriceView(result?.url ?? "", sendStoreRuntime, Array.isArray(result?.tileIds) ? result.tileIds : []);
         priceWishlist.scan(sendStoreRuntime);
         const nextIds = new Set((Array.isArray(result?.appIds) ? result.appIds : [])
             .map((value) => String(value))
@@ -2580,8 +2664,10 @@ function patchSteamStore() {
         const history = historyModule?.m_history;
         const handleLocation = (pathname) => {
             const nextNativeStore = /^\/(store|steamweb)(\/|$)/.test(pathname);
-            if (nextNativeStore !== nativeTilesInStore) {
+            const nextNativePrices = /^\/store(\/|$)/.test(pathname);
+            if (nextNativeStore !== nativeTilesInStore || nextNativePrices !== nativePriceTilesEnabled) {
                 nativeTilesInStore = nextNativeStore;
+                nativePriceTilesEnabled = nextNativePrices;
                 for (const listener of supportListeners)
                     listener();
             }
@@ -2615,6 +2701,16 @@ function patchSteamStore() {
         disconnectStoreDebugger();
     };
 }
+function NativeStoreTilePrice({ appId }) {
+    const [enabled, setEnabled] = SP_REACT.useState(nativePriceTilesEnabled);
+    SP_REACT.useEffect(() => {
+        const listener = () => setEnabled(nativePriceTilesEnabled);
+        supportListeners.add(listener);
+        listener();
+        return () => { supportListeners.delete(listener); };
+    }, []);
+    return SP_JSX.jsx(NativeTilePrice, { appId: String(appId), enabled: enabled });
+}
 function appendBadgeToTile(result, appId) {
     const row = DFL.findInReactTree(result, (node) => {
         const className = node?.props?.className;
@@ -2627,12 +2723,13 @@ function appendBadgeToTile(result, appId) {
     if (existing.some((child) => child?.key === BADGE_KEY))
         return result;
     const badge = SP_REACT.createElement(XboxTileBadge, { key: BADGE_KEY, appId });
+    const price = SP_REACT.createElement(NativeStoreTilePrice, { key: BADGE_KEY + "-price", appId });
     if (Array.isArray(props.children))
-        props.children.push(badge);
+        props.children.push(badge, price);
     else if (props.children !== undefined && props.children !== null)
-        props.children = [props.children, badge];
+        props.children = [props.children, badge, price];
     else
-        props.children = [badge];
+        props.children = [badge, price];
     return result;
 }
 function resolveOriginalTileType(self) {
@@ -3273,6 +3370,7 @@ var index = DFL.definePlugin(() => {
         icon: SP_JSX.jsx("span", { children: "\u2713" }),
         onDismount: () => {
             pluginActive = false;
+            stopNativePriceTiles();
             resumeRefresh.stop();
             if (settingsRetryTimer !== undefined)
                 window.clearTimeout(settingsRetryTimer);
