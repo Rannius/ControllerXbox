@@ -137,44 +137,6 @@ A szolgáltató másodpercben megadott Retry-After várakozását a backend és 
 
 Ellenőrzés: 32 frontend- és 63 Python-teszt. A kiadás előtti, fejlesztői hálózaton végzett Gas Station Simulator lekérés a Steam-adatokkal, AKS-kereséssel, ajánlatoldallal és az öt másodperces szünettel együtt 6,55 másodperc alatt sikerült. Ez nem igazolja a Steam Deck hálózatának működését; a Deck pontos hibáját az új kijelzés teszi megismerhetővé.
 
-## 1.0.83 – Gyorsabb árlekérés és választható GG.deals
-
-A Steam játékadatai 24 órára, az egyértelműen párosított AllKeyShop-adatlapok 7 napra lemezre mentődnek. Ismert játéknál az árfrissítés közvetlenül az ajánlatoldalt kéri le. A friss, 30 perces ár azonnal megjelenik, HTTP-kérés nélkül; lejárt árnál a korábbi adat látható a frissítés közben. A cache-only hívás továbbra is hálózatmentes.
-
-Az AKS alap kérésköze 1,5 másodperc. Minden AKS-kérés ugyanazt a soros HTTP-zárat használja; a kívánságlistasor nem tesz további két másodperces szünetet a sikeres lekérések közé. A 429-es válasz fokozatos lassítást vált ki, a Retry-After másodperces és HTTP-dátumos formája is érvényesül. Egy AppID egyetlen folyamatban lévő lekérést kap, a párhuzamos várakozók ugyanazt az eredményt használják.
-
-A mentés háttérben, összevontan történik, a JSON-kódolás sem blokkolja a felületet. A gyorsítótárazott URL 404/410-es hibája vagy címeltérése egyszeri új keresést indít. Az ajánlatok Steam-kulcs/Gift, bolt-, régió- és kiadásszűrése változatlan.
-
-A Beállítások → Játékárak részen választható az AllKeyShop vagy a GG.deals. A GG.dealshez saját API-kulcs adható meg maszkolt mezőben; az csak a Decky helyi backendbeállításaiba kerül, a kiadott csomag és a visszaadott állapot nem tartalmazza. EU/EUR összesített kulcsbolti és hivatalos bolti árak, külön tartós gyorsítótár és számláló, a dokumentált 100 rekord/perc és 1000 rekord/óra korlátozás figyelembevételével. A már ismert Steam-adatú, lejárt kívánságlistás tételek közös API-kérésbe kerülhetnek. Ismeretlen Steam-adatnál előbb ellenőrizzük az ingyenességet és a megjelenést.
-
-A GG.deals API nem ad boltonkénti vagy terméktípus szerinti ajánlatlistát. Emiatt az ottani ár külön jelölt összehasonlító ár, nem az AKS-szűrőkkel ellenőrzött Steam-kulcs/Gift-ajánlat. A felület ezt jelzi, mindkét minimumárat és a GG.deals forráshivatkozását megmutatja. Az AllKeyShop boltszűrése megmarad visszaváltáshoz. API-dokumentáció: https://gg.deals/api/prices/
-
-Ellenőrzés: TypeScript, 32 frontend- és 72 Python-teszt; a tényleges ársor böngészős ellenőrzése. Fejlesztői hálózaton a Gas Station Simulator hideg AKS-lekérése 3,88 mp / 3 HTTP-kérés, az ismert játéké 1,94 mp / 1 kérés, mindkettő 50 megfelelő ajánlattal. Három játék GG.deals-lekérése egy API-hívással 0,28 mp. A Steam Deck hálózatán és felületén a kiadást külön ki kell próbálni.
-
-## 1.0.84 – Saját Ubuntu árszerver és Decky-kapcsolat
-
-A Beállítások → Játékárak részen választható a közvetlen vagy a saját HTTPS-szerveren keresztüli lekérés. A szerver címét és külön hozzáférési tokenjét a Decky helyben tárolja; maszkolt tokenmező és kapcsolatellenőrző gomb segíti a beállítást. A GG.deals-kulcs szerveres módban csak az Ubuntun szükséges. A kliens ellenőrzi a TLS-tanúsítványt és nem követ tokenes átirányításokat.
-
-Az Ubuntu szolgáltatás a kiadott plugin árlekérő kódját használja: közös tartós Steam-, AKS-párosítás- és árcache, központi kérési sor, AppID/forrás szerinti duplikációszűrés, foreground prioritás, AKS-kérésköz és szolgáltatói várakozás. A boltonkénti AKS-szűrés a Decken marad, így két felhasználó eltérő megbízhatóbolt-listát használhat ugyanazzal a szervercache-sel. A szerver sem Steam-belépést, sem kívánságlista-tagságot nem igényel.
-
-Szerverhiba esetén megmarad a helyi mentett ár, és nincs automatikus közvetlen szolgáltatói fallback. A szerver sorban lévő feladatainak eredményét a Decky rövid, jelzett várakozás után kérdezi újra; az áruház bezárásával a felületi polling megszűnik. A helyi cache-only függvények továbbra sem használnak hálózatot.
-
-Új, külön Ubuntu-csomag: `DeckPriceServer-v1.0.84.tar.gz`. Telepítő, Caddy HTTPS, systemd szolgáltatás, opcionális DuckDNS-frissítés és részletes magyar útmutató. A Decky ZIP rögzített szerkezete változatlan. Portok: TCP 80/443 az Ubuntura; a belső 8765-ös port nem publikálandó. A telepítő saját szervertokent generál, személyes API-kulcs nincs a csomagban.
-
-A DuckDNS stabil nevet ad a változó IP-hez; nem rejt IP-címet és nem garantál tiltásmentességet. Közös hálózaton a szerver és a Deck ugyanazt a nyilvános címet használhatja. A védelem a közös cache és a szolgáltatói limitek betartása.
-
-Ellenőrzés: TypeScript, 34 frontend- és 85 Python-teszt, köztük valódi helyi HTTP-kapcsolatokkal hitelesítés, két kliens közös lekérése, prioritás, régi ár azonnali visszaadása, szerverhiba és cache-only működés. Az Ubuntu-telepítő shell szintaxisa és a kiadási csomagok ellenőrizve. A felhasználó Ubuntu-gépére telepítés, a router porttovábbítása és a nyilvános HTTPS-tanúsítvány kiadása még helyszíni lépés; ezek működését a helyi teszt nem igazolja.
-
-Telepítési útmutató: [price-server/README.md](https://github.com/Rannius/ControllerXbox/blob/v1.0.84/price-server/README.md).
-
-Version 1.0.89 removes the old HTML merchant-directory request and restricts AKS HTTP access to the two JSON API endpoints. Foreground server requests without cached data wait up to 2.5 seconds for the existing shared job: a quick result arrives in the first response. Slower jobs continue and request a one-second foreground polling delay instead of the former minimum three seconds. Cached prices and background requests return immediately; provider pacing and backoff are unchanged.
-
-1.0.90: a Steam AppDetails válasz eltérő külső kulcsánál az egyértelmű belső `steam_appid` alapján azonosítjuk a játékot. A más AppID-hez tartozó adat továbbra is kizárt. Egy hiányzó játékadat nem szünetelteti a teljes AKS-sort. Az API-katalógusból hiányzó név és a többértelmű név külön jelzést, 24 órás tartós negatív cache-t kap; nem kapcsolati hibaként ismétlődik. A szerver státusza és az új Home Assistant kártyaminta tartalmazza a konkrét hibaokot; a már bemásolt kártyát az új mintára kell cserélni.
-
-Version 1.0.92 fixes WARDOGS and other Early Access base games incorrectly losing every offer to the Standard-only edition filter. Explicit Early Access offers retain their edition label; Supporter/Deluxe/bundles remain excluded. Steam EU/US is accepted as an EU-inclusive region, with the original region label. Existing cached API data is re-filtered immediately without downloading it again.
-
-Version 1.0.94 fixes Portal comparisons by excluding historical Steam prices and reading the current Steam page’s EUR price instead. Bento Blocks offers no longer disappear merely because another shop updated on a later day. AKS quotes retain their source dates and are labelled as last reported prices, not verified live stock. The seven requested merchants are always selectable without changing the existing allowlist. Filtering remains on each Deck, applied to the full raw server response; no Home Assistant controls were added. Update both Decky and the price server: old pruned AKS history caches are invalidated once.
-
 ## 1.0.95: csempeárak a főoldalon és a kívánságlistán
 
 A korábbi csempeár-tiltás megszűnt. A webes Steam-áruház főoldalán, listáin és kívánságlistáján, valamint a natív áruház támogatott játékcsempéin is látható az ár. A játékárak meglévő főkapcsolója kapcsolja a megjelenítést. Csak a látható csempék kerülnek ebbe a sorba; a már engedélyezett kívánságlista-előtöltés ettől függetlenül tovább működik. A közös 24 órás cache, soros külső lekérés, boltválasztás, kulcs/Gift-szűrés és szolgáltatói várakozás változatlan. A képernyőről kikerült, még nem indult csempekérések kiesnek a sorból. A meglévő 1.0.94-es árszerver kompatibilis; ehhez a változáshoz csak a Deckyt kell frissíteni.
