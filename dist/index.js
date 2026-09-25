@@ -693,8 +693,8 @@ function buildPricePanelScript(appId, result) {
     ${priceCountdownScript}
   })();`;
 }
-// Tile labels leave Steam's card layout untouched. Featured offers use the free
-// space beside Steam's price; other cards (including wishlist) use the artwork.
+// Featured offers use the free space beside Steam's price; ordinary cards
+// reserve a short strip below themselves for the price label.
 const tilePriceCleanupScript = `
   for (const [host, original] of window.__dpbPriceTiles || []) {
     host.querySelector(':scope > .dpb-tile-price')?.remove();
@@ -717,14 +717,14 @@ function buildTilePricesScript(url, values) {
       const scale = host.offsetWidth ? hostRect.width / host.offsetWidth : 1;
       const home = /^\\/(?:|home\\/|index\\.php)$/.test(location.pathname || '/');
       const featured = home && !!host.closest('.home_special_offers_group');
-      const homeDlc = home && !!host.closest('#dlc_tier,.home_discounts_block.dlc_block');
+      const tileCard = host.closest('.wishlist_row,.search_result_row,.sale_capsule,.store_capsule,.tab_item,.dailydeal,.small_cap,.large_cap');
+      const belowCard = !featured && !!tileCard;
       let anchor = host;
       let left, width, top;
-      if (homeDlc) {
-        // The cover link is shorter than its sale capsule. Use the entire card
-        // and a CSS-relative bottom edge so late Steam prices and scrolls cannot
-        // move the row into the artwork.
-        anchor = host.closest('.sale_capsule');
+      if (belowCard) {
+        // Image links can be shorter than the card containing Steam's price.
+        // A CSS-relative bottom edge follows late content and scrolling.
+        anchor = tileCard;
         if (!anchor || anchor.getBoundingClientRect().width < 80) continue;
         left = 0; width = anchor.offsetWidth; top = 0;
       } else if (featured) {
@@ -736,40 +736,18 @@ function buildTilePricesScript(url, values) {
         width = (priceRect.left - hostRect.left - 4) / scale;
         top = ((priceRect.top + priceRect.bottom) / 2 - hostRect.top) / scale - 13;
         if (width < 120 || top < 0) continue;
-      } else {
-        const visual = Array.from(host.querySelectorAll('img,picture,video,[style*="background-image"]'))
-          .map(node => node.getBoundingClientRect())
-          .filter(rect => rect.width >= Math.min(80, hostRect.width * .4) && rect.height >= 52
-            && rect.right > hostRect.left && rect.left < hostRect.right
-            && rect.bottom > hostRect.top && rect.top < hostRect.bottom)
-          .sort((a, b) => b.width * b.height - a.width * a.height)[0]
-          || (getComputedStyle(host).backgroundImage !== 'none' ? hostRect : null);
-        if (!visual) continue;
-        left = Math.max(0, visual.left - hostRect.left) / scale;
-        const right = Math.min(hostRect.right, visual.right);
-        width = Math.max(0, (right - Math.max(hostRect.left, visual.left)) / scale);
-        if (width < 80) continue;
-        const imageTop = Math.max(0, (Math.max(hostRect.top, visual.top) - hostRect.top) / scale);
-        top = Math.max(imageTop, (Math.min(hostRect.bottom, visual.bottom) - hostRect.top) / scale - 26);
-        const steamPrices = Array.from(host.querySelectorAll('.discount_block,.discount_final_price,.game_purchase_price,.price,[class*="SalePrice"],[class*="sale_price"]'))
-          .map(node => node.getBoundingClientRect());
-        const overlapsSteamPrice = () => steamPrices.some(rect => rect.width && rect.height
-          && rect.left < hostRect.left + (left + width) * scale && rect.right > hostRect.left + left * scale
-          && rect.top < hostRect.top + (top + 26) * scale && rect.bottom > hostRect.top + top * scale);
-        while (top - 28 >= imageTop && overlapsSteamPrice()) top -= 28;
-        if (overlapsSteamPrice()) continue;
-      }
+      } else continue;
       if (saved.has(anchor)) continue;
-      saved.set(anchor, (homeDlc ? ['position', 'overflow', 'margin-bottom'] : ['position'])
+      saved.set(anchor, (belowCard ? ['position', 'overflow', 'margin-bottom'] : ['position'])
         .map(key => [key, anchor.style.getPropertyValue(key), anchor.style.getPropertyPriority(key)]));
       if (getComputedStyle(anchor).position === 'static') anchor.style.setProperty('position', 'relative');
-      if (homeDlc) {
+      if (belowCard) {
         if (getComputedStyle(anchor).overflow === 'hidden') anchor.style.setProperty('overflow', 'visible');
         if ((parseFloat(getComputedStyle(anchor).marginBottom) || 0) < 32) anchor.style.setProperty('margin-bottom', '32px');
       }
       const value = values[id], offer = value?.offers?.[0];
       const row = document.createElement('span'); row.className = 'dpb-tile-price';
-      row.style.cssText = 'position:absolute;top:' + (homeDlc ? 'calc(100% + 3px)' : top + 'px') + ';left:' + left + 'px;width:' + (homeDlc ? '100%' : width + 'px') + ';height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
+      row.style.cssText = 'position:absolute;top:' + (belowCard ? 'calc(100% + 3px)' : top + 'px') + ';left:' + left + 'px;width:' + (belowCard ? '100%' : width + 'px') + ';height:26px;box-sizing:border-box;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;background:#162634;color:#dce6ed;padding:3px 6px;font:12px/20px Arial,sans-serif;pointer-events:none;z-index:2';
       row.textContent = !value ? 'AKS: betöltés…' : !value.success ? 'AKS: ' + ({pending:'szerveres lekérés folyamatban',server:'szerverkapcsolati hiba',server_version:'árszerver-frissítés szükséges',backend:'Decky-kapcsolati hiba',connection:'kapcsolati hiba',rate_limit:'várakozás',http:'szerverhiba',steam:'Steam-adathiba',match:'nem azonosítható',format:'adatformátum-hiba'}[value.error_code] || 'nem elérhető') : value.not_found ? (value.match_status === 'ambiguous' ? 'AKS: több azonos nevű találat' : 'AKS: nincs a katalógusban') : offer ? 'AKS: ' + offer.price.toFixed(2) + ' € ∙ ' + offer.merchant : 'AKS: nincs ajánlat';
       if (value?.retry_at && !value.success) { row.dataset.dpbRetryAt = String(value.retry_at); row.dataset.dpbLabel = row.textContent; }
       if (value?.provider === 'gg') {

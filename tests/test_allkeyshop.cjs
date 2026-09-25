@@ -27,14 +27,14 @@ test('price renderer serializes untrusted text and guards page identity',()=>{
  assert.doesNotMatch(script,/<img/);assert.match(script,/textContent/);assert.match(script,/pageId !== appId/);assert.doesNotMatch(script,/innerHTML/);
 });
 
-test('web tile price stays on artwork without moving wishlist rows or hiding Steam price',()=>{
+test('wishlist price stays below the row regardless of Steam price placement',()=>{
  const f=fixture(),url='https://store.steampowered.com/wishlist/';
  const cover={left:10,top:20,right:150,bottom:120,width:140,height:100,getBoundingClientRect(){return this;}};
  const card={left:10,top:20,right:310,bottom:170,width:300,height:150};
  function render(steamPrice) {
   const values=new Map(),style={cssText:'',getPropertyValue:key=>values.get(key)||'',getPropertyPriority:()=>'',
    setProperty:(key,value)=>values.set(key,value),removeProperty:key=>values.delete(key)};
-  const host={style,offsetWidth:300,closest:()=>null,matches:()=>true,contains:()=>false,
+  const host={style,offsetWidth:300,closest:selector=>selector.startsWith('.wishlist_row,')?host:null,matches:()=>true,contains:()=>false,
    getAttribute:key=>key==='href'?'https://store.steampowered.com/app/10/':'',
    getBoundingClientRect:()=>card,querySelector:selector=>selector.startsWith('img')?cover:null,
    querySelectorAll:selector=>selector.startsWith('img')?[cover]:selector.startsWith('.discount_block')?[{getBoundingClientRect:()=>steamPrice}]:[],
@@ -45,14 +45,36 @@ test('web tile price stays on artwork without moving wishlist rows or hiding Ste
    getComputedStyle:()=>({position:'static',visibility:'visible',backgroundImage:'none'}),setInterval,clearInterval};
   vm.runInNewContext(f.api.buildTilePricesScript(url,{'10':{success:true,offers:[{price:3.97,merchant:'Kinguin'}]}}),context);
   assert.equal(style.getPropertyValue('padding-bottom'),'');
-  assert.equal(style.getPropertyValue('margin-bottom'),'');
+  assert.equal(style.getPropertyValue('margin-bottom'),'32px');
   assert.equal(style.getPropertyValue('overflow'),'');
   assert.equal(host.row.textContent,'AKS: 3.97 € ∙ Kinguin');
-  assert.match(host.row.style.cssText,/width:140px/);
+  assert.match(host.row.style.cssText,/top:calc\(100% \+ 3px\);left:0px;width:100%/);
   return host.row.style.cssText;
  }
- assert.match(render({left:210,right:290,top:140,bottom:165,width:80,height:25}),/top:74px/);
- assert.match(render({left:10,right:100,top:92,bottom:120,width:90,height:28}),/top:46px/);
+ assert.match(render({left:210,right:290,top:140,bottom:165,width:80,height:25}),/top:calc\(100% \+ 3px\)/);
+ assert.match(render({left:10,right:100,top:92,bottom:120,width:90,height:28}),/top:calc\(100% \+ 3px\)/);
+});
+
+test('home capsule price attaches below the whole card instead of its image link',()=>{
+ const f=fixture(),url='https://store.steampowered.com/';
+ const values=new Map(),style={getPropertyValue:key=>values.get(key)||'',getPropertyPriority:()=>'',
+  setProperty:(key,value)=>values.set(key,value),removeProperty:key=>values.delete(key)};
+ const card={style,offsetWidth:240,getBoundingClientRect:()=>({left:40,right:280,top:100,bottom:260,width:240,height:160}),
+  appendChild(row){this.row=row;}};
+ const link={closest:selector=>selector.startsWith('.wishlist_row,')?card:null,
+  matches:()=>true,contains:()=>false,getAttribute:key=>key==='href'?'https://store.steampowered.com/app/10/':'',
+  getBoundingClientRect:()=>({left:40,right:280,top:100,bottom:225,width:240,height:125}),
+  querySelector:selector=>selector.startsWith('img')?{}:null};
+ const context={location:{href:url,pathname:'/'},URL,innerWidth:1280,innerHeight:800,window:{},Date,
+  document:{body:{},querySelectorAll:selector=>selector.startsWith('a[href')?[link]:[],
+   createElement:()=>({style:{cssText:''},dataset:{}})},
+  getComputedStyle:()=>({position:'static',visibility:'visible',backgroundImage:'none',overflow:'hidden',marginBottom:'0px'}),
+  setInterval,clearInterval};
+ vm.runInNewContext(f.api.buildTilePricesScript(url,{'10':{success:true,offers:[{price:4.5,merchant:'Eneba'}]}}),context);
+ assert.equal(card.row.textContent,'AKS: 4.50 € ∙ Eneba');
+ assert.match(card.row.style.cssText,/top:calc\(100% \+ 3px\);left:0px;width:100%/);
+ assert.equal(style.getPropertyValue('margin-bottom'),'32px');
+ assert.equal(style.getPropertyValue('overflow'),'visible');
 });
 
 test('homepage featured prices sit beside the Steam price, below the artwork',()=>{
@@ -86,7 +108,7 @@ test('home DLC tile price stays below the entire card while Steam price loads an
  let scroll=0;
  const section={getBoundingClientRect:()=>({top:350-scroll,bottom:755-scroll}),
   querySelector:()=>({getBoundingClientRect:()=>({bottom:475-scroll})})};
- const host={style,offsetWidth:420,closest:selector=>selector==='.sale_capsule'?host:
+ const host={style,offsetWidth:420,closest:selector=>selector.startsWith('.wishlist_row,')?host:
   selector==='#dlc_tier,.home_discounts_block.dlc_block'?section:
   selector==='.home_discounts_block.dlc_block'?section:null,matches:()=>true,contains:()=>false,
   getAttribute:key=>key==='href'?'https://store.steampowered.com/app/2780810/':'',
