@@ -158,3 +158,7 @@ A főoldali kiemelt ajánlatok AKS/GG ársávja a Steam-ár melletti szabad hely
 ## 1.0.99: pontosabb AKS-címpárosítás
 
 Ha nincs pontos katalógustalálat, a Steam-cím önálló római sorszámát arab számként is ellenőrizzük, például Hades II → Hades 2. A kötőjelek és a legtöbb más írásjel eddig is kimaradt az összehasonlításból; az aláhúzásos címekhez is van tartalék egyezés. A korábban mentett negatív találatokat az érintett címeknél egyszer újraellenőrizzük. Az eredmény továbbra is csak egyértelmű katalógusegyezésnél jelenik meg. A Decky plugint és a saját Ubuntu árszervert is frissíteni kell.
+
+## 1.0.100: DLC-ajánlatok az AKS áradatában
+
+Az AKS által „DLC” kiadásként jelölt Steam-kulcs és Gift ajánlatokat is figyelembe vesszük, de csak akkor, ha a Steam az adott AppID-t DLC-ként azonosítja. Így például az Euro Truck Simulator 2 - Nordic Horizons nem marad ajánlat nélkül a kiadás szűrése miatt. A korábbi, hibásan üres DLC-árgyorsítótár egyszer újraépül. A Decky plugint és a saját Ubuntu árszervert is frissíteni kell.

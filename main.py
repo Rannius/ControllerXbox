@@ -442,7 +442,8 @@ class Plugin:
                     "checked_at": entry["checked_at"], "offers": []}
         history = entry.get("source") == "aks_history"
         filtering: Dict[str, int] = {}
-        offers = (self._aks_history_filter(entry["data"], self._price_preferences, filtering) if history
+        offers = (self._aks_history_filter(entry["data"], self._price_preferences, filtering,
+                                          entry.get("steam_type") == "dlc") if history
                   else self._aks_filter(entry["data"], self._price_preferences))
         return {"success": True, "provider": "aks", "offers": offers[:1], "matched_offers": len(offers),
                 "filtering": filtering,
@@ -465,6 +466,12 @@ class Plugin:
                      or re.search(r"[^\w\s]", entry["title"]))):
             return False
         data = entry.get("data")
+        # Older cached DLC results were filtered with the base-game rules.
+        if (entry.get("source") == "aks_history" and "steam_type" not in entry
+                and isinstance(data, dict) and isinstance(data.get("editions"), dict)
+                and any(isinstance(item, dict) and item.get("name") == "DLC"
+                        for item in data["editions"].values())):
+            return False
         valid_url = isinstance(entry.get("url"), str) and bool(re.fullmatch(
             r"https://www\.allkeyshop\.com/blog/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+/", entry["url"]))
         return ((valid_url or (entry.get("source") == "aks_history" and entry.get("url") == "https://www.allkeyshop.com/"))
@@ -531,6 +538,7 @@ class Plugin:
         return (isinstance(key, str) and key.isdigit() and 0 < int(key) < 10000000000
                 and isinstance(value, dict) and value.get("app_id") == key
                 and isinstance(value.get("title"), str) and 0 < len(value["title"]) <= 200
+                and ("type" not in value or isinstance(value["type"], str) and len(value["type"]) <= 32)
                 and type(value.get("is_free")) is bool
                 and (value.get("coming_soon") is None or type(value["coming_soon"]) is bool)
                 and type(value.get("checked_at")) in (int, float)
@@ -1300,9 +1308,9 @@ class Plugin:
                    and str(item["data"].get("steam_appid", "")) == app_id]
         return matches[0] if len(matches) == 1 else {}
 
-    def _fetch_price_metadata(self, app_id: str) -> Dict[str, Any]:
+    def _fetch_price_metadata(self, app_id: str, require_type: bool = False) -> Dict[str, Any]:
         cached = self._price_metadata.get(app_id)
-        if self._valid_price_metadata(app_id, cached, time.time()):
+        if self._valid_price_metadata(app_id, cached, time.time()) and (not require_type or "type" in cached):
             return cached
         request = urllib.request.Request(STORE_URL.format(app_id=app_id),
                                          headers={"User-Agent": "ControllerXbox Decky Plugin/1.0"})
@@ -1319,7 +1327,9 @@ class Plugin:
             release = data.get("release_date")
             coming_soon = release.get("coming_soon") if isinstance(release, dict) else None
             result = {"app_id": app_id, "title": title, "is_free": data.get("is_free") is True,
-                      "coming_soon": coming_soon if type(coming_soon) is bool else None, "checked_at": time.time()}
+                      "coming_soon": coming_soon if type(coming_soon) is bool else None,
+                      "type": data.get("type") if isinstance(data.get("type"), str) else "",
+                      "checked_at": time.time()}
         except (OSError, ValueError, TypeError, AttributeError) as error:
             failure = ValueError("A Steam-játék neve most nem kérdezhető le.")
             failure.price_stage = "Steam-adatok"
@@ -1449,7 +1459,8 @@ class Plugin:
 
     @classmethod
     def _aks_history_filter(cls, data: Dict[str, Any], preferences: Dict[str, Any],
-                            filtering: Optional[Dict[str, int]] = None) -> List[Dict[str, Any]]:
+                            filtering: Optional[Dict[str, int]] = None,
+                            is_dlc: bool = False) -> List[Dict[str, Any]]:
         # Labels come from the API's region map, not from the merchant name.
         # Bare Steam is the unqualified/global group, not a per-country activation guarantee.
         regions = {"steam": "Steam-kulcs · Global (AKS: Steam)", "steam global": "Steam-kulcs · Global",
@@ -1460,6 +1471,8 @@ class Plugin:
                    "steam gift row": "Steam Gift · ROW"}
         allowed = {name.casefold() for name in preferences["merchants"]}
         restricted = preferences.get("restrict_merchants", bool(allowed))
+        allowed_editions = ("Standard", "Standard Edition", "Early Access", "DLC") if is_dlc else (
+            "Standard", "Standard Edition", "Early Access")
         counts = {key: 0 for key in ("invalid", "region", "edition", "merchant", "gift", "price", "steam", "accepted")}
         counts["total"] = len(data["prices"])
         offers = []
@@ -1477,7 +1490,7 @@ class Plugin:
             name = merchant.get("name")
             reason = ("steam" if isinstance(name, str) and name.strip().casefold() == "steam" else
                       "region" if region_name not in regions else
-                      "edition" if edition.get("name") not in ("Standard", "Standard Edition", "Early Access") else
+                      "edition" if edition.get("name") not in allowed_editions else
                       "invalid" if not isinstance(name, str) or not name or len(name) > 80 else
                       "gift" if "gift" in region_name and not preferences["allow_gifts"] else
                       "merchant" if restricted and name.casefold() not in allowed else "")
@@ -1495,7 +1508,7 @@ class Plugin:
             price = round(price, 2)
             coupon = row.get("best_discount_code") if kind == "discount" else ""
             offers.append({"merchant": name, "price": price, "kind": regions[region_name],
-                           "edition": "Early Access" if edition["name"] == "Early Access" else "Standard",
+                           "edition": edition["name"] if edition["name"] in ("Early Access", "DLC") else "Standard",
                            "coupon": coupon[:80] if isinstance(coupon, str) else "", "price_kind": kind,
                            "source_updated_at": row["end"]})
         counts["accepted"] = len(offers)
@@ -1546,8 +1559,15 @@ class Plugin:
                     continue
                 raise
             data = self._aks_history_data(payload)
+            if ("type" not in metadata and any(isinstance(item, dict) and item.get("name") == "DLC"
+                                                for item in data["editions"].values())):
+                metadata = self._fetch_price_metadata(app_id, require_type=True)
+                if self._aks_title(metadata["title"]) != self._aks_title(title):
+                    self._aks_matches.pop(app_id, None)
+                    raise ValueError("A Steam-cím megváltozott; az AKS-párosítást újra kell ellenőrizni.")
             return {"title": title, "url": "https://www.allkeyshop.com/", "data": data,
                     "history_version": AKS_HISTORY_VERSION,
+                    "steam_type": metadata.get("type", ""),
                     "source": "aks_history", "source_updated_at": max((row["end"] for row in data["prices"]), default=""),
                     "checked_at": time.time()}
         raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")

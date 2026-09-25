@@ -775,6 +775,35 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(counts, {"total": 5, "accepted": 0, "edition": 1, "region": 1,
                                   "merchant": 3, "gift": 0, "price": 0, "invalid": 0, "steam": 0})
 
+    def test_nordic_horizons_dlc_prices_require_matching_steam_type(self):
+        payload = self.history_fixture()
+        payload["editions"]["1"]["name"] = "DLC"
+        data = self.plugin._aks_history_data(payload)
+        prefs = {"merchants": ["Kinguin"], "restrict_merchants": True, "allow_gifts": True}
+        self.assertEqual(self.plugin._aks_history_filter(data, prefs), [])
+        offers = self.plugin._aks_history_filter(data, prefs, is_dlc=True)
+        self.assertEqual([(offer["merchant"], offer["price"], offer["edition"]) for offer in offers],
+                         [("Kinguin", 10, "DLC")])
+        entry = {"title": "Euro Truck Simulator 2 - Nordic Horizons", "url": "https://www.allkeyshop.com/",
+                 "source": "aks_history", "history_version": 2, "title_variants_checked": True,
+                 "checked_at": time.time(), "data": data}
+        self.assertFalse(self.plugin._valid_price_entry(entry))
+        self.plugin._price_preferences.update(prefs)
+        self.assertEqual(self.plugin._price_result({**entry, "steam_type": "game"})["offers"], [])
+        self.assertEqual(self.plugin._price_result({**entry, "steam_type": "dlc"})["offers"][0]["edition"], "DLC")
+
+        app_id = "2780810"
+        legacy = self.price_metadata(app_id, entry["title"])
+        self.plugin._aks_catalog = {self.plugin._aks_title(entry["title"]): "201015"}
+        self.plugin._aks_catalog_checked_at = time.time()
+        with patch.object(self.plugin, "_fetch_price_metadata", side_effect=[legacy, {**legacy, "type": "dlc"}]) as steam, \
+             patch.object(self.plugin, "_aks_read", return_value=json.dumps(payload)) as aks:
+            refreshed = self.plugin._fetch_aks_game(app_id)
+        self.assertEqual(steam.call_count, 2)
+        self.assertEqual(steam.call_args.kwargs, {"require_type": True})
+        self.assertIn("normalised_name=201015", aks.call_args.args[0])
+        self.assertEqual(refreshed["steam_type"], "dlc")
+
     def price_metadata(self, app_id="10", title="Example"):
         return {"app_id": app_id, "title": title, "is_free": False, "coming_soon": False, "checked_at": time.time()}
 
