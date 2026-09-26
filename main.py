@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 4
+INSTALLED_VERSION_CACHE_SCHEMA = 5
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -390,6 +390,72 @@ class InstalledGameVersionScanner:
         return version if version != "1.0.0" else ""  # Unreal's untouched default.
 
     @classmethod
+    def _unity_global_version(cls, data_dir: Path) -> str:
+        """Extract bundleVersion from Unity's globalgamemanagers.
+
+        The file is a Unity serialized archive.  Its header exposes the
+        format version and the Unity engine version string.  The first
+        serialized object is PlayerSettings, which contains the
+        ``bundleVersion`` field set by the developer.
+
+        The method reads a bounded prefix of the file, locates all
+        version-like ASCII strings after the engine version, and returns
+        the first candidate that passes ``_clean_version``.  Engine
+        version strings (containing a letter like ``2021.3.14f1``) are
+        skipped automatically.
+        """
+        path = data_dir / "globalgamemanagers"
+        try:
+            if not cls._inside(data_dir.parent, path) or not path.is_file():
+                return ""
+            size = path.stat().st_size
+            if not 0 < size <= 8 * 1024 * 1024:
+                return ""
+            with path.open("rb") as stream:
+                chunk = stream.read(min(size, 128 * 1024))
+        except OSError:
+            return ""
+        if len(chunk) < 20:
+            return ""
+        # Parse the serialized file header to find the Unity engine
+        # version string so we can exclude it from candidate matches.
+        try:
+            format_version = struct.unpack(">I", chunk[8:12])[0]
+        except struct.error:
+            return ""
+        if format_version < 9 or format_version > 40:
+            return ""
+        # Locate the null-terminated engine version string in the header.
+        if format_version >= 22:
+            # Large-file header: 5×4 bytes fixed, then 4×8 bytes.
+            engine_offset = 48
+        elif format_version >= 17:
+            engine_offset = 20
+        else:
+            engine_offset = 20
+        end = chunk.find(b"\x00", engine_offset, engine_offset + 64)
+        if end < 0:
+            return ""
+        engine_version = chunk[engine_offset:end].decode("ascii", errors="replace")
+        # Scan the data portion for version-like strings.  The
+        # bundleVersion is a length-prefixed UTF-8 string somewhere in
+        # the PlayerSettings block, which is typically the first object.
+        search_start = end + 1
+        for match in re.finditer(rb"(\d+(?:\.\d+){1,3})", chunk[search_start:]):
+            candidate = match.group(1).decode("ascii")
+            # Skip the Unity engine version itself and its sub-parts.
+            if candidate in engine_version or engine_version.startswith(candidate):
+                continue
+            # Skip if followed by a letter (engine build tag like "f1").
+            abs_end = search_start + match.end()
+            if abs_end < len(chunk) and chr(chunk[abs_end]).isalpha():
+                continue
+            version = cls._clean_version(candidate)
+            if version and version != "1.0.0.0":
+                return version
+        return ""
+
+    @classmethod
     def _engine_version(cls, root: Path) -> Tuple[str, str]:
         try:
             children = list(root.iterdir())
@@ -416,6 +482,9 @@ class InstalledGameVersionScanner:
                                 return version, "project"
                 except OSError:
                     pass
+                version = cls._unity_global_version(child)
+                if version:
+                    return version, "project"
 
         version = cls._godot_version(root)
         if version:
