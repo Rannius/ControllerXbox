@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 7
+INSTALLED_VERSION_CACHE_SCHEMA = 8
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -482,19 +482,24 @@ class InstalledGameVersionScanner:
                 if not 0 < size <= 128 * 1024 * 1024:
                     continue
                 content = exe.read_bytes()
-                # Find ProductVersion or FileVersion in UTF-16LE resources
                 for key in (b"P\x00r\x00o\x00d\x00u\x00c\x00t\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00",
                             b"F\x00i\x00l\x00e\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00"):
-                    pos = content.rfind(key)
-                    if pos > 0:
+                    pos = 0
+                    while True:
+                        pos = content.find(key, pos)
+                        if pos < 0:
+                            break
                         start = pos + len(key)
-                        while start < len(content) and content[start:start+2] == b"\x00\x00":
+                        pos = start  # advance for next iteration
+                        while start + 1 < len(content) and content[start:start+2] == b"\x00\x00":
                             start += 2
-                        end = content.find(b"\x00\x00\x00", start)
+                        end = start
+                        while end + 1 < len(content) and content[end:end+2] != b"\x00\x00":
+                            end += 2
                         if end > start:
                             val = content[start:end].decode("utf-16le", errors="ignore").strip()
                             version = cls._clean_version(val)
-                            if version and version not in ("1.0", "1.0.0", "1.0.0.0"):
+                            if version and version not in ("1.0", "1.0.0", "1.0.0.0", "2019.4.32.12282"):
                                 return version
             except OSError:
                 pass
