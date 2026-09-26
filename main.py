@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 6
+INSTALLED_VERSION_CACHE_SCHEMA = 7
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -457,11 +457,22 @@ class InstalledGameVersionScanner:
 
     @classmethod
     def _executable_version(cls, root: Path) -> str:
-        try:
-            exes = [path for path in root.iterdir() if path.suffix.lower() == ".exe"]
-        except OSError:
-            return ""
-        if len(exes) > 16:
+        exes: List[Path] = []
+        def _find_exes(current: Path, depth: int) -> None:
+            if depth > 4 or len(exes) >= 32:
+                return
+            try:
+                for child in current.iterdir():
+                    if not cls._inside(root, child):
+                        continue
+                    if child.is_file() and child.suffix.lower() == ".exe":
+                        exes.append(child)
+                    elif child.is_dir() and child.name.lower() not in ("engine", "_commonredist", "directx", "vcredist", "dotnet"):
+                        _find_exes(child, depth + 1)
+            except OSError:
+                pass
+        _find_exes(root, 1)
+        if not exes:
             return ""
         for exe in sorted(exes, key=lambda x: x.stat().st_size, reverse=True):
             if not cls._inside(root, exe) or not exe.is_file():

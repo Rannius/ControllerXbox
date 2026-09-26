@@ -109,8 +109,7 @@ export function InstalledBuildLabel({ appId, installedHint }: { appId: number; i
   const build = result.id === id ? result.build : cache.get(id)?.build ?? "";
   const version = result.id === id ? result.version : cache.get(id)?.version ?? "";
   const source = result.id === id ? result.source : cache.get(id)?.source ?? "";
-  const display = version ? (source === "project" ? "Projektverzió: " : "Játékverzió: ") + version
-    : build ? "Build: " + build : "";
+  const display = version ? version : build ? "Build: " + build : "";
   const resolved = result.id === id ? result.resolved : cache.has(id);
   const active = view.enabled && !view.inStore && installedHint !== false;
   const showArea = active && (Boolean(display) || (installedHint === true && !resolved));
