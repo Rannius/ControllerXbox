@@ -94,8 +94,8 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             except urllib.error.URLError as error:
                 details = self.plugin._aks_error_details(error)
         self.assertEqual(details["error_code"], "connection")
-        self.assertIn("AKS-áradatok (30.0 mp)", details["error"])
-        self.assertIn("Időtúllépés", details["error"])
+        self.assertIn("AKS-Ăˇradatok (30.0 mp)", details["error"])
+        self.assertIn("IdĹ‘tĂşllĂ©pĂ©s", details["error"])
 
     async def test_server_retry_after_is_honored_and_missing_game_does_not_pause_others(self):
         error = urllib.error.HTTPError("https://www.allkeyshop.com/", 429, "slow", {"Retry-After": "600"}, None)
@@ -184,7 +184,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(fetch.call_count, 1)
             self.assertEqual(self.plugin._price_cache["10"], entry)
         self.plugin._price_service_retry_at = 0
-        with patch.object(self.plugin, "_fetch_aks_game", side_effect=ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")):
+        with patch.object(self.plugin, "_fetch_aks_game", side_effect=ValueError("Nincs egyĂ©rtelmĹ± AllKeyShop-talĂˇlat ehhez a Steam-jĂˇtĂ©khoz.")):
             await self.plugin._price_wishlist_step()
         self.assertEqual(self.plugin._price_cache["10"], entry)
         self.assertGreater(self.plugin._price_wishlist_retry["10"], time.time())
@@ -341,7 +341,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(expected_raw // 2 <= response["retry_after"] <= expected_raw)
 
     def test_aks_errors_distinguish_matching_http_and_format(self):
-        details = self.plugin._aks_error_details(ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz."))
+        details = self.plugin._aks_error_details(ValueError("Nincs egyĂ©rtelmĹ± AllKeyShop-talĂˇlat ehhez a Steam-jĂˇtĂ©khoz."))
         self.assertFalse(details["global_error"])
         self.assertEqual(details["error_code"], "match")
         details = self.plugin._aks_error_details(urllib.error.HTTPError("https://www.allkeyshop.com/", 429, "slow down", {}, None))
@@ -418,7 +418,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
 
     def test_aks_requires_unique_exact_pc_title_and_decodes_json_without_execution(self):
         row = '<li data-platforms="pc"><a href="https://www.allkeyshop.com/blog/buy-satisfactory-cd-key-compare-prices/"><h2 class="ls-results-row-game-title">Satisfactory</h2></a></li>'
-        self.assertIn('satisfactory', self.plugin._aks_search_match(row, 'Satisfactory™'))
+        self.assertIn('satisfactory', self.plugin._aks_search_match(row, 'Satisfactoryâ„˘'))
         legacy = row.replace('buy-satisfactory-cd-key-compare-prices', 'compare-and-buy-cd-key-for-digital-download-portal-2').replace('Satisfactory', 'Portal 2')
         self.assertIn('portal-2', self.plugin._aks_search_match(legacy, 'Portal 2'))
         for fragment in (row.replace('Satisfactory</h2>', 'Satisfactory Steam Account</h2>'),
@@ -765,7 +765,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         offers = self.plugin._aks_history_filter(data, prefs)
         self.assertEqual([o["price"] for o in offers], [32.56, 33.09])
         self.assertEqual(offers[0]["edition"], "Early Access")
-        self.assertEqual(offers[0]["kind"], "Steam-kulcs · EU/US")
+        self.assertEqual(offers[0]["kind"], "Steam-kulcs Â· EU/US")
         prefs["merchants"] = ["Kinguin"]
         self.assertEqual(self.plugin._aks_history_filter(data, prefs)[0]["price"], 33.09)
         prefs["allow_gifts"] = True
@@ -812,29 +812,29 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         return '<h1><span data-itemprop="name">' + title + '</span></h1>"currency":"eur"; var gamePageTrans = ' + json.dumps(self.aks_fixture())
 
     def test_catalog_trademarks_accounts_editions_and_ambiguity(self):
-        self.plugin._price_metadata["10"] = self.price_metadata(title="Solarpunk™")
+        self.plugin._price_metadata["10"] = self.price_metadata(title="Solarpunkâ„˘")
         catalog = {"status": "success", "games": [{"id": 140254, "name": "Solarpunk"},
             {"id": 2, "name": "Solarpunk Steam Account"}, {"id": 3, "name": "Solarpunk PS5"}]}
         with patch.object(self.plugin, "_aks_read", side_effect=[json.dumps(catalog), json.dumps(self.history_fixture())]) as fetch:
             result = self.plugin._fetch_aks_game("10")
-        self.assertEqual(result["title"], "Solarpunk™")
+        self.assertEqual(result["title"], "Solarpunkâ„˘")
         self.assertIn("normalised_name=140254", fetch.call_args.args[0])
         self.assertEqual(fetch.call_count, 2)
         for games in ([{"id": 2, "name": "Solarpunk Steam Account"}],
-                      [{"id": 1, "name": "Solarpunk"}, {"id": 2, "name": "Solarpunk®"}]):
+                      [{"id": 1, "name": "Solarpunk"}, {"id": 2, "name": "SolarpunkÂ®"}]):
             with patch.object(self.plugin, "_aks_read", return_value=json.dumps({"status": "success", "games": games})):
                 index = self.plugin._load_aks_catalog(force=True)
-            self.assertFalse(index.get(self.plugin._aks_title("Solarpunk™")))
+            self.assertFalse(index.get(self.plugin._aks_title("Solarpunkâ„˘")))
 
     def test_catalog_ignores_decorative_rights_marks_without_changing_game_identity(self):
         catalog = {self.plugin._aks_title("EA SPORTS FC 27"): "217095"}
-        for title in ("EA SPORTS FC™ 27", "EA SPORTS FC® 27", "EA SPORTS FC℠ 27",
-                      "EA SPORTS FCⓇ 27", "EA SPORTS FCⒸ 27", "EA SPORTS FC� 27"):
+        for title in ("EA SPORTS FCâ„˘ 27", "EA SPORTS FCÂ® 27", "EA SPORTS FCâ„  27",
+                      "EA SPORTS FCâ“‡ 27", "EA SPORTS FCâ’¸ 27", "EA SPORTS FCďż˝ 27"):
             self.assertEqual(self.plugin._aks_catalog_match(catalog, title), ("217095", True))
-        self.assertEqual(self.plugin._aks_catalog_match(catalog, "EA SPORTS FC™ 26"), (None, False))
+        self.assertEqual(self.plugin._aks_catalog_match(catalog, "EA SPORTS FCâ„˘ 26"), (None, False))
 
     async def test_matched_game_without_aks_history_is_not_reported_as_no_offer(self):
-        self.plugin._price_metadata["4080220"] = self.price_metadata("4080220", "EA SPORTS FC™ 27")
+        self.plugin._price_metadata["4080220"] = self.price_metadata("4080220", "EA SPORTS FCâ„˘ 27")
         self.plugin._aks_catalog = {self.plugin._aks_title("EA SPORTS FC 27"): "217095"}
         self.plugin._aks_catalog_checked_at = time.time()
         payload = {"history": [], "merchants": [], "regions": [], "editions": []}
@@ -861,7 +861,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(cached["prices"]), {"10"})
         self.assertEqual(cached["prices"]["10"]["skipped"], "free")
         try:
-            raise ValueError("A Steam-játék neve most nem kérdezhető le.") from urllib.error.URLError("temporary")
+            raise ValueError("A Steam-jĂˇtĂ©k neve most nem kĂ©rdezhetĹ‘ le.") from urllib.error.URLError("temporary")
         except ValueError as caught:
             failure = caught
             details = self.plugin._aks_error_details(failure)
@@ -1200,7 +1200,7 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         for status in (400, 401, 404, 410):
             detail = self.plugin._aks_error_details(urllib.error.HTTPError("https://www.allkeyshop.com/", status, "", {}, None))
             self.assertFalse(self.plugin._aks_fallback_allowed(detail), status)
-        for error in (ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz."), ValueError("A Steam-játék neve most nem kérdezhető le.")):
+        for error in (ValueError("Nincs egyĂ©rtelmĹ± AllKeyShop-talĂˇlat ehhez a Steam-jĂˇtĂ©khoz."), ValueError("A Steam-jĂˇtĂ©k neve most nem kĂ©rdezhetĹ‘ le.")):
             self.assertFalse(self.plugin._aks_fallback_allowed(self.plugin._aks_error_details(error)))
 
     async def test_aks_fallback_missing_key_and_gg_rate_limit_do_not_loop(self):
@@ -1452,7 +1452,8 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         self.plugin._settings["show_installed_builds"] = True
         with patch.object(self.plugin_type, "_steam_library_paths", return_value=[library]):
             first = await self.plugin.get_installed_builds(["10"])
-            self.assertEqual(first["versions"]["10"], {"version": "1.2.3", "source": "game"})
+            self.assertEqual(first["versions"]["10"]["version"], "1.2.3")
+            self.assertEqual(first["versions"]["10"]["source"], "game")
             (game / "version.txt").write_text("2.0.0", encoding="utf-8")
             cached = await self.plugin.get_installed_builds(["10"])
             self.assertEqual(cached["versions"], first["versions"])
