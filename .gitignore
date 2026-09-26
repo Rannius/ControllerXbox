@@ -4,3 +4,4 @@ out/
 backend/out/
 __pycache__/
 *.py[cod]
+native/version-helper/target/

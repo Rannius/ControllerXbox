@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 2
+INSTALLED_VERSION_CACHE_SCHEMA = 3
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -169,6 +169,35 @@ class InstalledGameVersionScanner:
     """Read bounded, local version clues without starting the game or Proton."""
 
     VERSION = re.compile(r"v?(\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?)\Z", re.IGNORECASE)
+    # Filled by the release builder, preserving Decky's fixed ZIP layout.
+    # Source: native/version-helper (MIT); statically linked for SteamOS x86_64.
+    OODLE_HELPER_SHA256 = ""
+    OODLE_HELPER_ZLIB_HEX = ""
+
+    @classmethod
+    def _oodle_decompress(cls, content: bytes, size: int) -> Optional[bytes]:
+        if (not 0 < size <= 64 * 1024 or not 0 < len(content) <= 128 * 1024
+                or os.name != "posix" or os.uname().machine != "x86_64"
+                or not cls.OODLE_HELPER_ZLIB_HEX or zipfile.zlib is None):
+            return None
+        # Only a bounded block is sent over stdin, never a game filename.
+        # A decoder crash/timeout cannot take down Decky's Python backend.
+        try:
+            binary = zipfile.zlib.decompress(bytes.fromhex(cls.OODLE_HELPER_ZLIB_HEX))
+            if hashlib.sha256(binary).hexdigest() != cls.OODLE_HELPER_SHA256:
+                return None
+            with tempfile.TemporaryDirectory(prefix="deck-play-version-") as directory:
+                helper = Path(directory) / "decompress"
+                helper.write_bytes(binary)
+                helper.chmod(0o700)
+                result = subprocess.run([str(helper)], input=struct.pack("<I", size) + content,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                        timeout=3, check=False, env={"LANG": "C"})
+                if result.returncode == 0 and len(result.stdout) == size:
+                    return result.stdout
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        return None
 
     @classmethod
     def _clean_version(cls, value: Any) -> str:
@@ -223,8 +252,8 @@ class InstalledGameVersionScanner:
                 return version, "game"
         return "", ""
 
-    @staticmethod
-    def _pak_config(path: Path, wanted: str) -> Optional[bytes]:
+    @classmethod
+    def _pak_config(cls, path: Path, wanted: str) -> Optional[bytes]:
         """Read one INI from a modern, unencrypted PAK; never unpack game assets.
 
         PAK v10/v11: footer -> directory index -> encoded entry -> file header.
@@ -261,7 +290,7 @@ class InstalledGameVersionScanner:
                 footer_start = file_size - 221
 
                 def read_at(offset: int, size: int) -> bytes:
-                    if offset < 0 or size < 0 or size > 8 * 1024 * 1024 or offset + size > file_size:
+                    if offset < 0 or size < 0 or size > 32 * 1024 * 1024 or offset + size > file_size:
                         raise ValueError("Invalid PAK bounds")
                     stream.seek(offset)
                     data = stream.read(size)
@@ -281,7 +310,7 @@ class InstalledGameVersionScanner:
                 index = Cursor(index_bytes)
                 mount = index.string()
                 count = index.number("I")
-                if count > 200000:
+                if count > 500000:
                     return None
                 index.take(8)  # path-hash seed
                 if index.number("I"):
@@ -299,7 +328,7 @@ class InstalledGameVersionScanner:
                     return None
                 directory = Cursor(directory_bytes)
                 directory_count = directory.number("I")
-                if directory_count > 50000:
+                if directory_count > 100000:
                     return None
                 location = None
                 seen = 0
@@ -307,7 +336,7 @@ class InstalledGameVersionScanner:
                     folder = directory.string()
                     files = directory.number("I")
                     seen += files
-                    if seen > 200000:
+                    if seen > 500000:
                         return None
                     for _ in range(files):
                         name, entry_location = directory.string(), directory.number("i")
@@ -349,7 +378,7 @@ class InstalledGameVersionScanner:
                     blocks = [(header.number("Q"), header.number("Q")) for _ in range(block_count)]
                 if header.number("B") != 0:  # encrypted or deleted
                     return None
-                header.take(4)
+                block_size = header.number("I")
                 if offset + header.offset + compressed > index_offset:
                     return None
                 if not method:
@@ -357,18 +386,26 @@ class InstalledGameVersionScanner:
                 if not 1 <= method <= 5:
                     return None
                 algorithm = footer[61 + (method - 1) * 32:61 + method * 32].rstrip(b"\0").lower()
-                if algorithm not in (b"zlib", b"gzip") or zipfile.zlib is None:
+                if algorithm not in (b"zlib", b"gzip", b"oodle") or zipfile.zlib is None:
+                    return None
+                if algorithm == b"oodle" and not 0 < block_size <= 256 * 1024:
                     return None
                 output = bytearray()
                 previous_end = header.offset
                 for block_start, block_end in blocks:
                     if block_start != previous_end or not block_start < block_end <= header.offset + compressed:
                         return None
-                    decoder = zipfile.zlib.decompressobj(31 if algorithm == b"gzip" else 15)
-                    output.extend(decoder.decompress(read_at(offset + block_start, block_end - block_start),
-                                                     uncompressed - len(output) + 1))
-                    if len(output) > uncompressed or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
-                        return None
+                    block = read_at(offset + block_start, block_end - block_start)
+                    if algorithm == b"oodle":
+                        decoded = cls._oodle_decompress(block, min(block_size, uncompressed - len(output)))
+                        if decoded is None:
+                            return None
+                        output.extend(decoded)
+                    else:
+                        decoder = zipfile.zlib.decompressobj(31 if algorithm == b"gzip" else 15)
+                        output.extend(decoder.decompress(block, uncompressed - len(output) + 1))
+                        if len(output) > uncompressed or not decoder.eof or decoder.unused_data or decoder.unconsumed_tail:
+                            return None
                     previous_end = block_end
                 return bytes(output) if len(output) == uncompressed and previous_end == header.offset + compressed else None
         except (OSError, ValueError, struct.error, AttributeError):

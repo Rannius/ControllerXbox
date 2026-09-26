@@ -13,7 +13,9 @@ import os
 from pathlib import Path
 import re
 import struct
+import subprocess
 import sys
+import tempfile
 from typing import Any, Dict, List, Optional, Set, Tuple
 import zipfile
 

@@ -211,6 +211,12 @@ Az AKS-keresés a pontos Steam-cím után az Enhanced és Deluxe névváltozatok
 
 A telepített játékok kapcsolható könyvtári sora először a játék saját kis méretű verziófájljait és az Unreal `ProjectVersion` mezőjét keresi. Ezeket „Játékverzió”, illetve „Projektverzió” felirattal különbözteti meg. Protonos játékoknál a megfelelő futtatható fájl beágyazott verzióját külön „Fájlverzió” jelöléssel mutatja; ha nincs egyértelmű találat, a Steam BuildID marad. A vizsgálat a Deck helyi fájljain történik, hálózati kérés nélkül, és az eredmény a BuildID megváltozásáig gyorsítótárban marad. Nem minden játék tárolja a menüben látható verziót kiolvasható formában. Csak a Decky plugint kell frissíteni.
 
+## 1.0.115: Oodle-tömörített Palworld-verzióadatok
+
+A Palworld helyi verziókiolvasója már az Oodle-tömörített konfigurációt és a nagyobb PAK-indexeket is kezeli. A frissítés újra megvizsgálja a korábban gyorsítótárazott verziókat. A konkrét játékkiadással való működés még felhasználói visszaigazolásra vár; sikertelen kiolvasáskor a BuildID marad.
+
+A SteamOS x86_64 kicsomagoló a kiadási csomag része, nem kell külön telepíteni. Forrása: `native/version-helper`, függősége az MIT-licencű [oozextract](https://github.com/lvlvllvlvllvlvl/oozextract). A fordítás a kicsomagolót a `main.py` fájlba ágyazza, így a Decky ZIP fájllistája változatlan. A függőségek licencszövegei a csomag `LICENSE` fájljában szerepelnek.
+
 ## 1.0.114: játékverzió helyett ne motorverzió jelenjen meg
 
 A plugin többé nem helyettesíti a játékverziót általános EXE- vagy Unreal-projektverzióval. Ezek például a Palworldnél a motor 5.1.1-es számát adhatják vissza. A korábbi verziócache automatikusan érvénytelen lesz.
