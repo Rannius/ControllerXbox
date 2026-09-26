@@ -73,7 +73,7 @@ async function flushBuilds(): Promise<void> {
         const info = response.versions?.[id];
         const version = (info?.source === "game" || info?.source === "project") && typeof info.version === "string" && /^\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?$/.test(info.version) ? info.version : "";
         cache.set(id, { build: typeof build === "string" && /^\d{1,20}$/.test(build) ? build : "",
-          version, source: version ? info?.source ?? "" : "", expires });
+          version, source: version ? info?.source ?? "" : "", mtime: info?.mtime ?? 0, expires });
       }
       notify();
     }
@@ -126,9 +126,9 @@ export function InstalledBuildLabel({ appId, installedHint }: { appId: number; i
     const listener = () => {
       setView(current => current.enabled === enabled && current.inStore === inStore ? current : { enabled, inStore });
       const next = { id, build: cache.get(id)?.build ?? "", version: cache.get(id)?.version ?? "",
-        source: cache.get(id)?.source ?? "", resolved: cache.has(id) };
+        source: cache.get(id)?.source ?? "", mtime: cache.get(id)?.mtime ?? 0, resolved: cache.has(id) };
       setResult(current => current.id === next.id && current.build === next.build && current.version === next.version
-        && current.source === next.source && current.resolved === next.resolved ? current : next);
+        && current.source === next.source && current.mtime === next.mtime && current.resolved === next.resolved ? current : next);
     };
     listeners.add(listener);
     listener();
