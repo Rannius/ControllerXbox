@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 5
+INSTALLED_VERSION_CACHE_SCHEMA = 6
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -451,8 +451,42 @@ class InstalledGameVersionScanner:
             if abs_end < len(chunk) and chr(chunk[abs_end]).isalpha():
                 continue
             version = cls._clean_version(candidate)
-            if version and version != "1.0.0.0":
+            if version and version not in ("1.0", "1.0.0", "1.0.0.0"):
                 return version
+        return ""
+
+    @classmethod
+    def _executable_version(cls, root: Path) -> str:
+        try:
+            exes = [path for path in root.iterdir() if path.suffix.lower() == ".exe"]
+        except OSError:
+            return ""
+        if len(exes) > 16:
+            return ""
+        for exe in sorted(exes, key=lambda x: x.stat().st_size, reverse=True):
+            if not cls._inside(root, exe) or not exe.is_file():
+                continue
+            try:
+                size = exe.stat().st_size
+                if not 0 < size <= 128 * 1024 * 1024:
+                    continue
+                content = exe.read_bytes()
+                # Find ProductVersion or FileVersion in UTF-16LE resources
+                for key in (b"P\x00r\x00o\x00d\x00u\x00c\x00t\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00",
+                            b"F\x00i\x00l\x00e\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00"):
+                    pos = content.rfind(key)
+                    if pos > 0:
+                        start = pos + len(key)
+                        while start < len(content) and content[start:start+2] == b"\x00\x00":
+                            start += 2
+                        end = content.find(b"\x00\x00\x00", start)
+                        if end > start:
+                            val = content[start:end].decode("utf-16le", errors="ignore").strip()
+                            version = cls._clean_version(val)
+                            if version and version not in ("1.0", "1.0.0", "1.0.0.0"):
+                                return version
+            except OSError:
+                pass
         return ""
 
     @classmethod
@@ -735,7 +769,13 @@ class InstalledGameVersionScanner:
         declared = cls._declared_version(root)
         if declared[0]:
             return declared
-        return cls._engine_version(root)
+        engine = cls._engine_version(root)
+        if engine[0]:
+            return engine
+        executable = cls._executable_version(root)
+        if executable:
+            return executable, "game"
+        return "", ""
 
 
 class Plugin:
