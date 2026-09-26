@@ -1,11 +1,11 @@
 import { callable } from "@decky/api";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-type VersionInfo = { version: string; source: "game" | "project" };
+type VersionInfo = { version: string; source: "game" | "project"; mtime?: number };
 type BuildResponse = { success: boolean; builds?: Record<string, string>; versions?: Record<string, VersionInfo> };
 const getInstalledBuilds = callable<[string[]], BuildResponse>("get_installed_builds");
 const CACHE_MS = 5 * 60 * 1000;
-const cache = new Map<string, { build: string; version: string; source: string; expires: number }>();
+const cache = new Map<string, { build: string; version: string; source: string; mtime: number; expires: number }>();
 const queued = new Set<string>();
 const mounted = new Map<string, number>();
 const listeners = new Set<() => void>();
@@ -77,7 +77,7 @@ async function flushBuilds(): Promise<void> {
       }
       notify();
     }
-  } catch { /* A következő megnyitáskor ismét megpróbáljuk. */ }
+  } catch { /* A kĂ¶vetkezĹ‘ megnyitĂˇskor ismĂ©t megprĂłbĂˇljuk. */ }
   finally {
     fetching = false;
     if (queued.size && enabled && !inStore) timer = setTimeout(() => void flushBuilds(), 120);
@@ -103,13 +103,21 @@ export function InstalledBuildLabel({ appId, installedHint }: { appId: number; i
   const id = String(appId);
   const [view, setView] = useState(() => ({ enabled, inStore }));
   const [result, setResult] = useState(() => ({ id, build: cache.get(id)?.build ?? "",
-    version: cache.get(id)?.version ?? "", source: cache.get(id)?.source ?? "", resolved: cache.has(id) }));
+    version: cache.get(id)?.version ?? "", source: cache.get(id)?.source ?? "", mtime: cache.get(id)?.mtime ?? 0, resolved: cache.has(id) }));
   const marker = useRef<HTMLSpanElement>(null);
   const label = useRef<HTMLSpanElement | null>(null);
   const build = result.id === id ? result.build : cache.get(id)?.build ?? "";
   const version = result.id === id ? result.version : cache.get(id)?.version ?? "";
   const source = result.id === id ? result.source : cache.get(id)?.source ?? "";
-  const display = version ? version : build ? "Build: " + build : "";
+  const mtime = result.id === id ? result.mtime : cache.get(id)?.mtime ?? 0;
+  let display = "";
+  if (version && build) display = `${version} (Build: ${build})`;
+  else if (version) display = version;
+  else if (build) display = `Build: ${build}`;
+  if (display && mtime) {
+    const date = new Date(mtime * 1000);
+    display += ` • ${date.getFullYear()}.${String(date.getMonth() + 1).padStart(2, "0")}.${String(date.getDate()).padStart(2, "0")}.`;
+  }
   const resolved = result.id === id ? result.resolved : cache.has(id);
   const active = view.enabled && !view.inStore && installedHint !== false;
   const showArea = active && (Boolean(display) || (installedHint === true && !resolved));
@@ -165,8 +173,8 @@ export function InstalledBuildLabel({ appId, installedHint }: { appId: number; i
     if (!label.current) return;
     label.current.textContent = display;
     label.current.style.visibility = display ? "visible" : "hidden";
-    label.current.title = version ? "Játék saját verzióadata: "
-      + version + (build ? " · Steam-build: " + build : "") : build ? "Telepített Steam-build: " + build : "";
+    label.current.title = version ? "JĂˇtĂ©k sajĂˇt verziĂładata: "
+      + version + (build ? " Â· Steam-build: " + build : "") : build ? "TelepĂ­tett Steam-build: " + build : "";
   }, [build, version, source, display]);
 
   return active ? <span ref={marker} data-dpb-build-marker="true" style={{ display: "none" }} /> : null;
