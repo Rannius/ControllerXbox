@@ -2950,6 +2950,93 @@ class Plugin:
                     self._installed_version_save_task = asyncio.create_task(self._save_installed_version_later())
         return {"success": True, "builds": result["builds"], "versions": result["versions"]}
 
+    async def debug_version_scan(self, app_id: Any) -> Dict[str, Any]:
+        """Diagnostic: run all version-scan steps for one game and return raw results."""
+        if not isinstance(app_id, str) or not re.fullmatch(r"[1-9]\d{0,9}", app_id):
+            return {"success": False, "error": "Invalid app_id."}
+        Scanner = InstalledGameVersionScanner
+        def _debug(aid: str) -> Dict[str, Any]:
+            info: Dict[str, Any] = {"app_id": aid}
+            for library in Plugin._steam_library_paths():
+                manifest = library / "steamapps" / ("appmanifest_" + aid + ".acf")
+                try:
+                    contents = manifest.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                m_inst = re.search(r'"installdir"\s*"([^"\\\\/]{1,160})"', contents, re.IGNORECASE)
+                if not m_inst:
+                    continue
+                common = library / "steamapps" / "common"
+                game_dir = common / m_inst.group(1)
+                info["game_dir"] = str(game_dir)
+                info["exists"] = game_dir.is_dir()
+                if not game_dir.is_dir():
+                    continue
+                try:
+                    info["children"] = sorted([c.name for c in game_dir.iterdir()][:50])
+                except OSError:
+                    info["children"] = []
+                try:
+                    info["declared"] = list(Scanner._declared_version(game_dir))
+                except Exception as exc:
+                    info["declared_error"] = str(exc)
+                try:
+                    info["engine"] = list(Scanner._engine_version(game_dir))
+                except Exception as exc:
+                    info["engine_error"] = str(exc)
+                exe_results: list = []
+                exes: list = []
+                def _find(cur: Path, dep: int) -> None:
+                    if dep > 4 or len(exes) >= 32:
+                        return
+                    try:
+                        for ch in cur.iterdir():
+                            if ch.is_file() and ch.suffix.lower() == ".exe":
+                                exes.append(ch)
+                            elif ch.is_dir() and ch.name.lower() not in ("engine", "_commonredist", "directx", "vcredist", "dotnet"):
+                                _find(ch, dep + 1)
+                    except OSError:
+                        pass
+                _find(game_dir, 1)
+                pv = b"P\x00r\x00o\x00d\x00u\x00c\x00t\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00"
+                fv = b"F\x00i\x00l\x00e\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00"
+                for exe in sorted(exes, key=lambda x: x.stat().st_size, reverse=True)[:8]:
+                    ei: Dict[str, Any] = {"name": str(exe.relative_to(game_dir)), "size": exe.stat().st_size}
+                    try:
+                        blob = exe.read_bytes()
+                        hits: list = []
+                        for kn, kb in [("ProductVersion", pv), ("FileVersion", fv)]:
+                            p = 0
+                            while True:
+                                p = blob.find(kb, p)
+                                if p < 0:
+                                    break
+                                s = p + len(kb)
+                                p = s
+                                while s + 1 < len(blob) and blob[s:s+2] == b"\x00\x00":
+                                    s += 2
+                                e = s
+                                while e + 1 < len(blob) and blob[e:e+2] != b"\x00\x00":
+                                    e += 2
+                                if e > s:
+                                    raw = blob[s:e].decode("utf-16le", errors="ignore").strip()
+                                    clean = Scanner._clean_version(raw)
+                                    hits.append({"key": kn, "raw": raw[:80], "clean": clean})
+                        ei["versions"] = hits
+                    except OSError as err:
+                        ei["error"] = str(err)
+                    exe_results.append(ei)
+                info["executables"] = exe_results
+                try:
+                    ver, src = Scanner.scan(game_dir, m_inst.group(1), aid)
+                    info["scan_result"] = {"version": ver, "source": src}
+                except Exception as exc:
+                    info["scan_error"] = str(exc)
+                break
+            return info
+        result = await self._run_blocking(_debug, str(app_id))
+        return {"success": True, **result}
+
     async def set_store_tile_prices(self, enabled: Any) -> Dict[str, Any]:
         if not isinstance(enabled, bool):
             return {"success": False, "error": "Érvénytelen kapcsolóérték."}
