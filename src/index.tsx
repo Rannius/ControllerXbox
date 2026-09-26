@@ -226,6 +226,7 @@ const setBadgeSizes = callable<[library: number, store: number], SettingsRespons
 const getCuratorProgress = callable<[], CuratorProgress>("get_hungarian_curator_progress");
 const loadCuratorProgress = () => withBackendTimeout(getCuratorProgress());
 const getSettings = callable<[], SettingsResponse>("get_settings");
+const clearInstalledVersionCache = callable<[], SettingsResponse>("clear_installed_version_cache");
 const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean, showHungarianBadges: boolean, showInstalledBuilds: boolean], SettingsResponse>("set_badge_visibility");
 const setNotificationPreferences = callable<[
   notifyGfnAdditions: boolean,
@@ -2340,6 +2341,19 @@ function Content() {
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_installed_builds: checked })}
     /></PanelSectionRow>
+    <PanelSectionRow><ButtonItem
+      layout="below"
+      disabled={settingsWorking}
+      onClick={async () => {
+        setSettingsWorking(true);
+        try {
+          const res = await withBackendTimeout(clearInstalledVersionCache());
+          if (!res.success) throw new Error(res.error || 'Ismeretlen hiba.');
+          toaster.toast({ title: 'Cache ürítve', body: 'A verziószám-gyorsítótár sikeresen törölve lett.' });
+        } catch (error) { toaster.toast({ title: 'Hiba', body: errorMessage(error) }); }
+        finally { setSettingsWorking(false); }
+      }}
+    >Verziószám-gyorsítótár ürítése</ButtonItem></PanelSectionRow>
     <BadgeSizeSettings initial={{ library_badge_percent: visibility.library_badge_percent ?? 100,
       store_badge_percent: visibility.store_badge_percent ?? 100 }} save={saveSizes} />
   </PanelSection>;

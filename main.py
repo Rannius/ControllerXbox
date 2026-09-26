@@ -2829,6 +2829,14 @@ class Plugin:
 
         self._installed_version_cache = await self._run_blocking(read)
 
+    async def clear_installed_version_cache(self) -> Dict[str, Any]:
+        async with self._installed_version_lock:
+            self._installed_version_cache.clear()
+            self._installed_version_dirty = True
+            if not self._installed_version_save_task or self._installed_version_save_task.done():
+                self._installed_version_save_task = asyncio.create_task(self._save_installed_version_later())
+        return {"success": True}
+
     async def _save_installed_version_cache(self) -> None:
         self._installed_version_dirty = False
         entries = dict(list(self._installed_version_cache.items())[-2000:])
