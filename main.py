@@ -227,7 +227,7 @@ class InstalledGameVersionScanner:
 
     @classmethod
     def _declared_version(cls, root: Path) -> Tuple[str, str]:
-        for relative in ("version.json", "game_version.json", "build_info.json", "buildinfo.json"):
+        for relative in ("version.json", "game_version.json", "build_info.json", "buildinfo.json", "build.json"):
             contents = cls._small_text(root, relative)
             if not contents:
                 continue
@@ -240,7 +240,7 @@ class InstalledGameVersionScanner:
                     version = cls._clean_version(payload.get(key))
                     if version:
                         return version, "game"
-        for relative in ("version.txt", "game_version.txt", "VERSION"):
+        for relative in ("version.txt", "game_version.txt", "VERSION", "build.txt", "version.ini", "build.ini", "version.xml"):
             contents = cls._small_text(root, relative).strip()
             if not contents:
                 continue
@@ -406,6 +406,17 @@ class InstalledGameVersionScanner:
                     version, _ = cls._declared_version(streaming)
                     if version:
                         return version, "game"
+                app_info = child / "app.info"
+                try:
+                    if cls._inside(root, app_info) and app_info.is_file() and app_info.stat().st_size <= 4096:
+                        lines = app_info.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+                        if len(lines) >= 3:
+                            version = cls._clean_version(lines[2])
+                            if version:
+                                return version, "project"
+                except OSError:
+                    pass
+
         version = cls._godot_version(root)
         if version:
             return version, "project"
