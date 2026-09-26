@@ -1,7 +1,7 @@
 import { callable } from "@decky/api";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-type VersionInfo = { version: string; source: "game" };
+type VersionInfo = { version: string; source: "game" | "project" };
 type BuildResponse = { success: boolean; builds?: Record<string, string>; versions?: Record<string, VersionInfo> };
 const getInstalledBuilds = callable<[string[]], BuildResponse>("get_installed_builds");
 const CACHE_MS = 5 * 60 * 1000;
@@ -71,9 +71,9 @@ async function flushBuilds(): Promise<void> {
       for (const id of ids) {
         const build = response.builds?.[id];
         const info = response.versions?.[id];
-        const version = info?.source === "game" && typeof info.version === "string" && /^\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?$/.test(info.version) ? info.version : "";
+        const version = (info?.source === "game" || info?.source === "project") && typeof info.version === "string" && /^\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?$/.test(info.version) ? info.version : "";
         cache.set(id, { build: typeof build === "string" && /^\d{1,20}$/.test(build) ? build : "",
-          version, source: version ? "game" : "", expires });
+          version, source: version ? info?.source ?? "" : "", expires });
       }
       notify();
     }
@@ -109,7 +109,7 @@ export function InstalledBuildLabel({ appId, installedHint }: { appId: number; i
   const build = result.id === id ? result.build : cache.get(id)?.build ?? "";
   const version = result.id === id ? result.version : cache.get(id)?.version ?? "";
   const source = result.id === id ? result.source : cache.get(id)?.source ?? "";
-  const display = version ? "Játékverzió: " + version
+  const display = version ? (source === "project" ? "Projektverzió: " : "Játékverzió: ") + version
     : build ? "Build: " + build : "";
   const resolved = result.id === id ? result.resolved : cache.has(id);
   const active = view.enabled && !view.inStore && installedHint !== false;

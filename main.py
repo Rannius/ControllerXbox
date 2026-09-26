@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 3
+INSTALLED_VERSION_CACHE_SCHEMA = 4
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -250,6 +250,199 @@ class InstalledGameVersionScanner:
                 version = cls._clean_version(match.group(1)) if match else ""
             if version:
                 return version, "game"
+        return "", ""
+
+    @classmethod
+    def _godot_project_version(cls, content: bytes) -> str:
+        # Godot stores exported project settings in project.binary (ECFG),
+        # or sometimes in a plain project.godot file.
+        if content.startswith(b"ECFG"):
+            try:
+                position = 4
+                count = struct.unpack_from("<I", content, position)[0]
+                position += 4
+                if count > 20000:
+                    return ""
+                for _ in range(count):
+                    length = struct.unpack_from("<I", content, position)[0]
+                    position += 4
+                    if length > 1024 or position + length + 4 > len(content):
+                        return ""
+                    key = content[position:position + length]
+                    position += length
+                    value_length = struct.unpack_from("<I", content, position)[0]
+                    position += 4
+                    if value_length > 64 * 1024 or position + value_length > len(content):
+                        return ""
+                    if key == b"application/config/version" and value_length >= 8:
+                        value = content[position:position + value_length]
+                        if struct.unpack_from("<I", value)[0] & 0xffff == 4:
+                            text_length = struct.unpack_from("<I", value, 4)[0]
+                            if 0 < text_length <= min(128, len(value) - 8):
+                                return cls._clean_version(value[8:8 + text_length].decode("utf-8"))
+                        return ""
+                    position += value_length
+            except (ValueError, UnicodeError, struct.error):
+                return ""
+            return ""
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeError:
+            return ""
+        section = re.search(r"(?ims)^\s*\[application\]\s*\r?\n(.*?)(?=^\s*\[|\Z)", text)
+        match = re.search(r'(?im)^\s*config/version\s*=\s*"([^"\r\n]{1,128})"', section.group(1)) if section else None
+        return cls._clean_version(match.group(1)) if match else ""
+
+    @classmethod
+    def _godot_pack_version(cls, path: Path) -> str:
+        # Godot's official PCK directory format, versions 2-4. Only two small
+        # settings files can be read; standalone and embedded packs are allowed.
+        try:
+            with path.open("rb") as stream:
+                file_size = stream.seek(0, os.SEEK_END)
+                stream.seek(0)
+                start = 0
+                if stream.read(4) != b"GDPC":
+                    if file_size < 64:
+                        return ""
+                    stream.seek(file_size - 12)
+                    packed_size, magic = struct.unpack("<Q4s", stream.read(12))
+                    if magic != b"GDPC" or not 0 < packed_size <= file_size - 12:
+                        return ""
+                    start = file_size - packed_size - 12
+                    stream.seek(start)
+                    if stream.read(4) != b"GDPC":
+                        return ""
+                version, major, minor, patch, flags = struct.unpack("<5I", stream.read(20))
+                if version not in (2, 3, 4) or flags & 1:
+                    return ""
+                file_base = struct.unpack("<Q", stream.read(8))[0]
+                if version in (3, 4) or flags & 2:
+                    file_base += start
+                if version in (3, 4):
+                    directory_offset = struct.unpack("<Q", stream.read(8))[0]
+                    if start + directory_offset >= file_size:
+                        return ""
+                    stream.seek(start + directory_offset)
+                else:
+                    stream.seek(64, os.SEEK_CUR)
+                file_count = struct.unpack("<I", stream.read(4))[0]
+                if file_count > 100000:
+                    return ""
+                for _ in range(file_count):
+                    name_length = struct.unpack("<I", stream.read(4))[0]
+                    if not 0 < name_length <= 1024:
+                        return ""
+                    name = stream.read(name_length)
+                    offset, size = struct.unpack("<QQ", stream.read(16))
+                    stream.seek(16, os.SEEK_CUR)  # MD5
+                    entry_flags = struct.unpack("<I", stream.read(4))[0]
+                    if name not in (b"res://project.binary", b"res://project.godot"):
+                        continue
+                    if entry_flags & 7 or not 0 < size <= 256 * 1024 or file_base + offset + size > file_size:
+                        return ""
+                    resume = stream.tell()
+                    stream.seek(file_base + offset)
+                    content = stream.read(size)
+                    stream.seek(resume)
+                    if len(content) != size:
+                        return ""
+                    found = cls._godot_project_version(content)
+                    if found:
+                        return found
+        except (OSError, ValueError, struct.error):
+            return ""
+        return ""
+
+    @classmethod
+    def _godot_version(cls, root: Path) -> str:
+        for relative in ("project.binary", "project.godot"):
+            path = root / relative
+            try:
+                if cls._inside(root, path) and path.is_file() and path.stat().st_size <= 256 * 1024:
+                    found = cls._godot_project_version(path.read_bytes())
+                    if found:
+                        return found
+            except OSError:
+                pass
+        try:
+            packs = [path for path in root.iterdir() if path.suffix.lower() in (".pck", ".exe")]
+        except OSError:
+            return ""
+        if len(packs) > 16:
+            return ""
+        for path in sorted(packs, key=lambda value: (value.suffix.lower() != ".pck", value.name.lower())):
+            if cls._inside(root, path) and path.is_file():
+                found = cls._godot_pack_version(path)
+                if found:
+                    return found
+        return ""
+
+    @classmethod
+    def _unreal_project_version(cls, content: bytes) -> str:
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeError:
+            return ""
+        section = re.search(r"(?ims)^\s*\[/Script/EngineSettings\.GeneralProjectSettings\]\s*\r?\n(.*?)(?=^\s*\[|\Z)", text)
+        match = re.search(r'(?im)^\s*ProjectVersion\s*=\s*"?([^"\r\n;]+)', section.group(1)) if section else None
+        version = cls._clean_version(match.group(1).strip()) if match else ""
+        return version if version != "1.0.0" else ""  # Unreal's untouched default.
+
+    @classmethod
+    def _engine_version(cls, root: Path) -> Tuple[str, str]:
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            return "", ""
+        if len(children) > 256:
+            return "", ""
+        # Unity: only the game's own StreamingAssets metadata is eligible;
+        # UnityCrashHandler and generic executable versions are not.
+        for child in children:
+            if child.is_dir() and child.name.lower().endswith("_data") and cls._inside(root, child):
+                streaming = child / "StreamingAssets"
+                if streaming.is_dir() and cls._inside(root, streaming):
+                    version, _ = cls._declared_version(streaming)
+                    if version:
+                        return version, "game"
+        version = cls._godot_version(root)
+        if version:
+            return version, "project"
+        # Unreal: the game's own project folder and precise section identify
+        # its ProjectVersion. Do not use the Engine folder or a generic INI.
+        projects = [child for child in children if child.is_dir() and child.name != "Engine"
+                    and (child / "Content/Paks").is_dir() and cls._inside(root, child)]
+        if len(projects) > 4:
+            return "", ""
+        for project in projects:
+            path = project / "Config/DefaultGame.ini"
+            try:
+                if cls._inside(root, path) and path.is_file() and path.stat().st_size <= 64 * 1024:
+                    version = cls._unreal_project_version(path.read_bytes())
+                    if version:
+                        return version, "project"
+            except OSError:
+                pass
+            folder = project / "Content/Paks"
+            try:
+                packs = [path for path in folder.iterdir() if path.suffix.lower() == ".pak"
+                         and (path.name.lower().startswith(project.name.lower() + "-windows")
+                              or path.name.lower().startswith("pakchunk0-windows"))]
+            except OSError:
+                continue
+            if len(packs) > 3:
+                continue
+            for pak in sorted(packs, key=lambda path: path.name.lower(), reverse=True):
+                if not cls._inside(root, pak) or not pak.is_file():
+                    continue
+                content = cls._pak_config(pak, project.name + "/Config/DefaultGame.ini")
+                if content is None:
+                    break  # A later patch might replace this configuration.
+                if content:
+                    version = cls._unreal_project_version(content)
+                    if version:
+                        return version, "project"
         return "", ""
 
     @classmethod
@@ -459,9 +652,10 @@ class InstalledGameVersionScanner:
         if app_id == "1623730":
             version = cls._palworld_version(root)
             return (version, "game") if version else ("", "")
-        # Generic executable and Unreal project versions may identify the engine.
-        # Only explicit game version files are eligible for the generic path.
-        return cls._declared_version(root)
+        declared = cls._declared_version(root)
+        if declared[0]:
+            return declared
+        return cls._engine_version(root)
 
 
 class Plugin:
@@ -2495,7 +2689,7 @@ class Plugin:
                     if isinstance(app_id, str) and re.fullmatch(r"[1-9]\d{0,9}", app_id)
                     and isinstance(entry, dict) and re.fullmatch(r"[1-9]\d{0,19}", str(entry.get("build", "")))
                     and isinstance(entry.get("version"), str) and len(entry["version"]) <= 40
-                    and entry.get("source") in ("", "game")}
+                    and entry.get("source") in ("", "game", "project")}
 
         self._installed_version_cache = await self._run_blocking(read)
 

@@ -1479,6 +1479,44 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         (game / "UnityCrashHandler64.exe").write_bytes(b"MZ" + b"\0" * 510)
         self.assertEqual(scanner.scan(game, "Game"), ("", ""))
 
+    async def test_common_engine_versions_are_labeled_by_source(self):
+        scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
+        base = Path(self.directory.name)
+
+        unity = base / "Unity Game"
+        streaming = unity / "Unity Game_Data/StreamingAssets"
+        streaming.mkdir(parents=True)
+        (streaming / "version.json").write_text('{"gameVersion":"2.4.6"}', encoding="utf-8")
+        self.assertEqual(scanner.scan(unity, "Unity Game"), ("2.4.6", "game"))
+
+        godot = base / "Godot Game"
+        godot.mkdir()
+        key = b"application/config/version"
+        value = struct.pack("<II", 4, len(b"1.7.2")) + b"1.7.2"
+        project = b"ECFG" + struct.pack("<II", 1, len(key)) + key + struct.pack("<I", len(value)) + value
+        name = b"res://project.binary"
+        directory = (struct.pack("<II", 1, len(name)) + name +
+                     struct.pack("<QQ", 40 + 4 + 4 + len(name) + 16 + 16 + 4, len(project)) +
+                     b"\0" * 16 + struct.pack("<I", 0))
+        header = b"GDPC" + struct.pack("<5IQQ", 3, 4, 0, 0, 0, 0, 40)
+        (godot / "Game.pck").write_bytes(header + directory + project)
+        self.assertEqual(scanner.scan(godot, "Godot Game"), ("1.7.2", "project"))
+        (godot / "Game.pck").unlink()
+        embedded = (b"MZ" + b"\0" * 62 + header + directory + project +
+                    struct.pack("<Q", len(header + directory + project)) + b"GDPC")
+        (godot / "Game.exe").write_bytes(embedded)
+        self.assertEqual(scanner.scan(godot, "Godot Game"), ("1.7.2", "project"))
+
+        unreal = base / "Unreal Game"
+        project_dir = unreal / "MyGame"
+        (project_dir / "Content/Paks").mkdir(parents=True)
+        (project_dir / "Config").mkdir()
+        config = project_dir / "Config/DefaultGame.ini"
+        config.write_text("[/Script/EngineSettings.GeneralProjectSettings]\nProjectVersion=3.4.5\n", encoding="utf-8")
+        self.assertEqual(scanner.scan(unreal, "Unreal Game"), ("3.4.5", "project"))
+        config.write_text("[/Script/EngineSettings.GeneralProjectSettings]\nProjectVersion=1.0.0\n", encoding="utf-8")
+        self.assertEqual(scanner.scan(unreal, "Unreal Game"), ("", ""))
+
     async def test_proton_executable_product_version_is_not_a_game_version(self):
         scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
         game = Path(self.directory.name) / "Example Game"

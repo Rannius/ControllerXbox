@@ -211,9 +211,15 @@ Az AKS-keresés a pontos Steam-cím után az Enhanced és Deluxe névváltozatok
 
 A telepített játékok kapcsolható könyvtári sora először a játék saját kis méretű verziófájljait és az Unreal `ProjectVersion` mezőjét keresi. Ezeket „Játékverzió”, illetve „Projektverzió” felirattal különbözteti meg. Protonos játékoknál a megfelelő futtatható fájl beágyazott verzióját külön „Fájlverzió” jelöléssel mutatja; ha nincs egyértelmű találat, a Steam BuildID marad. A vizsgálat a Deck helyi fájljain történik, hálózati kérés nélkül, és az eredmény a BuildID megváltozásáig gyorsítótárban marad. Nem minden játék tárolja a menüben látható verziót kiolvasható formában. Csak a Decky plugint kell frissíteni.
 
+## 1.0.116: további játékmotorok helyi verzióadatai
+
+A telepített Steam-játékoknál a plugin a gyökérben lévő saját verziófájlokon túl a Unity `StreamingAssets` könyvtárában elhelyezett verziófájlokat, a Godot `project.godot` és `project.binary` projektbeállítását (külön `.pck` fájlból vagy futtatható fájlba ágyazva), valamint az Unreal játékprojektjének `DefaultGame.ini` fájljában lévő `ProjectVersion` mezőt is megvizsgálja. A projektbeállításból származó érték „Projektverzió” címkét kap. Az Unreal alapértelmezett `1.0.0` értékét nem használja, mert az könnyen téves játékverzió lenne.
+
+A vizsgálat a helyi fájlokra korlátozódik, nem indítja el a játékot. A kiolvasás határolt, titkosított vagy nem támogatott formátum esetén a Steam BuildID marad. A Steam nem biztosít egységes, minden játékra érvényes, menüben látható verziószámot, ezért ez továbbra is a rendelkezésre álló forrásokra épülő azonosítás.
+
 ## 1.0.115: Oodle-tömörített Palworld-verzióadatok
 
-A Palworld helyi verziókiolvasója már az Oodle-tömörített konfigurációt és a nagyobb PAK-indexeket is kezeli. A frissítés újra megvizsgálja a korábban gyorsítótárazott verziókat. A konkrét játékkiadással való működés még felhasználói visszaigazolásra vár; sikertelen kiolvasáskor a BuildID marad.
+A Palworld helyi verziókiolvasója már az Oodle-tömörített konfigurációt és a nagyobb PAK-indexeket is kezeli. A frissítés újra megvizsgálja a korábban gyorsítótárazott verziókat. A felhasználó visszaigazolta, hogy a Palworld tényleges verziószáma megjelent; sikertelen kiolvasáskor a BuildID marad.
 
 A SteamOS x86_64 kicsomagoló a kiadási csomag része, nem kell külön telepíteni. Forrása: `native/version-helper`, függősége az MIT-licencű [oozextract](https://github.com/lvlvllvlvllvlvl/oozextract). A fordítás a kicsomagolót a `main.py` fájlba ágyazza, így a Decky ZIP fájllistája változatlan. A függőségek licencszövegei a csomag `LICENSE` fájljában szerepelnek.
 
