@@ -1469,6 +1469,33 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             if reloaded._installed_version_save_task:
                 await reloaded._installed_version_save_task
 
+    async def test_confirmed_menu_version_is_bound_to_installed_build(self):
+        library = Path(self.directory.name) / "SteamLibrary"
+        apps = library / "steamapps"
+        apps.mkdir(parents=True)
+        manifest = apps / "appmanifest_10.acf"
+
+        def write_manifest(build):
+            manifest.write_text('"AppState" { "appid" "10" "StateFlags" "4" "buildid" "' + build + '" }',
+                                encoding="utf-8")
+
+        write_manifest("123")
+        with patch.object(self.plugin_type, "_steam_library_paths", return_value=[library]):
+            self.assertFalse((await self.plugin.set_confirmed_installed_version("10", "122", "1.2.3"))["success"])
+            self.assertTrue((await self.plugin.set_confirmed_installed_version("10", "123", "v1.2.3"))["success"])
+            self.assertEqual((await self.plugin.get_installed_builds(["10"], True))["versions"]["10"],
+                             {"version": "1.2.3", "source": "confirmed"})
+            reloaded = self.plugin_type()
+            await reloaded._load_confirmed_versions()
+            self.assertEqual((await reloaded.get_installed_builds(["10"], True))["versions"]["10"],
+                             {"version": "1.2.3", "source": "confirmed"})
+            write_manifest("124")
+            self.assertNotIn("10", (await reloaded.get_installed_builds(["10"], True))["versions"])
+            self.assertFalse((await reloaded.set_confirmed_installed_version("10", "123", "1.2.3"))["success"])
+            write_manifest("123")
+            self.assertTrue((await reloaded.set_confirmed_installed_version("10", "123", ""))["success"])
+            self.assertNotIn("10", (await reloaded.get_installed_builds(["10"], True))["versions"])
+
     async def test_unverified_unreal_project_version_is_not_a_game_version(self):
         scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
         game = Path(self.directory.name) / "Game"
@@ -1899,5 +1926,4 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 

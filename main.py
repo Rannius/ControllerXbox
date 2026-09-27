@@ -65,6 +65,7 @@ WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
 INSTALLED_VERSION_CACHE_SCHEMA = 10
+CONFIRMED_VERSION_SCHEMA = 1
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -766,6 +767,8 @@ class Plugin:
         self._settings_path = Path(settings_directory) / "controller-xbox-settings.json"
         self._installed_version_cache_path = Path(settings_directory) / "installed-game-versions.json"
         self._installed_version_cache: Dict[str, Dict[str, str]] = {}
+        self._confirmed_version_path = Path(settings_directory) / "confirmed-game-versions.json"
+        self._confirmed_versions: Dict[str, Dict[str, str]] = {}
         self._installed_version_lock = asyncio.Lock()
         self._installed_version_save_task: Optional[asyncio.Task] = None
         self._installed_version_dirty = False
@@ -792,6 +795,7 @@ class Plugin:
         await self._load_boosteroid_cache()
         await self._load_settings()
         await self._load_installed_version_cache()
+        await self._load_confirmed_versions()
         await self._load_watchlist()
         decky.logger.info("ControllerXbox backend loaded")
 
@@ -2672,6 +2676,77 @@ class Plugin:
     async def get_settings(self) -> Dict[str, Any]:
         return {"success": True, **self._settings}
 
+    async def _load_confirmed_versions(self) -> None:
+        def read() -> Dict[str, Dict[str, str]]:
+            try:
+                if self._confirmed_version_path.stat().st_size > 1024 * 1024:
+                    return {}
+                payload = json.loads(self._confirmed_version_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return {}
+            if not isinstance(payload, dict) or payload.get("schema_version") != CONFIRMED_VERSION_SCHEMA:
+                return {}
+            entries = payload.get("entries")
+            if not isinstance(entries, dict):
+                return {}
+            confirmed: Dict[str, Dict[str, str]] = {}
+            for app_id, builds in list(entries.items())[:2000]:
+                if not isinstance(app_id, str) or not re.fullmatch(r"[1-9]\d{0,9}", app_id) or not isinstance(builds, dict):
+                    continue
+                valid = {build: version for build, raw in list(builds.items())[-8:]
+                         if isinstance(build, str) and re.fullmatch(r"[1-9]\d{0,19}", build)
+                         and (version := InstalledGameVersionScanner._clean_version(raw))}
+                if valid:
+                    confirmed[app_id] = valid
+            return confirmed
+
+        self._confirmed_versions = await self._run_blocking(read)
+
+    async def _save_confirmed_versions(self) -> None:
+        payload = json.dumps({"schema_version": CONFIRMED_VERSION_SCHEMA, "entries": self._confirmed_versions},
+                             ensure_ascii=False, separators=(",", ":"))
+        await self._run_blocking(self._write_file_atomically, self._confirmed_version_path,
+                                 "confirmed-versions-", payload)
+
+    async def set_confirmed_installed_version(self, app_id: Any, build: Any, version: Any) -> Dict[str, Any]:
+        """Remember a user-checked menu version for exactly one installed Steam build."""
+        if (not isinstance(app_id, str) or not re.fullmatch(r"[1-9]\d{0,9}", app_id)
+                or not isinstance(build, str) or not re.fullmatch(r"[1-9]\d{0,19}", build)
+                or not isinstance(version, str) or len(version) > 40):
+            return {"success": False, "error": "Érvénytelen játék, build vagy verzió."}
+        cleaned = InstalledGameVersionScanner._clean_version(version) if version.strip() else ""
+        if version.strip() and not cleaned:
+            return {"success": False, "error": "A verzió legyen például 1.2.3 vagy 1.2.3-beta."}
+        async with self._installed_version_lock:
+            # A client may never associate a version with an uninstalled or outdated build.
+            current = await self._run_blocking(self._read_installed_builds, [app_id],
+                                               {app_id: {"build": build, "version": "", "source": ""}})
+            if current["builds"].get(app_id) != build:
+                return {"success": False, "error": "A játék Steam-buildje megváltozott. Ellenőrizd újra."}
+            old = dict(self._confirmed_versions.get(app_id, {}))
+            updated = dict(old)
+            if cleaned:
+                if not old and len(self._confirmed_versions) >= 2000:
+                    return {"success": False, "error": "A megerősített verziók tárhelye megtelt."}
+                updated.pop(build, None)
+                updated[build] = cleaned
+                updated = dict(list(updated.items())[-8:])
+            else:
+                updated.pop(build, None)
+            if updated:
+                self._confirmed_versions[app_id] = updated
+            else:
+                self._confirmed_versions.pop(app_id, None)
+            try:
+                await self._save_confirmed_versions()
+            except OSError:
+                if old:
+                    self._confirmed_versions[app_id] = old
+                else:
+                    self._confirmed_versions.pop(app_id, None)
+                return {"success": False, "error": "A megerősített verzió mentése sikertelen."}
+        return {"success": True, "version": cleaned, "build": build}
+
     async def clear_installed_version_cache(self) -> Dict[str, Any]:
         """Discard old scan results so installed games are inspected again."""
         async with self._installed_version_lock:
@@ -2755,11 +2830,13 @@ class Plugin:
         return libraries[:32]
 
     @classmethod
-    def _read_installed_builds(cls, app_ids: List[str], cached: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
+    def _read_installed_builds(cls, app_ids: List[str], cached: Optional[Dict[str, Dict[str, str]]] = None,
+                               confirmed: Optional[Dict[str, Dict[str, str]]] = None) -> Dict[str, Any]:
         builds: Dict[str, str] = {}
         versions: Dict[str, Dict[str, str]] = {}
         updates: Dict[str, Dict[str, str]] = {}
         cached = cached or {}
+        confirmed = confirmed or {}
         for library in cls._steam_library_paths():
             if len(builds) == len(app_ids):
                 break
@@ -2779,6 +2856,10 @@ class Plugin:
                 if (game and game.group(1) == app_id and state and int(state.group(1)) & 4
                         and build and int(build.group(1)) > 0):
                     builds[app_id] = build.group(1)
+                    checked = confirmed.get(app_id, {}).get(build.group(1))
+                    if checked:
+                        versions[app_id] = {"version": checked, "source": "confirmed"}
+                        continue
                     previous = cached.get(app_id, {})
                     if previous.get("build") == build.group(1):
                         if previous.get("version"):
@@ -2797,15 +2878,16 @@ class Plugin:
                         versions[app_id] = {"version": version, "source": source}
         return {"builds": builds, "versions": versions, "updates": updates}
 
-    async def get_installed_builds(self, app_ids: Any) -> Dict[str, Any]:
+    async def get_installed_builds(self, app_ids: Any, inspect_disabled: Any = False) -> Dict[str, Any]:
         if (not isinstance(app_ids, list) or len(app_ids) > 100 or
-                any(not isinstance(app_id, str) or not re.fullmatch(r"[1-9]\d{0,9}", app_id) for app_id in app_ids)):
+                any(not isinstance(app_id, str) or not re.fullmatch(r"[1-9]\d{0,9}", app_id) for app_id in app_ids)
+                or not isinstance(inspect_disabled, bool)):
             return {"success": False, "error": "Érvénytelen Steam-játéklista."}
-        if not self._settings.get("show_installed_builds", False):
+        if not inspect_disabled and not self._settings.get("show_installed_builds", False):
             return {"success": True, "builds": {}}
         async with self._installed_version_lock:
             result = await self._run_blocking(self._read_installed_builds, list(dict.fromkeys(app_ids)),
-                                              dict(self._installed_version_cache))
+                                              dict(self._installed_version_cache), dict(self._confirmed_versions))
             if result["updates"]:
                 self._installed_version_cache.update(result["updates"])
                 self._installed_version_dirty = True

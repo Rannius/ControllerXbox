@@ -148,7 +148,8 @@ type NotificationHistoryResponse = {
   unread_count?: number;
   error?: string;
 };
-type PluginPage = "home" | "watchlist" | "history" | "settings" | "settingsBadges" | "settingsStore" | "settingsPrices" | "settingsNotifications" | "shops";
+type PluginPage = "home" | "watchlist" | "history" | "settings" | "settingsBadges" | "settingsVersions" | "settingsStore" | "settingsPrices" | "settingsNotifications" | "shops";
+type InstalledVersionDetail = { id: string; name: string; build: string; version: string; source: string };
 type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 type GfnState = "loading" | "available" | "not_available" | "unavailable";
 type BoosteroidState = "loading" | "available" | "maintenance" | "not_available" | "unavailable";
@@ -227,6 +228,9 @@ const getCuratorProgress = callable<[], CuratorProgress>("get_hungarian_curator_
 const loadCuratorProgress = () => withBackendTimeout(getCuratorProgress());
 const getSettings = callable<[], SettingsResponse>("get_settings");
 const clearInstalledVersionCache = callable<[], { success: boolean; error?: string }>("clear_installed_version_cache");
+const getInstalledBuildsForSettings = callable<[string[], boolean], { success: boolean; builds?: Record<string, string>;
+  versions?: Record<string, { version: string; source: string }>; error?: string }>("get_installed_builds");
+const setConfirmedInstalledVersion = callable<[string, string, string], { success: boolean; error?: string }>("set_confirmed_installed_version");
 const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean, showHungarianBadges: boolean, showInstalledBuilds: boolean], SettingsResponse>("set_badge_visibility");
 const setNotificationPreferences = callable<[
   notifyGfnAdditions: boolean,
@@ -1929,6 +1933,10 @@ function Content() {
   const [visibility, setVisibility] = useState<BadgeVisibility>({ ...badgeVisibility });
   const [notifications, setNotifications] = useState<NotificationPreferences>({ ...notificationPreferences });
   const [settingsWorking, setSettingsWorking] = useState(false);
+  const [versionQuery, setVersionQuery] = useState("");
+  const [versionInput, setVersionInput] = useState("");
+  const [versionDetail, setVersionDetail] = useState<InstalledVersionDetail>();
+  const [versionWorking, setVersionWorking] = useState(false);
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
   const [watchWorking, setWatchWorking] = useState(false);
   const [cloudRefreshing, setCloudRefreshing] = useState(false);
@@ -2305,6 +2313,54 @@ function Content() {
       store_badge_percent: response.store_badge_percent ?? 100 });
   };
 
+  const inspectInstalledVersion = async (id: string, name: string) => {
+    setVersionWorking(true);
+    try {
+      const result = await withBackendTimeout(getInstalledBuildsForSettings([id], true), 60_000);
+      if (!result.success) throw new Error(result.error || "A Steam-build ellenőrzése sikertelen.");
+      const build = result.builds?.[id];
+      if (!build) throw new Error("Ez a játék jelenleg nincs telepítve a Steam-könyvtárban.");
+      const info = result.versions?.[id];
+      setVersionDetail({ id, name, build, version: info?.version ?? "", source: info?.source ?? "" });
+      setVersionInput(info?.source === "confirmed" ? info.version : "");
+    } catch (error) {
+      setVersionDetail(undefined);
+      toaster.toast({ title: "Verzió ellenőrzése", body: errorMessage(error) });
+    } finally {
+      setVersionWorking(false);
+    }
+  };
+
+  const saveConfirmedVersion = async (version: string) => {
+    if (!versionDetail) return;
+    setVersionWorking(true);
+    try {
+      const result = await withBackendTimeout(
+        setConfirmedInstalledVersion(versionDetail.id, versionDetail.build, version.trim()), 60_000,
+      );
+      if (!result.success) throw new Error(result.error || "A verzió mentése sikertelen.");
+      clearInstalledBuildCache();
+      const refreshed = await withBackendTimeout(getInstalledBuildsForSettings([versionDetail.id], true), 60_000);
+      if (!refreshed.success || refreshed.builds?.[versionDetail.id] !== versionDetail.build) {
+        throw new Error("A játék Steam-buildje megváltozott. Ellenőrizd újra.");
+      }
+      const info = refreshed.versions?.[versionDetail.id];
+      setVersionDetail({ ...versionDetail, version: info?.version ?? "", source: info?.source ?? "" });
+      setVersionInput(info?.source === "confirmed" ? info.version : "");
+      toaster.toast({ title: "Játékverzió", body: version.trim() ? "A menüben ellenőrzött verzió mentve." : "A megerősítés törölve." });
+    } catch (error) {
+      toaster.toast({ title: "Játékverzió hiba", body: errorMessage(error) });
+    } finally {
+      setVersionWorking(false);
+    }
+  };
+
+  const versionSearch = versionQuery.trim().toLocaleLowerCase();
+  const versionCandidates = versionSearch.length >= 2 ? getSteamLibraryApps()
+    .map((app: any) => ({ id: String(app?.appid ?? ""), name: overviewGameName(app) ?? "" }))
+    .filter((app) => /^\d+$/.test(app.id) && (app.id.includes(versionSearch) || app.name.toLocaleLowerCase().includes(versionSearch)))
+    .slice(0, 8) : [];
+
   if (page === "shops") return <PanelSection title="Megbízható boltok"><AllKeyShopMerchants onBack={() => openPage("settingsPrices")} /></PanelSection>;
   if (page === "settings") return <PanelSection title="Beállítások">
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("home")}>← Főoldal</ButtonItem></PanelSectionRow>
@@ -2336,11 +2392,12 @@ function Content() {
     /></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Telepített játékok verziója"
-      description="A játék vagy projekt saját verzióját mutatja, ha kiolvasható; különben a Steam-build marad."
+      description="A megerősített vagy kiolvasható játékverziót mutatja; különben a Steam-build marad."
       checked={visibility.show_installed_builds}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_installed_builds: checked })}
     /></PanelSectionRow>
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settingsVersions")}>Játékverzió megerősítése</ButtonItem></PanelSectionRow>
     <PanelSectionRow><ButtonItem layout="below" disabled={settingsWorking} onClick={async () => {
       setSettingsWorking(true);
       try {
@@ -2354,8 +2411,39 @@ function Content() {
         setSettingsWorking(false);
       }
     }}>Verziószám-gyorsítótár ürítése</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>Ez csak az automatikus találatokat törli; a kézzel megerősített verziók megmaradnak.</div></PanelSectionRow>
     <BadgeSizeSettings initial={{ library_badge_percent: visibility.library_badge_percent ?? 100,
       store_badge_percent: visibility.store_badge_percent ?? 100 }} save={saveSizes} />
+  </PanelSection>;
+  if (page === "settingsVersions") return <PanelSection title="Játékverzió megerősítése">
+    <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settingsBadges")}>← Jelvények és méret</ButtonItem></PanelSectionRow>
+    <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>
+      Írd be a játék menüjében látott verziót. A bejegyzés csak a jelenlegi Steam-buildhez tartozik; frissítés után újra ellenőrizni kell.
+    </div></PanelSectionRow>
+    <PanelSectionRow><TextField label="Telepített játék neve vagy AppID" value={versionQuery} bShowClearAction
+      onChange={(event) => setVersionQuery(event.currentTarget.value)} /></PanelSectionRow>
+    {/^\d+$/.test(versionSearch) && !versionCandidates.some((app) => app.id === versionSearch) &&
+      <PanelSectionRow><ButtonItem layout="below" disabled={versionWorking}
+        onClick={() => void inspectInstalledVersion(versionSearch, resolveLibraryGameName(versionSearch))}>
+        Steam AppID {versionSearch} ellenőrzése
+      </ButtonItem></PanelSectionRow>}
+    {versionCandidates.map((app) => <PanelSectionRow key={app.id}><ButtonItem layout="below"
+      disabled={versionWorking} label={app.name || ("Steam AppID " + app.id)} description={"Steam AppID: " + app.id}
+      onClick={() => void inspectInstalledVersion(app.id, app.name || ("Steam AppID " + app.id))}>
+      Kiválasztás
+    </ButtonItem></PanelSectionRow>)}
+    {versionDetail && <>
+      <PanelSectionRow><div style={{ fontSize: "12px" }}>
+        <strong>{versionDetail.name}</strong><br />Steam-build: {versionDetail.build}<br />
+        {versionDetail.version ? `${versionDetail.source === "confirmed" ? "Megerősített" : versionDetail.source === "project" ? "Projekt" : "Helyi fájl"}: ${versionDetail.version}` : "Játékverzió nem olvasható ki."}
+      </div></PanelSectionRow>
+      <PanelSectionRow><TextField label="A játék menüjében látott verzió" value={versionInput} bShowClearAction
+        disabled={versionWorking} onChange={(event) => setVersionInput(event.currentTarget.value)} /></PanelSectionRow>
+      <PanelSectionRow><ButtonItem layout="below" disabled={versionWorking || !versionInput.trim()}
+        onClick={() => void saveConfirmedVersion(versionInput)}>Verzió megerősítése</ButtonItem></PanelSectionRow>
+      {versionDetail.source === "confirmed" && <PanelSectionRow><ButtonItem layout="below" disabled={versionWorking}
+        onClick={() => void saveConfirmedVersion("")}>Megerősítés törlése</ButtonItem></PanelSectionRow>}
+    </>}
   </PanelSection>;
   if (page === "settingsStore") return <PanelSection title="Áruházi elhelyezés">
     <PanelSectionRow><ButtonItem layout="below" onClick={() => openPage("settings")}>← Beállítások</ButtonItem></PanelSectionRow>
