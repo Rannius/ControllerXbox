@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 9
+INSTALLED_VERSION_CACHE_SCHEMA = 10
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -227,7 +227,7 @@ class InstalledGameVersionScanner:
 
     @classmethod
     def _declared_version(cls, root: Path) -> Tuple[str, str]:
-        for relative in ("version.json", "game_version.json", "build_info.json", "buildinfo.json", "build.json"):
+        for relative in ("version.json", "game_version.json", "build_info.json", "buildinfo.json"):
             contents = cls._small_text(root, relative)
             if not contents:
                 continue
@@ -240,7 +240,7 @@ class InstalledGameVersionScanner:
                     version = cls._clean_version(payload.get(key))
                     if version:
                         return version, "game"
-        for relative in ("version.txt", "game_version.txt", "VERSION", "build.txt", "version.ini", "build.ini", "version.xml"):
+        for relative in ("version.txt", "game_version.txt", "VERSION"):
             contents = cls._small_text(root, relative).strip()
             if not contents:
                 continue
@@ -390,122 +390,6 @@ class InstalledGameVersionScanner:
         return version if version != "1.0.0" else ""  # Unreal's untouched default.
 
     @classmethod
-    def _unity_global_version(cls, data_dir: Path) -> str:
-        """Extract bundleVersion from Unity's globalgamemanagers.
-
-        The file is a Unity serialized archive.  Its header exposes the
-        format version and the Unity engine version string.  The first
-        serialized object is PlayerSettings, which contains the
-        ``bundleVersion`` field set by the developer.
-
-        The method reads a bounded prefix of the file, locates all
-        version-like ASCII strings after the engine version, and returns
-        the first candidate that passes ``_clean_version``.  Engine
-        version strings (containing a letter like ``2021.3.14f1``) are
-        skipped automatically.
-        """
-        path = data_dir / "globalgamemanagers"
-        try:
-            if not cls._inside(data_dir.parent, path) or not path.is_file():
-                return ""
-            size = path.stat().st_size
-            if not 0 < size <= 8 * 1024 * 1024:
-                return ""
-            with path.open("rb") as stream:
-                chunk = stream.read(min(size, 128 * 1024))
-        except OSError:
-            return ""
-        if len(chunk) < 20:
-            return ""
-        # Parse the serialized file header to find the Unity engine
-        # version string so we can exclude it from candidate matches.
-        try:
-            format_version = struct.unpack(">I", chunk[8:12])[0]
-        except struct.error:
-            return ""
-        if format_version < 9 or format_version > 40:
-            return ""
-        # Locate the null-terminated engine version string in the header.
-        if format_version >= 22:
-            # Large-file header: 5Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă˘â‚¬ĹĄ4 bytes fixed, then 4Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă˘â‚¬ĹĄ8 bytes.
-            engine_offset = 48
-        elif format_version >= 17:
-            engine_offset = 20
-        else:
-            engine_offset = 20
-        end = chunk.find(b"\x00", engine_offset, engine_offset + 64)
-        if end < 0:
-            return ""
-        engine_version = chunk[engine_offset:end].decode("ascii", errors="replace")
-        # Scan the data portion for version-like strings.  The
-        # bundleVersion is a length-prefixed UTF-8 string somewhere in
-        # the PlayerSettings block, which is typically the first object.
-        search_start = end + 1
-        for match in re.finditer(rb"(\d+(?:\.\d+){1,3})", chunk[search_start:]):
-            candidate = match.group(1).decode("ascii")
-            # Skip the Unity engine version itself and its sub-parts.
-            if candidate in engine_version or engine_version.startswith(candidate):
-                continue
-            # Skip if followed by a letter (engine build tag like "f1").
-            abs_end = search_start + match.end()
-            if abs_end < len(chunk) and chr(chunk[abs_end]).isalpha():
-                continue
-            version = cls._clean_version(candidate)
-            if version and version not in ("1.0", "1.0.0", "1.0.0.0"):
-                return version
-        return ""
-
-    @classmethod
-    def _executable_version(cls, root: Path) -> str:
-        exes: List[Path] = []
-        def _find_exes(current: Path, depth: int) -> None:
-            if depth > 4 or len(exes) >= 32:
-                return
-            try:
-                for child in current.iterdir():
-                    if not cls._inside(root, child):
-                        continue
-                    if child.is_file() and child.suffix.lower() == ".exe":
-                        exes.append(child)
-                    elif child.is_dir() and child.name.lower() not in ("engine", "_commonredist", "directx", "vcredist", "dotnet"):
-                        _find_exes(child, depth + 1)
-            except OSError:
-                pass
-        _find_exes(root, 1)
-        if not exes:
-            return ""
-        for exe in sorted(exes, key=lambda x: x.stat().st_size, reverse=True):
-            if not cls._inside(root, exe) or not exe.is_file():
-                continue
-            try:
-                size = exe.stat().st_size
-                if not 0 < size <= 128 * 1024 * 1024:
-                    continue
-                content = exe.read_bytes()
-                for key in (b"P\x00r\x00o\x00d\x00u\x00c\x00t\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00",
-                            b"F\x00i\x00l\x00e\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00"):
-                    pos = 0
-                    while True:
-                        pos = content.find(key, pos)
-                        if pos < 0:
-                            break
-                        start = pos + len(key)
-                        pos = start  # advance for next iteration
-                        while start + 1 < len(content) and content[start:start+2] == b"\x00\x00":
-                            start += 2
-                        end = start
-                        while end + 1 < len(content) and content[end:end+2] != b"\x00\x00":
-                            end += 2
-                        if end > start:
-                            val = content[start:end].decode("utf-16le", errors="ignore").strip()
-                            version = cls._clean_version(val)
-                            if version and version not in ("1.0", "1.0.0", "1.0.0.0", "2019.4.32.12282"):
-                                return version
-            except OSError:
-                pass
-        return ""
-
-    @classmethod
     def _engine_version(cls, root: Path) -> Tuple[str, str]:
         try:
             children = list(root.iterdir())
@@ -522,20 +406,6 @@ class InstalledGameVersionScanner:
                     version, _ = cls._declared_version(streaming)
                     if version:
                         return version, "game"
-                app_info = child / "app.info"
-                try:
-                    if cls._inside(root, app_info) and app_info.is_file() and app_info.stat().st_size <= 4096:
-                        lines = app_info.read_text(encoding="utf-8-sig", errors="replace").splitlines()
-                        if len(lines) >= 3:
-                            version = cls._clean_version(lines[2])
-                            if version:
-                                return version, "project"
-                except OSError:
-                    pass
-                version = cls._unity_global_version(child)
-                if version:
-                    return version, "project"
-
         version = cls._godot_version(root)
         if version:
             return version, "project"
@@ -778,27 +648,6 @@ class InstalledGameVersionScanner:
         return ""
 
     @classmethod
-    def build_time(cls, root: Path) -> int:
-        best = 0
-        def _search(current: Path, depth: int) -> None:
-            nonlocal best
-            if depth > 4:
-                return
-            try:
-                for child in current.iterdir():
-                    if not cls._inside(root, child):
-                        continue
-                    if child.is_file():
-                        if child.suffix.lower() in (".exe", ".dll", ".pak", ".so", ".bin"):
-                            best = max(best, int(child.stat().st_mtime))
-                    elif child.is_dir() and child.name.lower() not in ("engine", "_commonredist", "directx", "vcredist", "dotnet"):
-                        _search(child, depth + 1)
-            except OSError:
-                pass
-        _search(root, 1)
-        return best
-
-    @classmethod
     def scan(cls, root: Path, title: str, app_id: str = "") -> Tuple[str, str]:
         if app_id == "1623730":
             version = cls._palworld_version(root)
@@ -806,13 +655,7 @@ class InstalledGameVersionScanner:
         declared = cls._declared_version(root)
         if declared[0]:
             return declared
-        engine = cls._engine_version(root)
-        if engine[0]:
-            return engine
-        executable = cls._executable_version(root)
-        if executable:
-            return executable, "game"
-        return "", ""
+        return cls._engine_version(root)
 
 
 class Plugin:
@@ -1189,7 +1032,7 @@ class Plugin:
             if type(aks_retry) in (int, float) and time.time() < aks_retry < float("inf"):
                 self._price_service_retry_at = aks_retry
                 self._aks_pause_until = time.monotonic() + (aks_retry - time.time())
-                self._price_service_error = {"error": "AllKeyShop: korÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡bban kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rt lekÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si szÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€žĂ‹ĹĄnet.", "error_code": "rate_limit", "global_error": True}
+                self._price_service_error = {"error": "AllKeyShop: korábban kért lekérési szünet.", "error_code": "rate_limit", "global_error": True}
             retry = payload.get("gg_retry_at", 0)
             if type(retry) in (int, float) and retry > 0:
                 self._gg_retry_at = retry
@@ -1257,7 +1100,7 @@ class Plugin:
                 await self._run_blocking(write)
                 self._price_disk_error = ""
             except OSError:
-                self._price_disk_error = "Az Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rgyorsÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬ĹˇtÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡r lemezre mentÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©se sikertelen."
+                self._price_disk_error = "Az árgyorsítótár lemezre mentése sikertelen."
                 decky.logger.warning(self._price_disk_error)
 
     def _schedule_price_save(self) -> None:
@@ -1385,7 +1228,7 @@ class Plugin:
         if (not isinstance(owner, str) or (owner and not re.fullmatch(r"\d{17}", owner))
                 or not isinstance(app_ids, list) or len(app_ids) > 10000
                 or any(not str(key).isdigit() or not 0 < int(str(key)) < 10000000000 for key in app_ids)):
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡nsÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡glista."}
+            return {"success": False, "error": "Érvénytelen kívánságlista."}
         if owner != self._price_wishlist_owner:
             self._price_wishlist_retry.clear()
             self._price_wishlist_attempts.clear()
@@ -1484,7 +1327,7 @@ class Plugin:
             value = {"mode": mode, "url": address, "token": key}
             await self._run_blocking(self._write_file_atomically, self._price_connection_path, "price-connection-", json.dumps(value))
         except (ValueError, OSError):
-            return {"success": False, "error": "HTTPS szervercÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­m Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s legalÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡bb 24 karakteres hozzÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡fÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si token szÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€žĂ‹ĹĄksÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©ges. Ä‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă‹â€ˇj cÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­mhez add meg a hozzÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ tartozÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ tokent."}
+            return {"success": False, "error": "HTTPS szervercím és legalább 24 karakteres hozzáférési token szükséges. Új címhez add meg a hozzá tartozó tokent."}
         self._price_connection = {"mode": mode, "url": address}
         self._price_server_token = key
         self._price_epoch += 1
@@ -1522,14 +1365,14 @@ class Plugin:
     def _price_server_error_text(error: Exception) -> str:
         if isinstance(error, urllib.error.HTTPError):
             if error.code in (401, 403):
-                return "A sajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡t szerver elutasÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­totta a hozzÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡fÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©st. EllenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Ârizd a tokent."
-            return "SajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡t szerver: HTTP %s." % error.code
+                return "A saját szerver elutasította a hozzáférést. Ellenőrizd a tokent."
+            return "Saját szerver: HTTP %s." % error.code
         cause = getattr(error, "reason", error)
         if isinstance(cause, ssl.SSLError):
-            return "A sajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡t szerver HTTPS-tanÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźsÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡nya nem ellenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂrizhetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â."
+            return "A saját szerver HTTPS-tanúsítványa nem ellenőrizhető."
         if isinstance(error, OSError):
-            return "A sajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡t szerver nem Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rhetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â el vagy idÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂtÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźllÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©pÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶rtÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nt. A mentett Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rak megmaradtak."
-        return "A sajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡t szerver vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lasza nem ellenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂrizhetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â. FrissÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tsd mindkÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©t oldalt."
+            return "A saját szerver nem érhető el vagy időtúllépés történt. A mentett árak megmaradtak."
+        return "A saját szerver válasza nem ellenőrizhető. Frissítsd mindkét oldalt."
 
     async def test_price_server(self) -> Dict[str, Any]:
         try:
@@ -1538,7 +1381,7 @@ class Plugin:
             return {"success": True, "queue": int(result.get("queue", 0)), "gg_available": result.get("gg_available") is True,
                     "aks_entries": int(result.get("aks_entries", 0)), "gg_entries": int(result.get("gg_entries", 0))}
         except (OSError, ValueError, TypeError):
-            return {"success": False, "error": "A szerverkapcsolat ellenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂrzÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©se sikertelen. EllenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Ârizd a HTTPS cÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­met, tokent Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s porttovÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡bbÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡st."}
+            return {"success": False, "error": "A szerverkapcsolat ellenőrzése sikertelen. Ellenőrizd a HTTPS címet, tokent és porttovábbítást."}
 
     async def _lookup_remote_price(self, app_id: str, epoch: int, force: bool = False) -> Dict[str, Any]:
         provider = self._price_preferences.get("provider", "aks")
@@ -1572,12 +1415,12 @@ class Plugin:
                         and self._aks_edition_suffix(entry["title"])[1]
                         and "edition_filter" not in entry):
                     return {"success": False, "provider": provider, "error_code": "server_version", "retry_after": 60,
-                            "error": "Az Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rszerver mÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©g nem kezeli az Enhanced/Deluxe kiadÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡sokat. FrissÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tsd az Ubuntu Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rszervert 1.0.112-re."}
+                            "error": "Az árszerver még nem kezeli az Enhanced/Deluxe kiadásokat. Frissítsd az Ubuntu árszervert 1.0.112-re."}
                 if not (self._valid_gg_entry(entry) if entry_provider == "gg" else self._valid_price_entry(entry)):
                     raise ValueError("Invalid price data")
                 if entry.get("source") == "aks_history" and entry.get("history_version") != AKS_HISTORY_VERSION:
                     return {"success": False, "provider": provider, "error_code": "server_version", "retry_after": 60,
-                            "error": "Az Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rszerver rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©gi, hiÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡nyosan szÄ‚â€žĂ„â€¦Ä‚â€šĂ‚Â±rt Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rakat kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€žĂ‹ĹĄld. FrissÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tsd az Ubuntu Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rszervert is 1.0.94 vagy Ä‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźjabb verziÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇra."}
+                            "error": "Az árszerver régi, hiányosan szűrt árakat küld. Frissítsd az Ubuntu árszervert is 1.0.94 vagy újabb verzióra."}
                 cache = self._gg_cache if entry_provider == "gg" else self._price_cache
                 if app_id not in cache and len(cache) >= 10000:
                     cache.pop(next(iter(cache)))
@@ -1592,7 +1435,7 @@ class Plugin:
                 self._price_force_pending.discard(app_id)
                 if not isinstance(failure, dict):
                     raise ValueError("Invalid failure")
-                message = str(failure.get("error", "A szerver Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rlekÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©se sikertelen."))[:500]
+                message = str(failure.get("error", "A szerver árlekérése sikertelen."))[:500]
                 shared = failure.get("global_error") is True
                 if shared:
                     self._price_server_retry_at = time.time() + max(1, retry)
@@ -1614,7 +1457,7 @@ class Plugin:
                         "stale": time.time() - entry["checked_at"] >= self._price_entry_ttl(entry),
                         "pending": pending, "retry_after": max(1, retry)}
             return {"success": False, "provider": provider, "pending": pending, "error_code": "pending" if pending else "server",
-                    "error": "A sajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡t szerver lekÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si sorÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ban vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡r." if pending else "A szerver nem adott Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡radatot.", "retry_after": max(1, retry)}
+                    "error": "A saját szerver lekérési sorában vár." if pending else "A szerver nem adott áradatot.", "retry_after": max(1, retry)}
         except (OSError, ValueError, TypeError, KeyError) as error:
             if epoch != self._price_epoch:
                 return {"success": True, "disabled": True}
@@ -1637,7 +1480,7 @@ class Plugin:
             self._price_merchants.update(names)
             self._schedule_price_save()
             if result.get("pending"):
-                error = "A szerver frissÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­ti a boltlistÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡t. A mÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡r ismert boltok vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡laszthatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇk; nÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©hÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ny mÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡sodperc mÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźlva frissÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tsd a listÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡t."
+                error = "A szerver frissíti a boltlistát. A már ismert boltok választhatók; néhány másodperc múlva frissítsd a listát."
         except (OSError, ValueError, TypeError) as exc:
             error = self._price_server_error_text(exc)
         names = {name.casefold(): name for name in (*PRICE_MERCHANT_CHOICES, *self._price_merchants, *self._price_preferences["merchants"])}
@@ -1667,7 +1510,7 @@ class Plugin:
         if (type(enabled) is not bool or type(allow_gifts) is not bool or not isinstance(merchants, list)
                 or len(merchants) > 2000 or any(not isinstance(item, str) or len(item) > 80 for item in merchants)
                 or (restrict_merchants is not None and type(restrict_merchants) is not bool)):
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rfigyelÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si beÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡llÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡s."}
+            return {"success": False, "error": "Érvénytelen árfigyelési beállítás."}
         value = {"provider": self._price_preferences.get("provider", "aks"), "enabled": enabled, "allow_gifts": allow_gifts,
                  "restrict_merchants": bool(merchants) if restrict_merchants is None else restrict_merchants,
                  "merchants": sorted(set(item.strip() for item in merchants if item.strip()))}
@@ -1679,7 +1522,7 @@ class Plugin:
     async def set_price_provider(self, provider: Any, api_key: Any = None) -> Dict[str, Any]:
         if provider not in ("aks", "gg") or (api_key is not None and (
                 not isinstance(api_key, str) or not re.fullmatch(r"[A-Za-z0-9_-]{16,200}", api_key))):
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rforrÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡s vagy API-kulcs."}
+            return {"success": False, "error": "Érvénytelen árforrás vagy API-kulcs."}
         key = self._gg_api_key if api_key is None else api_key
         if provider == "gg" and not key and self._price_connection["mode"] != "server":
             return {"success": False, "error": "Add meg a GG.deals API-kulcsot."}
@@ -1807,7 +1650,7 @@ class Plugin:
                 return dict(entry)
             if time.time() < self._gg_retry_at:
                 return {"success": False, "provider": "gg", "global_error": True, "error_code": "rate_limit",
-                        "error": self._gg_last_error or "GG.deals lekÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si szÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€žĂ‹ĹĄnet.", "retry_after": self._gg_retry_at - time.time()}
+                        "error": self._gg_last_error or "GG.deals lekérési szünet.", "retry_after": self._gg_retry_at - time.time()}
             try:
                 if not self._gg_api_key:
                     raise ValueError("Missing key")
@@ -1825,7 +1668,7 @@ class Plugin:
                         self._gg_retry_at = max(minute[0] + 60 if len(minute) >= 100 else 0,
                                                 self._gg_requests[0] + 3600 if len(self._gg_requests) >= 1000 else 0)
                         return {"success": False, "provider": "gg", "global_error": True, "error_code": "rate_limit",
-                                "error": "GG.deals API-keret: a kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶vetkezÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â idÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Âablakra vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡r.", "retry_after": max(1, self._gg_retry_at - now)}
+                                "error": "GG.deals API-keret: a következő időablakra vár.", "retry_after": max(1, self._gg_retry_at - now)}
                     ids = [app_id]
                     # Include due wishlist items whose Steam eligibility is already known.
                     if time.monotonic() < self._price_wishlist_lease:
@@ -1862,9 +1705,9 @@ class Plugin:
                     code = "rate_limit" if error.code == 429 else "http"
                     message = "GG.deals HTTP %s." % error.code
                     if error.code in (401, 403):
-                        message += " EllenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Ârizd az API-kulcsot Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s a hozzÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡fÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©st."
+                        message += " Ellenőrizd az API-kulcsot és a hozzáférést."
                 else:
-                    message = "GG.deals: kapcsolati hiba vagy idÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂtÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźllÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©pÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s." if code == "connection" else "A GG.deals vagy a Steam vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lasza nem ellenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂrizhetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â."
+                    message = "GG.deals: kapcsolati hiba vagy időtúllépés." if code == "connection" else "A GG.deals vagy a Steam válasza nem ellenőrizhető."
                 self._gg_failures += 1
                 delay = max(min(300, 10 * 2 ** min(5, self._gg_failures - 1)), self._retry_after(getattr(error, "headers", None)))
                 self._gg_retry_at = max(self._gg_retry_at, time.time() + delay)
@@ -1902,14 +1745,14 @@ class Plugin:
     @staticmethod
     def _aks_title(value: str) -> str:
         value = html.unescape(re.sub(r"<[^>]*>", "", value)).translate(
-            str.maketrans("", "", "Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąÄľÄ‚â€ąĂ‚ÂĂ„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â®Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąÄľÄ‚â€šĂ‚Â Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬Äąâ€şÄ‚ËĂ˘â€šÂ¬Ă‹â€ˇĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬Äąâ€şÄ‚â€ąĂ˘â‚¬Ë‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąÄľÄ‚ËĂ˘â€šÂ¬Ă˘â‚¬ĹĄĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬Ă˘â€žËÄ‚â€šĂ‚Â¸Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬Äąâ€şÄ‚ËĂ˘â€šÂ¬Ă˘â€žË"))
+            str.maketrans("", "", "™®℠Ⓡⓡ©℗Ⓒⓒ"))
         return re.sub(r"[^\w]", "", unicodedata.normalize("NFKC", value).casefold())
 
     @staticmethod
     def _aks_search_name(value: str) -> str:
         # Omit trademark glyphs in the request too, preserving words, accents,
         # punctuation and edition names. Exact result/AppID validation is unchanged.
-        return " ".join(html.unescape(value).translate(str.maketrans("", "", "Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąÄľÄ‚â€ąĂ‚ÂĂ„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â®Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąÄľÄ‚â€šĂ‚Â Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬Äąâ€şÄ‚ËĂ˘â€šÂ¬Ă‹â€ˇĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬Äąâ€şÄ‚â€ąĂ˘â‚¬Ë‡Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬ÄąÄľÄ‚ËĂ˘â€šÂ¬Ă˘â‚¬ĹĄĂ„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬Ă˘â€žËÄ‚â€šĂ‚Â¸Ă„â€šĂ‹ÂÄ‚ËĂ˘â€šÂ¬Äąâ€şÄ‚ËĂ˘â€šÂ¬Ă˘â€žË")).split())
+        return " ".join(html.unescape(value).translate(str.maketrans("", "", "™®℠Ⓡⓡ©℗Ⓒⓒ")).split())
 
     @staticmethod
     def _aks_roman_variant(title: str) -> str:
@@ -1917,7 +1760,7 @@ class Plugin:
         # Leave a leading "I" (the English pronoun) alone.
         def replace(match: Any) -> str:
             token = match.group()
-            if token == "I" and (match.start() == 0 or not re.match(r"\s*(?:$|[:\-Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚ËĂ˘â€šÂ¬Äąâ€şĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚ËĂ˘â€šÂ¬ÄąÄ„])", title[match.end():])):
+            if token == "I" and (match.start() == 0 or not re.match(r"\s*(?:$|[:\-–—])", title[match.end():])):
                 return token
             values = {"I": 1, "V": 5, "X": 10}
             number = 0
@@ -1942,11 +1785,11 @@ class Plugin:
 
     @staticmethod
     def _aks_edition_suffix(title: str) -> Tuple[str, str]:
-        match = re.search(r"\s+(?:[-Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚ËĂ˘â€šÂ¬Äąâ€şĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚ËĂ˘â€šÂ¬ÄąÄ„:]\s*)?((?:enhanced(?:\s+edition)?\s+deluxe|"
+        match = re.search(r"\s+(?:[-–—:]\s*)?((?:enhanced(?:\s+edition)?\s+deluxe|"
                           r"enhanced|(?:digital\s+)?deluxe)(?:\s+edition)?)$", title, re.IGNORECASE)
         if not match:
             return title, ""
-        base = title[:match.start()].rstrip(" -Ă„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚ËĂ˘â€šÂ¬Äąâ€şĂ„â€šĂ‹ÂÄ‚ËĂ˘â‚¬ĹˇĂ‚Â¬Ä‚ËĂ˘â€šÂ¬ÄąÄ„:")
+        base = title[:match.start()].rstrip(" -–—:")
         if not base:
             return title, ""
         suffix = match.group(1).casefold()
@@ -2032,7 +1875,7 @@ class Plugin:
                     if pause:
                         self._aks_pause_until = max(self._aks_pause_until, time.monotonic() + pause)
                         self._aks_next_request_at = max(self._aks_next_request_at, self._aks_pause_until)
-                error.price_stage = "AKS-katalÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇgus" if parsed.path == "/api/v2/vaks.php" else "AKS-Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡radatok"
+                error.price_stage = "AKS-katalógus" if parsed.path == "/api/v2/vaks.php" else "AKS-áradatok"
                 error.price_elapsed = round(time.monotonic() - started, 1)
                 raise
             finally:
@@ -2049,7 +1892,7 @@ class Plugin:
                 if re.fullmatch(r"https://www\.allkeyshop\.com/blog/(?:buy-|compare-and-buy-cd-key-for-digital-download-)[a-z0-9-]+/", url) and "account" not in url:
                     matches.add(url)
         if len(matches) != 1:
-            raise ValueError("Nincs egyÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rtelmÄ‚â€žĂ„â€¦Ä‚â€šĂ‚Â± AllKeyShop-talÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lat ehhez a Steam-jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©khoz.")
+            raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
         return matches.pop()
 
     @staticmethod
@@ -2057,18 +1900,18 @@ class Plugin:
         # Decode the site's public embedded JSON; never execute its JavaScript.
         match = re.search(r"\bvar\s+gamePageTrans\s*=\s*", page)
         if not match:
-            raise ValueError("Az AllKeyShop ajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡nlatai most nem olvashatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇk.")
+            raise ValueError("Az AllKeyShop ajánlatai most nem olvashatók.")
         data, _ = json.JSONDecoder().raw_decode(page[match.end():])
         if (not isinstance(data, dict) or not isinstance(data.get("prices"), list)
                 or any(not isinstance(data.get(key), dict) for key in ("merchants", "regions", "editions"))):
-            raise ValueError("MegvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltozott az AllKeyShop adatformÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tuma.")
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
         return data
 
     @staticmethod
     def _aks_filter(data: Dict[str, Any], preferences: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Exact allowlist: never infer that an unknown product is a key.
-        regions = {"STEAM GLOBAL": "Steam-kulcs Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· Global", "STEAM EU": "Steam-kulcs Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· EU",
-                   "STEAM GIFT GLOBAL": "Steam Gift Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· Global", "STEAM GIFT EU": "Steam Gift Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· EU"}
+        regions = {"STEAM GLOBAL": "Steam-kulcs · Global", "STEAM EU": "Steam-kulcs · EU",
+                   "STEAM GIFT GLOBAL": "Steam Gift · Global", "STEAM GIFT EU": "Steam Gift · EU"}
         allowed = {value.casefold() for value in preferences["merchants"]}
         restricted = preferences.get("restrict_merchants", bool(allowed))
         offers: List[Dict[str, Any]] = []
@@ -2134,7 +1977,7 @@ class Plugin:
                       "type": data.get("type") if isinstance(data.get("type"), str) else "",
                       "checked_at": time.time()}
         except (OSError, ValueError, TypeError, AttributeError) as error:
-            failure = ValueError("A Steam-jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©k neve most nem kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rdezhetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â le.")
+            failure = ValueError("A Steam-játék neve most nem kérdezhető le.")
             failure.price_stage = "Steam-adatok"
             failure.price_elapsed = round(time.monotonic() - started, 1)
             failure.price_local_error = getattr(error, "price_local_error", False)
@@ -2156,10 +1999,10 @@ class Plugin:
     def _aks_page_matches(cls, page: str, title: str, app_id: str) -> bool:
         heading = re.search(r"<h1\b[^>]*>(.*?)</h1>", page, re.S | re.I)
         if not heading:
-            raise ValueError("MegvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltozott az AllKeyShop adatformÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tuma.")
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
         name = re.search(r'<[^>]+(?:data-)?itemprop=[\"\']name[\"\'][^>]*>(.*?)</[^>]+>', heading.group(1), re.S | re.I)
         if not name:
-            raise ValueError("MegvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltozott az AllKeyShop adatformÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tuma.")
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
         if cls._aks_title(name.group(1)) != cls._aks_title(title):
             return False
         # When an explicit Steam product link exists, never accept a different AppID.
@@ -2189,7 +2032,7 @@ class Plugin:
                 pass
         payload = json.loads(self._aks_read(AKS_CATALOG_URL))
         if not isinstance(payload, dict) or payload.get("status") != "success" or not isinstance(payload.get("games"), list):
-            raise ValueError("MegvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltozott az AllKeyShop adatformÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tuma.")
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
         index = {}
         for game in payload["games"]:
             if not isinstance(game, dict) or not isinstance(game.get("name"), str):
@@ -2201,13 +2044,13 @@ class Plugin:
             # Duplicate normalized names with different IDs are deliberately ambiguous.
             index[name] = product_id if name not in index or index[name] == product_id else None
         if not index:
-            raise ValueError("MegvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltozott az AllKeyShop adatformÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tuma.")
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
         self._aks_catalog, self._aks_catalog_checked_at = index, now
         try:
             self._write_file_atomically(path, "aks-catalog-", json.dumps(
                 {"version": 1, "checked_at": now, "index": index}, ensure_ascii=False))
         except OSError:
-            decky.logger.warning("Az AKS-katalÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇgus nem menthetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â; a memÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬ĹˇriÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ban tovÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡bb hasznÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ.")
+            decky.logger.warning("Az AKS-katalógus nem menthető; a memóriában tovább használható.")
         return index
 
     @staticmethod
@@ -2232,7 +2075,7 @@ class Plugin:
                                      for key in ("merchants", "regions", "editions")}}
         if (not isinstance(payload, dict) or not isinstance(payload.get("history"), list)
                 or any(not isinstance(payload.get(k), dict) for k in ("merchants", "regions", "editions"))):
-            raise ValueError("MegvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltozott az AllKeyShop adatformÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tuma.")
+            raise ValueError("Megváltozott az AllKeyShop adatformátuma.")
         latest: Dict[Any, Dict[str, Any]] = {}
         for row in payload["history"]:
             if not isinstance(row, dict):  # The public response can contain false rows.
@@ -2253,7 +2096,7 @@ class Plugin:
                     row.get(k) != previous.get(k) for k in ("last_price", "min_discount_price", "best_discount_code")):
                 previous["ambiguous"] = True
         if any(row is not False for row in payload["history"]) and not latest:
-            raise ValueError("Az AllKeyShop ajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡nlatai most nem olvashatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇk.")
+            raise ValueError("Az AllKeyShop ajánlatai most nem olvashatók.")
         # Each product has its own observation date. Another shop's newer row
         # does not prove this product expired. Preserve the last known quote,
         # expose its date, and never describe historical quotes as live stock.
@@ -2266,12 +2109,12 @@ class Plugin:
                             is_dlc: bool = False, edition_filter: str = "") -> List[Dict[str, Any]]:
         # Labels come from the API's region map, not from the merchant name.
         # Bare Steam is the unqualified/global group, not a per-country activation guarantee.
-        regions = {"steam": "Steam-kulcs Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· Global (AKS: Steam)", "steam global": "Steam-kulcs Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· Global",
-                   "steam eu": "Steam-kulcs Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· EU", "steam row": "Steam-kulcs Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· ROW",
-                   "steam eu/us": "Steam-kulcs Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· EU/US",
-                   "steam gift": "Steam Gift Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· Global (AKS: Steam Gift)",
-                   "steam gift global": "Steam Gift Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· Global", "steam gift eu": "Steam Gift Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· EU",
-                   "steam gift row": "Steam Gift Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· ROW"}
+        regions = {"steam": "Steam-kulcs · Global (AKS: Steam)", "steam global": "Steam-kulcs · Global",
+                   "steam eu": "Steam-kulcs · EU", "steam row": "Steam-kulcs · ROW",
+                   "steam eu/us": "Steam-kulcs · EU/US",
+                   "steam gift": "Steam Gift · Global (AKS: Steam Gift)",
+                   "steam gift global": "Steam Gift · Global", "steam gift eu": "Steam Gift · EU",
+                   "steam gift row": "Steam Gift · ROW"}
         allowed = {name.casefold() for name in preferences["merchants"]}
         restricted = preferences.get("restrict_merchants", bool(allowed))
         allowed_editions = ("Standard", "Standard Edition", "Early Access", "DLC") if is_dlc else (
@@ -2377,7 +2220,7 @@ class Plugin:
                 metadata = self._fetch_price_metadata(app_id, require_type=True)
                 if self._aks_title(metadata["title"]) != self._aks_title(title):
                     self._aks_matches.pop(app_id, None)
-                    raise ValueError("A Steam-cÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­m megvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltozott; az AKS-pÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rosÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡st Ä‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźjra kell ellenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Ârizni.")
+                    raise ValueError("A Steam-cím megváltozott; az AKS-párosítást újra kell ellenőrizni.")
             return {"title": title, "url": "https://www.allkeyshop.com/", "data": data,
                     "history_version": AKS_HISTORY_VERSION,
                     "edition_filter": match.get("edition_filter", ""),
@@ -2385,31 +2228,31 @@ class Plugin:
                     "steam_type": metadata.get("type", ""),
                     "source": "aks_history", "source_updated_at": max((row["end"] for row in data["prices"]), default=""),
                     "checked_at": time.time()}
-        raise ValueError("Nincs egyÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rtelmÄ‚â€žĂ„â€¦Ä‚â€šĂ‚Â± AllKeyShop-talÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lat ehhez a Steam-jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©khoz.")
+        raise ValueError("Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.")
 
     @staticmethod
     def _aks_error_details(error: Exception) -> Dict[str, Any]:
-        code, message, shared = "lookup", "Az AllKeyShop vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lasza nem dolgozhatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ fel.", False
+        code, message, shared = "lookup", "Az AllKeyShop válasza nem dolgozható fel.", False
         if isinstance(error, urllib.error.HTTPError):
             code, shared = ("rate_limit" if error.code == 429 else "http"), error.code not in (404, 410)
-            message = "Az AllKeyShop HTTP %s vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡laszt adott." % error.code
+            message = "Az AllKeyShop HTTP %s választ adott." % error.code
             if error.code == 429:
-                message += " TÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźl sok kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s: a szolgÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ szÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€žĂ‹ĹĄnetet kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©r."
+                message += " Túl sok kérés: a szolgáltató szünetet kér."
             elif error.code == 403:
-                message += " A szolgÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ megtagadta a hozzÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡fÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©st."
+                message += " A szolgáltató megtagadta a hozzáférést."
             elif error.code in (404, 410):
-                message += " Ez az adatlap nem Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rhetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â el; a tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶bbi jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©k ellenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂrizhetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â."
+                message += " Ez az adatlap nem érhető el; a többi játék ellenőrizhető."
         elif isinstance(error, (urllib.error.URLError, OSError)):
             code, shared = "connection", True
-            message = "Nem sikerÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€žĂ‹ĹĄlt kapcsolÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇdni az AllKeyShophoz, vagy a kapcsolat tÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźllÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©pte az idÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂkorlÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tot. Ez nem jelenti azt, hogy nincs ajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡nlat."
+            message = "Nem sikerült kapcsolódni az AllKeyShophoz, vagy a kapcsolat túllépte az időkorlátot. Ez nem jelenti azt, hogy nincs ajánlat."
         elif isinstance(error, ValueError):
             # Keep our specific validation messages; do not expose raw response bodies.
-            safe_messages = ("A Steam-jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©k neve most nem kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rdezhetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â le.",
-                             "Nincs egyÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rtelmÄ‚â€žĂ„â€¦Ä‚â€šĂ‚Â± AllKeyShop-talÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lat ehhez a Steam-jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©khoz.",
-                             "Az AllKeyShop ajÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡nlatai most nem olvashatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇk.",
-                             "MegvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltozott az AllKeyShop adatformÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tuma.",
-                             "Az AllKeyShop keresÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Âje nem vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡laszolt megfelelÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Âen.",
-                             "Az AllKeyShop pÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nzneme nem ellenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂrizhetÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â.")
+            safe_messages = ("A Steam-játék neve most nem kérdezhető le.",
+                             "Nincs egyértelmű AllKeyShop-találat ehhez a Steam-játékhoz.",
+                             "Az AllKeyShop ajánlatai most nem olvashatók.",
+                             "Megváltozott az AllKeyShop adatformátuma.",
+                             "Az AllKeyShop keresője nem válaszolt megfelelően.",
+                             "Az AllKeyShop pénzneme nem ellenőrizhető.")
             if str(error) in safe_messages:
                 message = str(error)
             if message == safe_messages[0]:
@@ -2426,15 +2269,15 @@ class Plugin:
         reason = getattr(cause, "reason", cause)
         network = ""
         if isinstance(reason, TimeoutError) or getattr(reason, "errno", None) in (110, 10060):
-            network = "IdÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂtÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźllÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©pÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s: a kapcsolat nem vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡laszolt idÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Âben."
+            network = "Időtúllépés: a kapcsolat nem válaszolt időben."
         elif type(reason).__name__ == "gaierror":
-            network = "DNS-hiba: a kiszolgÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ cÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­me nem oldhatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ fel."
+            network = "DNS-hiba: a kiszolgáló címe nem oldható fel."
         elif isinstance(reason, ssl.SSLError):
-            network = "TLS-hiba: a biztonsÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡gos kapcsolat nem hozhatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ lÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©tre."
+            network = "TLS-hiba: a biztonságos kapcsolat nem hozható létre."
         elif isinstance(reason, ConnectionRefusedError):
-            network = "A kiszolgÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ elutasÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­totta a kapcsolatot."
+            network = "A kiszolgáló elutasította a kapcsolatot."
         elif isinstance(reason, (ConnectionResetError, BrokenPipeError)):
-            network = "A kapcsolat adatÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tvitel kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶zben megszakadt."
+            network = "A kapcsolat adatátvitel közben megszakadt."
         if network:
             message = network
         stage = getattr(error, "price_stage", "Steam-adatok" if code == "steam" else "AllKeyShop")
@@ -2465,7 +2308,7 @@ class Plugin:
     async def _get_allkeyshop_price(self, app_id: Any, force: bool = False) -> Dict[str, Any]:
         normalized = str(app_id)
         if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen Steam AppID."}
+            return {"success": False, "error": "Érvénytelen Steam AppID."}
         if not self._price_preferences["enabled"] or self._price_stopping:
             return {"success": True, "disabled": True}
         entry = self._effective_price_entry(normalized)
@@ -2510,7 +2353,7 @@ class Plugin:
     async def _lookup_allkeyshop_price(self, app_id: Any, request_epoch: int, force: bool = False) -> Dict[str, Any]:
         normalized = str(app_id)
         if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen Steam AppID."}
+            return {"success": False, "error": "Érvénytelen Steam AppID."}
         if not self._price_preferences["enabled"]:
             return {"success": True, "disabled": True}
         async with self._price_lock:
@@ -2528,7 +2371,7 @@ class Plugin:
                     if epoch != self._price_epoch:
                         self._aks_matches.pop(normalized, None)
                         self._price_metadata.pop(normalized, None)
-                        return {"success": False, "error": "Az Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡rgyorsÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬ĹˇtÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡r tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶lve lett.", "retry_after": 30}
+                        return {"success": False, "error": "Az árgyorsítótár törölve lett.", "retry_after": 30}
                     if not entry.get("skipped"):
                         self._price_last_error = ""
                         self._price_service_error = None
@@ -2542,7 +2385,7 @@ class Plugin:
                     self._schedule_price_save()  # Persist metadata/match progress even when offers fail.
                     decky.logger.debug("AllKeyShop lookup failed: %s", error)
                     details = self._aks_error_details(error)
-                    self._price_last_error = "Steam %s Ă„â€šĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â· %s" % (normalized, details["error"])
+                    self._price_last_error = "Steam %s · %s" % (normalized, details["error"])
                     entry = {**details, "checked_at": time.time()}
                     if details["global_error"]:
                         self._price_service_failures += 1
@@ -2829,6 +2672,14 @@ class Plugin:
     async def get_settings(self) -> Dict[str, Any]:
         return {"success": True, **self._settings}
 
+    async def clear_installed_version_cache(self) -> Dict[str, Any]:
+        """Discard old scan results so installed games are inspected again."""
+        async with self._installed_version_lock:
+            self._installed_version_cache.clear()
+            self._installed_version_dirty = True
+            await self._save_installed_version_cache()
+        return {"success": not self._installed_version_dirty}
+
     async def _load_installed_version_cache(self) -> None:
         def read() -> Dict[str, Dict[str, str]]:
             try:
@@ -2846,27 +2697,9 @@ class Plugin:
                     if isinstance(app_id, str) and re.fullmatch(r"[1-9]\d{0,9}", app_id)
                     and isinstance(entry, dict) and re.fullmatch(r"[1-9]\d{0,19}", str(entry.get("build", "")))
                     and isinstance(entry.get("version"), str) and len(entry["version"]) <= 40
-                    and entry.get("source") in ("", "game", "project")
-                    and type(entry.get("mtime", 0)) in (int, float)}
+                    and entry.get("source") in ("", "game", "project")}
 
         self._installed_version_cache = await self._run_blocking(read)
-
-    async def clear_installed_version_cache(self) -> Dict[str, Any]:
-        async with self._installed_version_lock:
-            self._installed_version_cache.clear()
-            self._installed_version_dirty = True
-            if not self._installed_version_save_task or self._installed_version_save_task.done():
-                self._installed_version_save_task = asyncio.create_task(self._save_installed_version_later())
-        try:
-            import json
-            res = {}
-            for aid in ("1145360", "846770", "860510"):
-                res[aid] = await self.debug_version_scan(aid)
-            with open("/home/deck/version_debug.json", "w", encoding="utf-8") as f:
-                json.dump(res, f, indent=2)
-        except Exception as e:
-            decky.logger.info("Debug export failed: %s", str(e))
-        return {"success": True}
 
     async def _save_installed_version_cache(self) -> None:
         self._installed_version_dirty = False
@@ -2882,10 +2715,9 @@ class Plugin:
 
     async def _save_installed_version_later(self) -> None:
         await asyncio.sleep(1)
-        while self._installed_version_dirty:
-            await self._save_installed_version_cache()
+        async with self._installed_version_lock:
             if self._installed_version_dirty:
-                break
+                await self._save_installed_version_cache()
 
     @staticmethod
     def _steam_library_paths() -> List[Path]:
@@ -2950,7 +2782,7 @@ class Plugin:
                     previous = cached.get(app_id, {})
                     if previous.get("build") == build.group(1):
                         if previous.get("version"):
-                            versions[app_id] = {"version": previous["version"], "source": previous["source"], "mtime": previous.get("mtime", 0)}
+                            versions[app_id] = {"version": previous["version"], "source": previous["source"]}
                         continue
                     installed = re.search(r'"installdir"\s*"([^"\\/]{1,160})"', contents, re.IGNORECASE)
                     title = re.search(r'"name"\s*"([^"\r\n]{1,160})"', contents, re.IGNORECASE)
@@ -2960,16 +2792,15 @@ class Plugin:
                         game_dir = common / installed.group(1)
                         if InstalledGameVersionScanner._inside(common, game_dir) and game_dir.is_dir():
                             version, source = InstalledGameVersionScanner.scan(game_dir, title.group(1) if title else installed.group(1), app_id)
-                            mtime = InstalledGameVersionScanner.build_time(game_dir)
-                            updates[app_id] = {"build": build.group(1), "version": version, "source": source, "mtime": mtime}
+                            updates[app_id] = {"build": build.group(1), "version": version, "source": source}
                     if version:
-                        versions[app_id] = {"version": version, "source": source, "mtime": mtime}
+                        versions[app_id] = {"version": version, "source": source}
         return {"builds": builds, "versions": versions, "updates": updates}
 
     async def get_installed_builds(self, app_ids: Any) -> Dict[str, Any]:
         if (not isinstance(app_ids, list) or len(app_ids) > 100 or
                 any(not isinstance(app_id, str) or not re.fullmatch(r"[1-9]\d{0,9}", app_id) for app_id in app_ids)):
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen Steam-jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©klista."}
+            return {"success": False, "error": "Érvénytelen Steam-játéklista."}
         if not self._settings.get("show_installed_builds", False):
             return {"success": True, "builds": {}}
         async with self._installed_version_lock:
@@ -2982,96 +2813,9 @@ class Plugin:
                     self._installed_version_save_task = asyncio.create_task(self._save_installed_version_later())
         return {"success": True, "builds": result["builds"], "versions": result["versions"]}
 
-    async def debug_version_scan(self, app_id: Any) -> Dict[str, Any]:
-        """Diagnostic: run all version-scan steps for one game and return raw results."""
-        if not isinstance(app_id, str) or not re.fullmatch(r"[1-9]\d{0,9}", app_id):
-            return {"success": False, "error": "Invalid app_id."}
-        Scanner = InstalledGameVersionScanner
-        def _debug(aid: str) -> Dict[str, Any]:
-            info: Dict[str, Any] = {"app_id": aid}
-            for library in Plugin._steam_library_paths():
-                manifest = library / "steamapps" / ("appmanifest_" + aid + ".acf")
-                try:
-                    contents = manifest.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                m_inst = re.search(r'"installdir"\s*"([^"\\\\/]{1,160})"', contents, re.IGNORECASE)
-                if not m_inst:
-                    continue
-                common = library / "steamapps" / "common"
-                game_dir = common / m_inst.group(1)
-                info["game_dir"] = str(game_dir)
-                info["exists"] = game_dir.is_dir()
-                if not game_dir.is_dir():
-                    continue
-                try:
-                    info["children"] = sorted([c.name for c in game_dir.iterdir()][:50])
-                except OSError:
-                    info["children"] = []
-                try:
-                    info["declared"] = list(Scanner._declared_version(game_dir))
-                except Exception as exc:
-                    info["declared_error"] = str(exc)
-                try:
-                    info["engine"] = list(Scanner._engine_version(game_dir))
-                except Exception as exc:
-                    info["engine_error"] = str(exc)
-                exe_results: list = []
-                exes: list = []
-                def _find(cur: Path, dep: int) -> None:
-                    if dep > 4 or len(exes) >= 32:
-                        return
-                    try:
-                        for ch in cur.iterdir():
-                            if ch.is_file() and ch.suffix.lower() == ".exe":
-                                exes.append(ch)
-                            elif ch.is_dir() and ch.name.lower() not in ("engine", "_commonredist", "directx", "vcredist", "dotnet"):
-                                _find(ch, dep + 1)
-                    except OSError:
-                        pass
-                _find(game_dir, 1)
-                pv = b"P\x00r\x00o\x00d\x00u\x00c\x00t\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00"
-                fv = b"F\x00i\x00l\x00e\x00V\x00e\x00r\x00s\x00i\x00o\x00n\x00"
-                for exe in sorted(exes, key=lambda x: x.stat().st_size, reverse=True)[:8]:
-                    ei: Dict[str, Any] = {"name": str(exe.relative_to(game_dir)), "size": exe.stat().st_size}
-                    try:
-                        blob = exe.read_bytes()
-                        hits: list = []
-                        for kn, kb in [("ProductVersion", pv), ("FileVersion", fv)]:
-                            p = 0
-                            while True:
-                                p = blob.find(kb, p)
-                                if p < 0:
-                                    break
-                                s = p + len(kb)
-                                p = s
-                                while s + 1 < len(blob) and blob[s:s+2] == b"\x00\x00":
-                                    s += 2
-                                e = s
-                                while e + 1 < len(blob) and blob[e:e+2] != b"\x00\x00":
-                                    e += 2
-                                if e > s:
-                                    raw = blob[s:e].decode("utf-16le", errors="ignore").strip()
-                                    clean = Scanner._clean_version(raw)
-                                    hits.append({"key": kn, "raw": raw[:80], "clean": clean})
-                        ei["versions"] = hits
-                    except OSError as err:
-                        ei["error"] = str(err)
-                    exe_results.append(ei)
-                info["executables"] = exe_results
-                try:
-                    ver, src = Scanner.scan(game_dir, m_inst.group(1), aid)
-                    info["scan_result"] = {"version": ver, "source": src}
-                except Exception as exc:
-                    info["scan_error"] = str(exc)
-                break
-            return info
-        result = await self._run_blocking(_debug, str(app_id))
-        return {"success": True, **result}
-
     async def set_store_tile_prices(self, enabled: Any) -> Dict[str, Any]:
         if not isinstance(enabled, bool):
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen kapcsolÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬ĹˇÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rtÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©k."}
+            return {"success": False, "error": "Érvénytelen kapcsolóérték."}
         previous = self._settings.get("show_store_tile_prices", False)
         self._settings["show_store_tile_prices"] = enabled
         try:
@@ -3084,7 +2828,7 @@ class Plugin:
     async def set_badge_sides(self, sides: Any) -> Dict[str, Any]:
         if not isinstance(sides, dict) or any(key not in ("price", "controller", "gfn", "boosteroid", "hungarian", "watch", "proton")
                 or value not in ("left", "right") for key, value in sides.items()):
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen jelvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nyoldal."}
+            return {"success": False, "error": "Érvénytelen jelvényoldal."}
         previous = self._settings.get("store_badge_sides", {})
         self._settings["store_badge_sides"] = dict(sides)
         try:
@@ -3096,7 +2840,7 @@ class Plugin:
 
     async def set_badge_sizes(self, library_badge_percent: Any, store_badge_percent: Any) -> Dict[str, Any]:
         if not all(type(value) is int and 50 <= value <= 200 for value in (library_badge_percent, store_badge_percent)):
-            return {"success": False, "error": "Az ikonmÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©ret 50 Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s 200% kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶zÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶tti egÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©sz szÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡m lehet."}
+            return {"success": False, "error": "Az ikonméret 50 és 200% közötti egész szám lehet."}
         self._settings.update({"library_badge_percent": library_badge_percent, "store_badge_percent": store_badge_percent})
         await self._save_settings()
         return {"success": True, **self._settings}
@@ -3106,7 +2850,7 @@ class Plugin:
         if (not isinstance(show_gfn_badges, bool) or not isinstance(show_boosteroid_badges, bool)
                 or (show_hungarian_badges is not None and not isinstance(show_hungarian_badges, bool))
                 or (show_installed_builds is not None and not isinstance(show_installed_builds, bool))):
-            return {"success": False, "error": "A jelvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nybeÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡llÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡s Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rtÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©ke Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen."}
+            return {"success": False, "error": "A jelvénybeállítás értéke érvénytelen."}
         self._settings.update({
             "show_gfn_badges": show_gfn_badges,
             "show_boosteroid_badges": show_boosteroid_badges,
@@ -3132,7 +2876,7 @@ class Plugin:
             notify_plugin_updates,
         )
         if not all(isinstance(value, bool) for value in values):
-            return {"success": False, "error": "Az Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rtesÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si beÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡llÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡s Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rtÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©ke Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen."}
+            return {"success": False, "error": "Az értesítési beállítás értéke érvénytelen."}
         self._settings.update({
             "notify_gfn_additions": notify_gfn_additions,
             "notify_boosteroid_additions": notify_boosteroid_additions,
@@ -3246,20 +2990,20 @@ class Plugin:
     ) -> Dict[str, Any]:
         normalized = str(app_id).strip()
         if not normalized.isdigit() or not 0 < int(normalized) < 10000000000:
-            return {"success": False, "error": "Adj meg egy Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nyes Steam AppID-t."}
+            return {"success": False, "error": "Adj meg egy érvényes Steam AppID-t."}
         if not all(isinstance(value, bool) for value in (watch_gfn, watch_boosteroid, watch_controller)):
-            return {"success": False, "error": "A platformbeÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡llÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡s Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen."}
+            return {"success": False, "error": "A platformbeállítás érvénytelen."}
         if not watch_gfn and not watch_boosteroid and not watch_controller:
-            return {"success": False, "error": "LegalÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡bb egy figyelÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si szempontot vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lassz ki."}
+            return {"success": False, "error": "Legalább egy figyelési szempontot válassz ki."}
         async with self._watchlist_lock:
             already_present = normalized in self._watchlist
             if not already_present and len(self._watchlist) >= WATCHLIST_MAX_ENTRIES:
-                return {"success": False, "error": "A figyelÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Âlista legfeljebb 200 jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©kot tartalmazhat."}
+                return {"success": False, "error": "A figyelőlista legfeljebb 200 játékot tartalmazhat."}
         if already_present:
             return await self.set_watchlist_platforms(normalized, watch_gfn, watch_boosteroid, watch_controller)
         title = await self._run_blocking(self._fetch_steam_title, normalized)
         if not title:
-            return {"success": False, "error": "A Steam-jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©k nem talÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ vagy az Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚ÂruhÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡z nem vÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡laszolt."}
+            return {"success": False, "error": "A Steam-játék nem található vagy az Áruház nem válaszolt."}
         async with self._watchlist_lock:
             self._watchlist[normalized] = {
                 "app_id": normalized,
@@ -3284,13 +3028,13 @@ class Plugin:
     ) -> Dict[str, Any]:
         normalized = str(app_id).strip()
         if not all(isinstance(value, bool) for value in (watch_gfn, watch_boosteroid, watch_controller)):
-            return {"success": False, "error": "A platformbeÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡llÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡s Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen."}
+            return {"success": False, "error": "A platformbeállítás érvénytelen."}
         if not watch_gfn and not watch_boosteroid and not watch_controller:
-            return {"success": False, "error": "LegalÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡bb egy figyelÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©si szempontot hagyj bekapcsolva."}
+            return {"success": False, "error": "Legalább egy figyelési szempontot hagyj bekapcsolva."}
         async with self._watchlist_lock:
             entry = self._watchlist.get(normalized)
             if entry is None:
-                return {"success": False, "error": "A jÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©k nincs a figyelÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂlistÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡n."}
+                return {"success": False, "error": "A játék nincs a figyelőlistán."}
             controller_enabled = watch_controller and not entry.get("watch_controller", False)
             entry["watch_controller"] = watch_controller
             entry["watch_gfn"] = watch_gfn
@@ -3333,9 +3077,9 @@ class Plugin:
     async def search_steam_games(self, query: Any) -> Dict[str, Any]:
         normalized = str(query).strip()
         if len(normalized) < 2:
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă‚Â¤rj be legalÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡bb kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©t karaktert."}
+            return {"success": False, "error": "Írj be legalább két karaktert."}
         if len(normalized) > 100:
-            return {"success": False, "error": "A keresÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s tÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźl hosszÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹź."}
+            return {"success": False, "error": "A keresés túl hosszú."}
         try:
             if normalized.isdigit() and 0 < int(normalized) < 10000000000:
                 title = await self._run_blocking(self._fetch_steam_title, normalized)
@@ -3346,7 +3090,7 @@ class Plugin:
             entries = await self._run_blocking(self._search_steam_games_blocking, normalized)
             return {"success": True, "entries": entries}
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, OSError) as error:
-            return {"success": False, "error": "A Steam-keresÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s sikertelen: {}".format(error)}
+            return {"success": False, "error": "A Steam-keresés sikertelen: {}".format(error)}
 
     async def _run_blocking(self, function: Any, *args: Any) -> Any:
         """Run blocking file and network operations on Python 3.8 and newer."""
@@ -3501,10 +3245,10 @@ class Plugin:
         with self._open_verified_request(request, timeout=20) as response:
             release = json.load(response)
         if not isinstance(release, dict):
-            raise ValueError("A GitHub hibÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡s kiadÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡si adatot kÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€žĂ‹ĹĄldÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶tt.")
+            raise ValueError("A GitHub hibás kiadási adatot küldött.")
         latest = str(release.get("tag_name", "")).strip().lstrip("v")
         if not re.fullmatch(r"\d+\.\d+\.\d+", latest):
-            raise ValueError("A legÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźjabb kiadÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡s verziÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬ĹˇszÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ma Ä‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen.")
+            raise ValueError("A legújabb kiadás verziószáma érvénytelen.")
         expected_asset_name = "ControllerXbox-v{}.zip".format(latest)
         assets = release.get("assets", [])
         asset = next(
@@ -3516,11 +3260,11 @@ class Plugin:
             None,
         )
         if not isinstance(asset, dict):
-            raise ValueError("A kiadÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡shoz nem talÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ ellenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂrzÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶tt Decky ZIP.")
+            raise ValueError("A kiadáshoz nem található ellenőrzött Decky ZIP.")
         download_url = str(asset.get("browser_download_url", ""))
         expected_prefix = GITHUB_DOWNLOAD_PREFIX + "v{}/".format(latest)
         if not download_url.startswith(expected_prefix) or not download_url.endswith("/" + expected_asset_name):
-            raise ValueError("A kiadÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡si ZIP cÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­me nem megbÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­zhatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ.")
+            raise ValueError("A kiadási ZIP címe nem megbízható.")
         return {
             "version": latest,
             "zip_url": download_url,
@@ -3552,45 +3296,45 @@ class Plugin:
         expected_names = ["ControllerXbox/" + relative for relative in UPDATE_FILES]
         entries = archive.infolist()
         if [entry.filename for entry in entries] != expected_names:
-            raise ValueError("A ZIP fÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡jlszerkezete nem egyezik a ControllerXbox telepÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©vel.")
+            raise ValueError("A ZIP fájlszerkezete nem egyezik a ControllerXbox telepítőével.")
         if sum(entry.file_size for entry in entries) > UPDATE_MAX_BYTES:
-            raise ValueError("A kicsomagolt frissÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s tÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźl nagy.")
+            raise ValueError("A kicsomagolt frissítés túl nagy.")
         for entry in entries:
             if entry.is_dir() or entry.flag_bits != 0:
-                raise ValueError("A ZIP nem tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡mogatott vagy titkosÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tott bejegyzÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©st tartalmaz.")
+                raise ValueError("A ZIP nem támogatott vagy titkosított bejegyzést tartalmaz.")
             if (
                 entry.compress_type != zipfile.ZIP_DEFLATED
                 or entry.create_system != 0
                 or entry.extract_version != 20
                 or entry.external_attr != 0
             ):
-                raise ValueError("A ZIP metaadatai nem egyeznek a biztonsÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡gos Decky-csomaggal.")
+                raise ValueError("A ZIP metaadatai nem egyeznek a biztonságos Decky-csomaggal.")
             path = Path(entry.filename)
             if path.is_absolute() or ".." in path.parts:
-                raise ValueError("A ZIP veszÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©lyes Ä‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźtvonalat tartalmaz.")
+                raise ValueError("A ZIP veszélyes útvonalat tartalmaz.")
         invalid_entry = archive.testzip()
         if invalid_entry:
-            raise ValueError("A ZIP sÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©rÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€žĂ‹ĹĄlt fÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡jlt tartalmaz: {}".format(invalid_entry))
+            raise ValueError("A ZIP sérült fájlt tartalmaz: {}".format(invalid_entry))
         package = json.loads(archive.read("ControllerXbox/package.json").decode("utf-8"))
         if str(package.get("version", "")) != expected_version:
-            raise ValueError("A ZIP verziÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬ĹˇszÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ma nem egyezik a kiadÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ssal.")
+            raise ValueError("A ZIP verziószáma nem egyezik a kiadással.")
         manifest = json.loads(archive.read("ControllerXbox/plugin.json").decode("utf-8"))
         if str(manifest.get("name", "")) not in PLUGIN_MANIFEST_NAMES:
-            raise ValueError("A ZIP nem a Deck Play Badges plugin telepÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Âje.")
+            raise ValueError("A ZIP nem a Deck Play Badges plugin telepítője.")
 
     def _apply_update_blocking(self, expected_version: str) -> Dict[str, Any]:
         if not re.fullmatch(r"\d+\.\d+\.\d+", str(expected_version)):
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen verziÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬ĹˇszÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡m."}
+            return {"success": False, "error": "Érvénytelen verziószám."}
         temporary_update_files: List[Path] = []
         replaced_files: List[str] = []
         try:
             release = self._fetch_release(str(expected_version))
             if str(release["version"]) != str(expected_version):
-                raise ValueError("A GitHub kiadÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡s verziÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬ĹˇszÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ma megvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡ltozott.")
+                raise ValueError("A GitHub kiadás verziószáma megváltozott.")
             plugin_directory_value = getattr(decky, "DECKY_PLUGIN_DIR", "")
             plugin_directory = Path(plugin_directory_value).resolve()
             if not plugin_directory.is_dir():
-                raise OSError("A Decky pluginmappa nem talÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡lhatÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬Ĺˇ.")
+                raise OSError("A Decky pluginmappa nem található.")
             current_manifest = json.loads((plugin_directory / "plugin.json").read_text(encoding="utf-8"))
             if str(current_manifest.get("name", "")) not in PLUGIN_MANIFEST_NAMES:
                 raise ValueError("A Decky pluginmappa nem a Deck Play Badgeshez tartozik.")
@@ -3605,7 +3349,7 @@ class Plugin:
                 with self._open_verified_request(request, timeout=120) as response, archive_path.open("wb") as stream:
                     declared_size = int(response.headers.get("Content-Length", "0") or 0)
                     if declared_size > UPDATE_MAX_BYTES:
-                        raise ValueError("A letÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶ltendÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚Â frissÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s tÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźl nagy.")
+                        raise ValueError("A letöltendő frissítés túl nagy.")
                     downloaded = 0
                     while True:
                         chunk = response.read(64 * 1024)
@@ -3613,7 +3357,7 @@ class Plugin:
                             break
                         downloaded += len(chunk)
                         if downloaded > UPDATE_MAX_BYTES:
-                            raise ValueError("A letÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶ltÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â¶tt frissÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s tÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…ÄąĹźllÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©pte a mÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©retkorlÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡tot.")
+                            raise ValueError("A letöltött frissítés túllépte a méretkorlátot.")
                         stream.write(chunk)
 
                 extracted_directory = temporary_directory / "extracted"
@@ -3679,7 +3423,7 @@ class Plugin:
             return {
                 "success": False,
                 "update_version": "",
-                "error": str(update.get("error", "A frissÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â­tÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©s ellenÄ‚â€žĂ„â€¦Ä‚ËĂ˘â€šÂ¬Ă‚ÂrzÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©se sikertelen.")),
+                "error": str(update.get("error", "A frissítés ellenőrzése sikertelen.")),
             }
         latest = str(update.get("latest_version", ""))
         if (
@@ -3704,7 +3448,7 @@ class Plugin:
         """Mark an update as notified only after the frontend displayed it."""
         normalized = str(version).strip()
         if not re.fullmatch(r"\d+\.\d+\.\d+", normalized):
-            return {"success": False, "error": "Ä‚â€žĂ˘â‚¬ĹˇÄ‚ËĂ˘â€šÂ¬Ă‚Â°rvÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€šĂ‚Â©nytelen verziÄ‚â€žĂ˘â‚¬ĹˇĂ„Ä…Ă˘â‚¬ĹˇszÄ‚â€žĂ˘â‚¬ĹˇÄ‚â€ąĂ˘â‚¬Ë‡m."}
+            return {"success": False, "error": "Érvénytelen verziószám."}
         async with self._notification_lock:
             state = await self._run_blocking(self._read_notification_state)
             if state.get("schema_version") != NOTIFICATION_SCHEMA_VERSION:

@@ -1208,6 +1208,7 @@ let inStore = false;
 let timer;
 let refreshTimer;
 let fetching = false;
+let cacheGeneration = 0;
 function notify() { for (const listener of listeners)
     listener(); }
 function configureInstalledBuilds(show, store) {
@@ -1229,6 +1230,14 @@ function stopInstalledBuilds() {
     cache.clear();
     mounted.clear();
     listeners.clear();
+}
+function clearInstalledBuildCache() {
+    cacheGeneration++;
+    cache.clear();
+    queued.clear();
+    for (const id of mounted.keys())
+        queueBuild(id);
+    notify();
 }
 function trackBuild(appId) {
     mounted.set(appId, (mounted.get(appId) ?? 0) + 1);
@@ -1264,19 +1273,20 @@ async function flushBuilds() {
     if (fetching || !enabled || inStore || !queued.size)
         return;
     fetching = true;
+    const generation = cacheGeneration;
     const ids = Array.from(queued).slice(0, 100);
     for (const id of ids)
         queued.delete(id);
     try {
         const response = await getInstalledBuilds(ids);
-        if (response.success) {
+        if (response.success && generation === cacheGeneration) {
             const expires = Date.now() + CACHE_MS;
             for (const id of ids) {
                 const build = response.builds?.[id];
                 const info = response.versions?.[id];
-                const version = info?.source === "game" && typeof info.version === "string" && /^\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?$/.test(info.version) ? info.version : "";
+                const version = (info?.source === "game" || info?.source === "project") && typeof info.version === "string" && /^\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?$/.test(info.version) ? info.version : "";
                 cache.set(id, { build: typeof build === "string" && /^\d{1,20}$/.test(build) ? build : "",
-                    version, source: version ? "game" : "", expires });
+                    version, source: version ? info?.source ?? "" : "", expires });
             }
             notify();
         }
@@ -1315,7 +1325,7 @@ function InstalledBuildLabel({ appId, installedHint }) {
     const build = result.id === id ? result.build : cache.get(id)?.build ?? "";
     const version = result.id === id ? result.version : cache.get(id)?.version ?? "";
     const source = result.id === id ? result.source : cache.get(id)?.source ?? "";
-    const display = version ? "Játékverzió: " + version
+    const display = version ? (source === "project" ? "Projektverzió: " : "Játékverzió: ") + version
         : build ? "Build: " + build : "";
     const resolved = result.id === id ? result.resolved : cache.has(id);
     const active = view.enabled && !view.inStore && installedHint !== false;
@@ -1685,6 +1695,7 @@ const setBadgeSizes = callable("set_badge_sizes");
 const getCuratorProgress = callable("get_hungarian_curator_progress");
 const loadCuratorProgress = () => withBackendTimeout(getCuratorProgress());
 const getSettings = callable("get_settings");
+const clearInstalledVersionCache = callable("clear_installed_version_cache");
 const setBadgeVisibility = callable("set_badge_visibility");
 const setNotificationPreferences = callable("set_notification_preferences");
 const getNotificationEvents = callable("get_notification_events");
@@ -3801,7 +3812,22 @@ function Content() {
     if (page === "settings")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsBadges"), children: "Jelv\u00E9nyek \u00E9s m\u00E9ret" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsStore"), children: "\u00C1ruh\u00E1zi elhelyez\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsPrices"), children: "J\u00E1t\u00E9k\u00E1rak" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsNotifications"), children: "\u00C9rtes\u00EDt\u00E9sek" }) })] });
     if (page === "settingsBadges")
-        return SP_JSX.jsxs(DFL.PanelSection, { title: "Jelv\u00E9nyek \u00E9s m\u00E9ret", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "\u2190 Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Steam \u00E9s Magyar Felirat adatok alapj\u00E1n. Magyar gy\u0171jtem\u00E9nyt is k\u00E9sz\u00EDt; kikapcsolva az megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Telep\u00EDtett j\u00E1t\u00E9kok verzi\u00F3ja", description: "A helyben azonos\u00EDthat\u00F3 j\u00E1t\u00E9kverzi\u00F3t mutatja; ha nincs ilyen adat, a Steam-build marad.", checked: visibility.show_installed_builds, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_installed_builds: checked }) }) }), SP_JSX.jsx(BadgeSizeSettings, { initial: { library_badge_percent: visibility.library_badge_percent ?? 100,
+        return SP_JSX.jsxs(DFL.PanelSection, { title: "Jelv\u00E9nyek \u00E9s m\u00E9ret", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "\u2190 Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Steam \u00E9s Magyar Felirat adatok alapj\u00E1n. Magyar gy\u0171jtem\u00E9nyt is k\u00E9sz\u00EDt; kikapcsolva az megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Telep\u00EDtett j\u00E1t\u00E9kok verzi\u00F3ja", description: "A j\u00E1t\u00E9k vagy projekt saj\u00E1t verzi\u00F3j\u00E1t mutatja, ha kiolvashat\u00F3; k\u00FCl\u00F6nben a Steam-build marad.", checked: visibility.show_installed_builds, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_installed_builds: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: settingsWorking, onClick: async () => {
+                            setSettingsWorking(true);
+                            try {
+                                const result = await withBackendTimeout(clearInstalledVersionCache());
+                                if (!result.success)
+                                    throw new Error(result.error || "Ismeretlen hiba.");
+                                clearInstalledBuildCache();
+                                toaster.toast({ title: "Verzióadatok törölve", body: "A telepített játékokat újra ellenőrizzük." });
+                            }
+                            catch (error) {
+                                toaster.toast({ title: "Hiba", body: errorMessage(error) });
+                            }
+                            finally {
+                                setSettingsWorking(false);
+                            }
+                        }, children: "Verzi\u00F3sz\u00E1m-gyors\u00EDt\u00F3t\u00E1r \u00FCr\u00EDt\u00E9se" }) }), SP_JSX.jsx(BadgeSizeSettings, { initial: { library_badge_percent: visibility.library_badge_percent ?? 100,
                         store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes })] });
     if (page === "settingsStore")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "\u00C1ruh\u00E1zi elhelyez\u00E9s", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "\u2190 Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: "A j\u00E1t\u00E9koldalon megjelen\u0151 jelv\u00E9nyek oldala." }) }), [['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']].map(([key, label]) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: label + ' – bal oldalon', description: "Kikapcsolva jobbra ker\u00FCl.", checked: (visibility.store_badge_sides?.[key] ?? 'right') === 'left', disabled: settingsWorking, onChange: async (checked) => {
