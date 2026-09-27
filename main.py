@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 12
+INSTALLED_VERSION_CACHE_SCHEMA = 13
 CONFIRMED_VERSION_SCHEMA = 1
 GEP_CACHE_TTL_SECONDS = 30 * 60
 GEP_API_BASE = "https://gep.monster/api"
@@ -292,6 +292,15 @@ class InstalledGameVersionScanner:
     @classmethod
     def _version_candidate(cls, root: Path) -> str:
         """Return a bounded, explicitly unverified engine/file version clue."""
+        try:
+            # Unity launchers and crash handlers report the editor version.
+            # Never present it as a possible version of the game itself.
+            if any(child.is_dir() and child.name.lower().endswith("_data")
+                   and (child / "globalgamemanagers").is_file()
+                   for child in root.iterdir()):
+                return ""
+        except OSError:
+            return ""
         for relative in ("build.json",):
             contents = cls._small_text(root, relative)
             if contents:
@@ -323,37 +332,100 @@ class InstalledGameVersionScanner:
                             return version
             except OSError:
                 pass
-            version = cls._unity_version_candidate(root, child)
-            if version:
-                return version
         return cls._executable_version_candidate(root)
 
     @classmethod
-    def _unity_version_candidate(cls, root: Path, data_dir: Path) -> str:
+    def _unity_player_settings_version(cls, root: Path, data_dir: Path, title: str) -> str:
+        """Read the app version from Unity's PlayerSettings object (ClassID 129)."""
         path = data_dir / "globalgamemanagers"
         try:
-            if not cls._inside(root, path) or not path.is_file() or not 20 <= path.stat().st_size <= 8 * 1024 * 1024:
+            if not cls._inside(root, path) or not path.is_file() or not 48 <= path.stat().st_size <= 32 * 1024 * 1024:
                 return ""
-            with path.open("rb") as stream:
-                content = stream.read(128 * 1024)
+            content = path.read_bytes()
         except OSError:
             return ""
         format_version = struct.unpack_from(">I", content, 8)[0]
-        if not 9 <= format_version <= 40:
+        if format_version not in (22, 23):
             return ""
-        engine_offset = 48 if format_version >= 22 else 20
-        end = content.find(b"\0", engine_offset, engine_offset + 64)
-        if end < 0:
+        metadata_size, file_size, data_offset = struct.unpack_from(">IQQ", content, 20)
+        if (file_size != len(content) or not 0 < metadata_size <= 4 * 1024 * 1024
+                or 48 + metadata_size > data_offset or data_offset >= file_size):
             return ""
-        engine = content[engine_offset:end].decode("ascii", errors="replace")
-        for match in re.finditer(rb"\d+(?:\.\d+){1,3}", content[end + 1:]):
-            value = match.group().decode("ascii")
-            absolute_end = end + 1 + match.end()
-            if value in engine or (absolute_end < len(content) and chr(content[absolute_end]).isalpha()):
+        endian = ">" if content[16] else "<"
+        position, end = 48, 48 + metadata_size
+        unity_version_end = content.find(b"\0", position, min(position + 64, end))
+        if unity_version_end < 0:
+            return ""
+        position = unity_version_end + 1 + 4  # Editor version and target platform.
+        if position + 5 > end or content[position] != 0:  # Player builds omit type trees.
+            return ""
+        position += 1
+        try:
+            type_count = struct.unpack_from(endian + "I", content, position)[0]
+            position += 4
+            if not 0 < type_count <= 1024:
+                return ""
+            class_ids = []
+            for _ in range(type_count):
+                if position + 23 > end:
+                    return ""
+                class_id = struct.unpack_from(endian + "i", content, position)[0]
+                class_ids.append(class_id)
+                position += 7  # ClassID, stripped flag, script type index.
+                if class_id == 114:
+                    position += 16  # MonoBehaviour script ID.
+                position += 16  # Type hash.
+            if position + 4 > end:
+                return ""
+            object_count = struct.unpack_from(endian + "I", content, position)[0]
+            position += 4
+            if not 0 < object_count <= 10000:
+                return ""
+            objects = []
+            for _ in range(object_count):
+                position = (position + 3) & ~3
+                if position + 24 > end:
+                    return ""
+                offset, size, type_id = struct.unpack_from(endian + "QIi", content, position + 8)
+                position += 24
+                if not 0 <= type_id < len(class_ids):
+                    return ""
+                if class_ids[type_id] == 129:
+                    if size > 2 * 1024 * 1024 or data_offset + offset + size > file_size:
+                        return ""
+                    objects.append(content[data_offset + offset:data_offset + offset + size])
+            if len(objects) != 1:
+                return ""
+        except (struct.error, ValueError):
+            return ""
+        # Unity strings are length-prefixed and 4-byte aligned. Locate the
+        # product name inside PlayerSettings, then the first version-shaped
+        # field following it; the editor version lives outside this object.
+        product = re.sub(r"[^a-z0-9]", "", title.casefold())
+        if len(product) < 3:
+            return ""
+        values = []
+        settings = objects[0]
+        for offset in range(0, min(len(settings) - 4, 16 * 1024), 4):
+            length = struct.unpack_from(endian + "I", settings, offset)[0]
+            if not 0 < length <= 128 or offset + 4 + length > len(settings):
                 continue
-            version = cls._clean_version(value)
-            if version and version not in ("1.0", "1.0.0", "1.0.0.0"):
-                return version
+            try:
+                value = settings[offset + 4:offset + 4 + length].decode("utf-8")
+            except UnicodeError:
+                continue
+            if value.isprintable():
+                values.append((offset, value))
+        for index, (offset, value) in enumerate(values):
+            if re.sub(r"[^a-z0-9]", "", value.casefold()) != product:
+                continue
+            for next_offset, candidate in values[index + 1:]:
+                if next_offset - offset > 4096:
+                    break
+                version = cls._clean_version(candidate)
+                if version and int(version.split(".", 1)[0]) < 1000 and version not in ("1.0", "1.0.0", "1.0.0.0"):
+                    return version
+            break
         return ""
 
     @classmethod
@@ -539,7 +611,7 @@ class InstalledGameVersionScanner:
         return version if version != "1.0.0" else ""  # Unreal's untouched default.
 
     @classmethod
-    def _engine_version(cls, root: Path) -> Tuple[str, str]:
+    def _engine_version(cls, root: Path, title: str) -> Tuple[str, str]:
         try:
             children = list(root.iterdir())
         except OSError:
@@ -555,6 +627,9 @@ class InstalledGameVersionScanner:
                     version, _ = cls._declared_version(streaming)
                     if version:
                         return version, "game"
+                version = cls._unity_player_settings_version(root, child, title)
+                if version:
+                    return version, "project"
         version = cls._godot_version(root)
         if version:
             return version, "project"
@@ -807,7 +882,7 @@ class InstalledGameVersionScanner:
         declared = cls._declared_version(root)
         if declared[0]:
             return declared
-        engine = cls._engine_version(root)
+        engine = cls._engine_version(root, title)
         if engine[0]:
             return engine
         candidate = cls._version_candidate(root)

@@ -219,6 +219,10 @@ A helyi EXE és Unity fájlokból ismét kiolvassuk a lehetséges verziószámot
 
 A Balatro telepített archívumának `globals.lua` fájljából olvassuk ki a játék saját verzióját, például `1.0.1o-FULL` formában. A LÖVE motor `11.2` fájlverzióját ennél a játéknál nem mutatjuk játékverzióként. Ha a játék saját verzióadata nem olvasható, csak a Steam-build jelenik meg. A korábbi verziógyorsítótár automatikusan újraépül. Csak a Decky plugint kell frissíteni.
 
+## 1.0.132: Unity játékok projektverziója
+
+A Unity-játékoknál a telepített `globalgamemanagers` fájl `PlayerSettings` objektumából keressük a termék verzióját. Az értéket „Projektverzió” néven jelöljük; a Unity motor `6000.x` verziószámát nem használjuk játékverzió-jelöltként. Ha a fájl formátuma nem olvasható vagy a terméknév nem egyezik, a Steam-build marad látható. A verziógyorsítótár frissítéskor újraépül. Csak a Decky plugint kell frissíteni.
+
 ## 1.0.112: Enhanced és Deluxe árak
 
 Az AKS-keresés a pontos Steam-cím után az Enhanced és Deluxe névváltozatokat is ellenőrzi. Ha csak az alapjáték AKS-oldala található, kizárólag a címben jelölt kiadás árát mutatja; a Standard, Enhanced és Deluxe ajánlatok nem keverednek. A korábban elmentett negatív találatokat ezeknél a címeknél újraellenőrzi. A Decky plugint és az Ubuntu árszervert is frissíteni kell.

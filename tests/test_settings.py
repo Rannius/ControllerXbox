@@ -1617,6 +1617,36 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         archive.unlink()
         self.assertEqual(scanner.scan(game, "Balatro", "2379780"), ("", ""))
 
+    async def test_unity_player_settings_version_ignores_editor_version(self):
+        scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
+        game = Path(self.directory.name) / "9 Kings"
+        data = game / "9Kings_Data"
+        data.mkdir(parents=True)
+
+        def string(value):
+            raw = value.encode("utf-8")
+            field = struct.pack("<I", len(raw)) + raw
+            return field + b"\0" * (-len(field) % 4)
+
+        settings = (b"\0" * 8 + string("SadSocket") + string("9Kings") +
+                    string("6000.3.8") + string("0.9.6.5"))
+        types = struct.pack("<iBh", 129, 0, -1) + b"\0" * 16
+        metadata = b"6000.3.8f1\0" + struct.pack("<iBI", 19, 0, 1) + types + struct.pack("<I", 1)
+        metadata += b"\0" * (-(48 + len(metadata)) % 4)
+        metadata += b"\0" * 8 + struct.pack("<QIi", 0, len(settings), 0) + struct.pack("<III", 0, 0, 0)
+        data_offset = (48 + len(metadata) + 15) & ~15
+        header = (struct.pack(">IIII", 0, 0, 22, 0) + b"\0" * 4 +
+                  struct.pack(">IQQQ", len(metadata), data_offset + len(settings), data_offset, 0))
+        manager = data / "globalgamemanagers"
+        manager.write_bytes(header + metadata + b"\0" * (data_offset - 48 - len(metadata)) + settings)
+        self.assertEqual(scanner.scan(game, "9 Kings", "2784470"), ("0.9.6.5", "project"))
+        settings = settings.replace(b"0.9.6.5", b"0.9.6.6")
+        manager.write_bytes(header + metadata + b"\0" * (data_offset - 48 - len(metadata)) + settings)
+        self.assertEqual(scanner.scan(game, "9 Kings", "2784470"), ("0.9.6.6", "project"))
+        manager.unlink()
+        (data / "globalgamemanagers").write_bytes(b"invalid")
+        self.assertEqual(scanner.scan(game, "9 Kings", "2784470"), ("", ""))
+
     @staticmethod
     def palworld_config_pak(version, compressed=False):
         # A minimal PAK v11 with a full directory index and a real config entry.
