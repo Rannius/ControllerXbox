@@ -1284,7 +1284,7 @@ async function flushBuilds() {
             for (const id of ids) {
                 const build = response.builds?.[id];
                 const info = response.versions?.[id];
-                const version = (info?.source === "game" || info?.source === "project" || info?.source === "confirmed")
+                const version = (info?.source === "game" || info?.source === "project" || info?.source === "confirmed" || info?.source === "candidate")
                     && typeof info.version === "string" && /^\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?$/.test(info.version) ? info.version : "";
                 cache.set(id, { build: typeof build === "string" && /^\d{1,20}$/.test(build) ? build : "",
                     version, source: version ? info?.source ?? "" : "", expires });
@@ -1326,7 +1326,7 @@ function InstalledBuildLabel({ appId, installedHint }) {
     const build = result.id === id ? result.build : cache.get(id)?.build ?? "";
     const version = result.id === id ? result.version : cache.get(id)?.version ?? "";
     const source = result.id === id ? result.source : cache.get(id)?.source ?? "";
-    const display = version ? (source === "confirmed" ? "Megerősített verzió: " : source === "project" ? "Projektverzió: " : "Játékverzió: ") + version
+    const display = version ? (source === "confirmed" ? "Megerősített verzió: " : source === "project" ? "Projektverzió: " : source === "candidate" ? "Verziójelölt: " : "Játékverzió: ") + version
         : build ? "Build: " + build : "";
     const resolved = result.id === id ? result.resolved : cache.has(id);
     const active = view.enabled && !view.inStore && installedHint !== false;
@@ -1390,7 +1390,8 @@ function InstalledBuildLabel({ appId, installedHint }) {
         label.current.textContent = display;
         label.current.style.visibility = display ? "visible" : "hidden";
         label.current.title = version ? (source === "confirmed" ? "A játék menüjében ellenőrzött verzió: "
-            : source === "project" ? "Játékprojekt beállított verziója: " : "Helyi játékfájl verzióadata: ")
+            : source === "project" ? "Játékprojekt beállított verziója: "
+                : source === "candidate" ? "Nem ellenőrzött fájl- vagy motorverzió; a játék verziója eltérhet: " : "Helyi játékfájl verzióadata: ")
             + version + (build ? " · Steam-build: " + build : "") : build ? "Telepített Steam-build: " + build : "";
     }, [build, version, source, display]);
     return active ? SP_JSX.jsx("span", { ref: marker, "data-dpb-build-marker": "true", style: { display: "none" } }) : null;
@@ -1700,7 +1701,6 @@ const getSettings = callable("get_settings");
 const clearInstalledVersionCache = callable("clear_installed_version_cache");
 const getInstalledBuildsForSettings = callable("get_installed_builds");
 const setConfirmedInstalledVersion = callable("set_confirmed_installed_version");
-const getGepCompatibility = callable("get_gep_translation_compatibility");
 const setBadgeVisibility = callable("set_badge_visibility");
 const setNotificationPreferences = callable("set_notification_preferences");
 const getNotificationEvents = callable("get_notification_events");
@@ -3437,8 +3437,6 @@ function Content() {
     const [versionInput, setVersionInput] = SP_REACT.useState("");
     const [versionDetail, setVersionDetail] = SP_REACT.useState();
     const [versionWorking, setVersionWorking] = SP_REACT.useState(false);
-    const [gepResult, setGepResult] = SP_REACT.useState();
-    const [gepWorking, setGepWorking] = SP_REACT.useState(false);
     const [watchlist, setWatchlist] = SP_REACT.useState([]);
     const [watchWorking, setWatchWorking] = SP_REACT.useState(false);
     const [cloudRefreshing, setCloudRefreshing] = SP_REACT.useState(false);
@@ -3820,7 +3818,6 @@ function Content() {
     };
     const inspectInstalledVersion = async (id, name) => {
         setVersionWorking(true);
-        setGepResult(undefined);
         try {
             const result = await withBackendTimeout(getInstalledBuildsForSettings([id], true), 60_000);
             if (!result.success)
@@ -3849,7 +3846,6 @@ function Content() {
             if (!result.success)
                 throw new Error(result.error || "A verzió mentése sikertelen.");
             clearInstalledBuildCache();
-            setGepResult(undefined);
             const refreshed = await withBackendTimeout(getInstalledBuildsForSettings([versionDetail.id], true), 60_000);
             if (!refreshed.success || refreshed.builds?.[versionDetail.id] !== versionDetail.build) {
                 throw new Error("A játék Steam-buildje megváltozott. Ellenőrizd újra.");
@@ -3866,24 +3862,6 @@ function Content() {
             setVersionWorking(false);
         }
     };
-    const inspectGepTranslation = async (refresh = false) => {
-        if (!versionDetail)
-            return;
-        setGepWorking(true);
-        try {
-            const result = await withBackendTimeout(getGepCompatibility(versionDetail.id, versionDetail.name, versionDetail.build, refresh), 60_000);
-            if (!result.success)
-                throw new Error(result.error || "A Gep.Monster ellenőrzése sikertelen.");
-            setGepResult(result);
-        }
-        catch (error) {
-            setGepResult(undefined);
-            toaster.toast({ title: "Magyarítás ellenőrzése", body: errorMessage(error) });
-        }
-        finally {
-            setGepWorking(false);
-        }
-    };
     const versionSearch = versionQuery.trim().toLocaleLowerCase();
     const versionCandidates = versionSearch.length >= 2 ? getSteamLibraryApps()
         .map((app) => ({ id: String(app?.appid ?? ""), name: overviewGameName(app) ?? "" }))
@@ -3894,7 +3872,7 @@ function Content() {
     if (page === "settings")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "Be\u00E1ll\u00EDt\u00E1sok", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("home"), children: "\u2190 F\u0151oldal" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsBadges"), children: "Jelv\u00E9nyek \u00E9s m\u00E9ret" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsStore"), children: "\u00C1ruh\u00E1zi elhelyez\u00E9s" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsPrices"), children: "J\u00E1t\u00E9k\u00E1rak" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsNotifications"), children: "\u00C9rtes\u00EDt\u00E9sek" }) })] });
     if (page === "settingsBadges")
-        return SP_JSX.jsxs(DFL.PanelSection, { title: "Jelv\u00E9nyek \u00E9s m\u00E9ret", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "\u2190 Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Steam \u00E9s Magyar Felirat adatok alapj\u00E1n. Magyar gy\u0171jtem\u00E9nyt is k\u00E9sz\u00EDt; kikapcsolva az megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Telep\u00EDtett j\u00E1t\u00E9kok verzi\u00F3ja", description: "A meger\u0151s\u00EDtett vagy kiolvashat\u00F3 j\u00E1t\u00E9kverzi\u00F3t mutatja; k\u00FCl\u00F6nben a Steam-build marad.", checked: visibility.show_installed_builds, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_installed_builds: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsVersions"), children: "J\u00E1t\u00E9kverzi\u00F3 meger\u0151s\u00EDt\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: settingsWorking, onClick: async () => {
+        return SP_JSX.jsxs(DFL.PanelSection, { title: "Jelv\u00E9nyek \u00E9s m\u00E9ret", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "\u2190 Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Magyar z\u00E1szl\u00F3", description: "Steam \u00E9s Magyar Felirat adatok alapj\u00E1n. Magyar gy\u0171jtem\u00E9nyt is k\u00E9sz\u00EDt; kikapcsolva az megmarad.", checked: visibility.show_hungarian_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_hungarian_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "GeForce NOW", checked: visibility.show_gfn_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_gfn_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Boosteroid", checked: visibility.show_boosteroid_badges, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_boosteroid_badges: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: "Telep\u00EDtett j\u00E1t\u00E9kok verzi\u00F3ja", description: "J\u00E1t\u00E9kverzi\u00F3t, illetve k\u00FCl\u00F6n jel\u00F6lt bizonytalan f\u00E1jlverzi\u00F3t mutat; m\u00E1skor a Steam-build marad.", checked: visibility.show_installed_builds, disabled: settingsWorking, onChange: (checked) => void updateVisibility({ ...visibility, show_installed_builds: checked }) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsVersions"), children: "J\u00E1t\u00E9kverzi\u00F3 meger\u0151s\u00EDt\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: settingsWorking, onClick: async () => {
                             setSettingsWorking(true);
                             try {
                                 const result = await withBackendTimeout(clearInstalledVersionCache());
@@ -3913,10 +3891,7 @@ function Content() {
                         store_badge_percent: visibility.store_badge_percent ?? 100 }, save: saveSizes })] });
     if (page === "settingsVersions")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "J\u00E1t\u00E9kverzi\u00F3 meger\u0151s\u00EDt\u00E9se", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settingsBadges"), children: "\u2190 Jelv\u00E9nyek \u00E9s m\u00E9ret" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: "\u00CDrd be a j\u00E1t\u00E9k men\u00FCj\u00E9ben l\u00E1tott verzi\u00F3t. A bejegyz\u00E9s csak a jelenlegi Steam-buildhez tartozik; friss\u00EDt\u00E9s ut\u00E1n \u00FAjra ellen\u0151rizni kell." }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "Telep\u00EDtett j\u00E1t\u00E9k neve vagy AppID", value: versionQuery, bShowClearAction: true, onChange: (event) => setVersionQuery(event.currentTarget.value) }) }), /^\d+$/.test(versionSearch) && !versionCandidates.some((app) => app.id === versionSearch) &&
-                    SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", disabled: versionWorking, onClick: () => void inspectInstalledVersion(versionSearch, resolveLibraryGameName(versionSearch)), children: ["Steam AppID ", versionSearch, " ellen\u0151rz\u00E9se"] }) }), versionCandidates.map((app) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: versionWorking, label: app.name || ("Steam AppID " + app.id), description: "Steam AppID: " + app.id, onClick: () => void inspectInstalledVersion(app.id, app.name || ("Steam AppID " + app.id)), children: "Kiv\u00E1laszt\u00E1s" }) }, app.id)), versionDetail && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "12px" }, children: [SP_JSX.jsx("strong", { children: versionDetail.name }), SP_JSX.jsx("br", {}), "Steam-build: ", versionDetail.build, SP_JSX.jsx("br", {}), versionDetail.version ? `${versionDetail.source === "confirmed" ? "Megerősített" : versionDetail.source === "project" ? "Projekt" : "Helyi fájl"}: ${versionDetail.version}` : "Játékverzió nem olvasható ki."] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "A j\u00E1t\u00E9k men\u00FCj\u00E9ben l\u00E1tott verzi\u00F3", value: versionInput, bShowClearAction: true, disabled: versionWorking, onChange: (event) => setVersionInput(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: versionWorking || !versionInput.trim(), onClick: () => void saveConfirmedVersion(versionInput), children: "Verzi\u00F3 meger\u0151s\u00EDt\u00E9se" }) }), versionDetail.source === "confirmed" && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: versionWorking, onClick: () => void saveConfirmedVersion(""), children: "Meger\u0151s\u00EDt\u00E9s t\u00F6rl\u00E9se" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: gepWorking || versionWorking, onClick: () => void inspectGepTranslation(Boolean(gepResult)), children: gepWorking ? "Magyarítások ellenőrzése…" : gepResult ? "Gep.Monster újraellenőrzése" : "Gep.Monster magyarítás ellenőrzése" }) }), gepResult && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "12px", opacity: .8 }, children: [gepResult.game ? `${gepResult.game} · ${gepResult.total_entries ?? 0} fordítás` : "A Steam AppID-hez nem találtam egyértelmű Gep.Monster-adatlapot.", gepResult.checked_at ? ` · Ellenőrizve: ${new Date(gepResult.checked_at * 1000).toLocaleString("hu-HU")}` : ""] }) }), (gepResult.entries ?? []).map((entry, index) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "12px" }, children: [SP_JSX.jsx("strong", { children: entry.status === "matching_version" ? "Verzió egyezik" :
-                                                    entry.status === "platform_unverified" ? "Verzió egyezik, Steam nincs jelölve" :
-                                                        entry.status === "different_version" ? "Eltérő verzió" :
-                                                            entry.status === "other_platform" ? "Más platformhoz jelölt" : "Nem ellenőrizhető" }), " · " + entry.version, entry.uploaded_at ? " · " + entry.uploaded_at : ""] }) }, index)), gepResult.game && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "12px", opacity: .8 }, children: ["Az egyez\u0151 verzi\u00F3sz\u00E1m sem garant\u00E1lja a ford\u00EDt\u00E1s m\u0171k\u00F6d\u00E9s\u00E9t. A let\u00F6lt\u00E9s \u00E9s a k\u00E9sz\u00EDt\u0151 megjegyz\u00E9sei a", " ", SP_JSX.jsx("a", { href: gepResult.url, target: "_blank", rel: "noopener noreferrer", children: "Gep.Monster adatlapj\u00E1n" }), " ellen\u0151rizhet\u0151k."] }) })] })] })] });
+                    SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs(DFL.ButtonItem, { layout: "below", disabled: versionWorking, onClick: () => void inspectInstalledVersion(versionSearch, resolveLibraryGameName(versionSearch)), children: ["Steam AppID ", versionSearch, " ellen\u0151rz\u00E9se"] }) }), versionCandidates.map((app) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: versionWorking, label: app.name || ("Steam AppID " + app.id), description: "Steam AppID: " + app.id, onClick: () => void inspectInstalledVersion(app.id, app.name || ("Steam AppID " + app.id)), children: "Kiv\u00E1laszt\u00E1s" }) }, app.id)), versionDetail && SP_JSX.jsxs(SP_JSX.Fragment, { children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsxs("div", { style: { fontSize: "12px" }, children: [SP_JSX.jsx("strong", { children: versionDetail.name }), SP_JSX.jsx("br", {}), "Steam-build: ", versionDetail.build, SP_JSX.jsx("br", {}), versionDetail.version ? `${versionDetail.source === "confirmed" ? "Megerősített" : versionDetail.source === "project" ? "Projekt" : versionDetail.source === "candidate" ? "Nem ellenőrzött verziójelölt" : "Helyi fájl"}: ${versionDetail.version}` : "Játékverzió nem olvasható ki."] }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.TextField, { label: "A j\u00E1t\u00E9k men\u00FCj\u00E9ben l\u00E1tott verzi\u00F3", value: versionInput, bShowClearAction: true, disabled: versionWorking, onChange: (event) => setVersionInput(event.currentTarget.value) }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: versionWorking || !versionInput.trim(), onClick: () => void saveConfirmedVersion(versionInput), children: "Verzi\u00F3 meger\u0151s\u00EDt\u00E9se" }) }), versionDetail.source === "confirmed" && SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", disabled: versionWorking, onClick: () => void saveConfirmedVersion(""), children: "Meger\u0151s\u00EDt\u00E9s t\u00F6rl\u00E9se" }) })] })] });
     if (page === "settingsStore")
         return SP_JSX.jsxs(DFL.PanelSection, { title: "\u00C1ruh\u00E1zi elhelyez\u00E9s", children: [SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ButtonItem, { layout: "below", onClick: () => openPage("settings"), children: "\u2190 Be\u00E1ll\u00EDt\u00E1sok" }) }), SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx("div", { style: { fontSize: "12px", opacity: .8 }, children: "A j\u00E1t\u00E9koldalon megjelen\u0151 jelv\u00E9nyek oldala." }) }), [['controller', 'Kontroller'], ['gfn', 'GeForce NOW'], ['boosteroid', 'Boosteroid'], ['hungarian', 'Magyar zászló'], ['watch', 'Figyelőlista'], ['proton', 'ProtonDB (felismert jelvény)']].map(([key, label]) => SP_JSX.jsx(DFL.PanelSectionRow, { children: SP_JSX.jsx(DFL.ToggleField, { label: label + ' – bal oldalon', description: "Kikapcsolva jobbra ker\u00FCl.", checked: (visibility.store_badge_sides?.[key] ?? 'right') === 'left', disabled: settingsWorking, onChange: async (checked) => {
                             setSettingsWorking(true);

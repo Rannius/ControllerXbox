@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 10
+INSTALLED_VERSION_CACHE_SCHEMA = 11
 CONFIRMED_VERSION_SCHEMA = 1
 GEP_CACHE_TTL_SECONDS = 30 * 60
 GEP_API_BASE = "https://gep.monster/api"
@@ -254,6 +254,118 @@ class InstalledGameVersionScanner:
             if version:
                 return version, "game"
         return "", ""
+
+    @classmethod
+    def _version_candidate(cls, root: Path) -> str:
+        """Return a bounded, explicitly unverified engine/file version clue."""
+        for relative in ("build.json",):
+            contents = cls._small_text(root, relative)
+            if contents:
+                try:
+                    payload = json.loads(contents)
+                except ValueError:
+                    payload = None
+                if isinstance(payload, dict):
+                    for key in ("gameVersion", "game_version", "productVersion", "version"):
+                        version = cls._clean_version(payload.get(key))
+                        if version:
+                            return version
+        try:
+            children = list(root.iterdir())
+        except OSError:
+            return ""
+        if len(children) > 256:
+            return ""
+        for child in children:
+            if not child.is_dir() or not child.name.lower().endswith("_data") or not cls._inside(root, child):
+                continue
+            app_info = child / "app.info"
+            try:
+                if cls._inside(root, app_info) and app_info.is_file() and app_info.stat().st_size <= 4096:
+                    lines = app_info.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+                    if len(lines) >= 3:
+                        version = cls._clean_version(lines[2])
+                        if version:
+                            return version
+            except OSError:
+                pass
+            version = cls._unity_version_candidate(root, child)
+            if version:
+                return version
+        return cls._executable_version_candidate(root)
+
+    @classmethod
+    def _unity_version_candidate(cls, root: Path, data_dir: Path) -> str:
+        path = data_dir / "globalgamemanagers"
+        try:
+            if not cls._inside(root, path) or not path.is_file() or not 20 <= path.stat().st_size <= 8 * 1024 * 1024:
+                return ""
+            with path.open("rb") as stream:
+                content = stream.read(128 * 1024)
+        except OSError:
+            return ""
+        format_version = struct.unpack_from(">I", content, 8)[0]
+        if not 9 <= format_version <= 40:
+            return ""
+        engine_offset = 48 if format_version >= 22 else 20
+        end = content.find(b"\0", engine_offset, engine_offset + 64)
+        if end < 0:
+            return ""
+        engine = content[engine_offset:end].decode("ascii", errors="replace")
+        for match in re.finditer(rb"\d+(?:\.\d+){1,3}", content[end + 1:]):
+            value = match.group().decode("ascii")
+            absolute_end = end + 1 + match.end()
+            if value in engine or (absolute_end < len(content) and chr(content[absolute_end]).isalpha()):
+                continue
+            version = cls._clean_version(value)
+            if version and version not in ("1.0", "1.0.0", "1.0.0.0"):
+                return version
+        return ""
+
+    @classmethod
+    def _executable_version_candidate(cls, root: Path) -> str:
+        exes: List[Path] = []
+        def collect(folder: Path, depth: int) -> None:
+            if depth > 4 or len(exes) >= 32:
+                return
+            try:
+                for child in folder.iterdir():
+                    if not cls._inside(root, child):
+                        continue
+                    if child.is_file() and child.suffix.lower() == ".exe":
+                        exes.append(child)
+                    elif child.is_dir() and child.name.lower() not in ("engine", "_commonredist", "directx", "vcredist", "dotnet"):
+                        collect(child, depth + 1)
+            except OSError:
+                pass
+        collect(root, 1)
+        try:
+            ordered = sorted(exes, key=lambda path: path.stat().st_size, reverse=True)[:4]
+            for exe in ordered:
+                size = exe.stat().st_size
+                if not 0 < size <= 64 * 1024 * 1024:
+                    continue
+                with exe.open("rb") as stream:
+                    content = stream.read()
+                if not content.startswith(b"MZ"):
+                    continue
+                for name in ("ProductVersion", "FileVersion"):
+                    key = name.encode("utf-16le")
+                    position = content.find(key)
+                    if position < 0:
+                        continue
+                    start = position + len(key)
+                    while start + 1 < min(len(content), position + 256) and content[start:start + 2] == b"\0\0":
+                        start += 2
+                    end = start
+                    while end + 1 < min(len(content), start + 100) and content[end:end + 2] != b"\0\0":
+                        end += 2
+                    version = cls._clean_version(content[start:end].decode("utf-16le", errors="ignore"))
+                    if version and version not in ("1.0", "1.0.0", "1.0.0.0"):
+                        return version
+        except OSError:
+            pass
+        return ""
 
     @classmethod
     def _godot_project_version(cls, content: bytes) -> str:
@@ -658,7 +770,11 @@ class InstalledGameVersionScanner:
         declared = cls._declared_version(root)
         if declared[0]:
             return declared
-        return cls._engine_version(root)
+        engine = cls._engine_version(root)
+        if engine[0]:
+            return engine
+        candidate = cls._version_candidate(root)
+        return (candidate, "candidate") if candidate else ("", "")
 
 
 class Plugin:
@@ -2776,7 +2892,7 @@ class Plugin:
                     if isinstance(app_id, str) and re.fullmatch(r"[1-9]\d{0,9}", app_id)
                     and isinstance(entry, dict) and re.fullmatch(r"[1-9]\d{0,19}", str(entry.get("build", "")))
                     and isinstance(entry.get("version"), str) and len(entry["version"]) <= 40
-                    and entry.get("source") in ("", "game", "project")}
+                    and entry.get("source") in ("", "game", "project", "candidate")}
 
         self._installed_version_cache = await self._run_blocking(read)
 

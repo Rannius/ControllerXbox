@@ -1594,6 +1594,18 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         struct.pack_into("<II", image, fixed + 16, (2 << 16) | 4, 7 << 16)
         (game / "ExampleGame.exe").write_bytes(image)
         self.assertEqual(scanner.scan(game, "Example Game"), ("", ""))
+        # A PE string is useful to display, but cannot prove the game's own
+        # menu version or a Gep.Monster translation match.
+        image.extend(("ProductVersion\0\0" + "2.4.7\0").encode("utf-16le"))
+        (game / "ExampleGame.exe").write_bytes(image)
+        self.assertEqual(scanner.scan(game, "Example Game"), ("2.4.7", "candidate"))
+        self.assertEqual(self.plugin._gep_status("2.4.7", "candidate", "2.4.7 (Steam)"), "unverified")
+        # A PE string is useful to display, but cannot prove the game's own
+        # menu version or a Gep.Monster translation match.
+        image.extend(("ProductVersion\0\0" + "2.4.7\0").encode("utf-16le"))
+        (game / "ExampleGame.exe").write_bytes(image)
+        self.assertEqual(scanner.scan(game, "Example Game"), ("2.4.7", "candidate"))
+        self.assertEqual(self.plugin._gep_status("2.4.7", "candidate", "2.4.7 (Steam)"), "unverified")
 
     @staticmethod
     def palworld_config_pak(version, compressed=False):

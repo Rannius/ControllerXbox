@@ -150,10 +150,6 @@ type NotificationHistoryResponse = {
 };
 type PluginPage = "home" | "watchlist" | "history" | "settings" | "settingsBadges" | "settingsVersions" | "settingsStore" | "settingsPrices" | "settingsNotifications" | "shops";
 type InstalledVersionDetail = { id: string; name: string; build: string; version: string; source: string };
-type GepResult = { success: boolean; error?: string; game?: string; url?: string; local_version?: string;
-  local_source?: string; build?: string; checked_at?: number; total_entries?: number;
-  entries?: { version: string; parsed_version: string; uploaded_at: string; url: string;
-    status: "matching_version" | "platform_unverified" | "different_version" | "other_platform" | "unverified" }[] };
 type BadgeState = "loading" | "full" | "partial" | "unsupported" | "unavailable";
 type GfnState = "loading" | "available" | "not_available" | "unavailable";
 type BoosteroidState = "loading" | "available" | "maintenance" | "not_available" | "unavailable";
@@ -235,7 +231,6 @@ const clearInstalledVersionCache = callable<[], { success: boolean; error?: stri
 const getInstalledBuildsForSettings = callable<[string[], boolean], { success: boolean; builds?: Record<string, string>;
   versions?: Record<string, { version: string; source: string }>; error?: string }>("get_installed_builds");
 const setConfirmedInstalledVersion = callable<[string, string, string], { success: boolean; error?: string }>("set_confirmed_installed_version");
-const getGepCompatibility = callable<[string, string, string, boolean], GepResult>("get_gep_translation_compatibility");
 const setBadgeVisibility = callable<[showGfnBadges: boolean, showBoosteroidBadges: boolean, showHungarianBadges: boolean, showInstalledBuilds: boolean], SettingsResponse>("set_badge_visibility");
 const setNotificationPreferences = callable<[
   notifyGfnAdditions: boolean,
@@ -1942,8 +1937,6 @@ function Content() {
   const [versionInput, setVersionInput] = useState("");
   const [versionDetail, setVersionDetail] = useState<InstalledVersionDetail>();
   const [versionWorking, setVersionWorking] = useState(false);
-  const [gepResult, setGepResult] = useState<GepResult>();
-  const [gepWorking, setGepWorking] = useState(false);
   const [watchlist, setWatchlist] = useState<WatchlistEntry[]>([]);
   const [watchWorking, setWatchWorking] = useState(false);
   const [cloudRefreshing, setCloudRefreshing] = useState(false);
@@ -2322,7 +2315,6 @@ function Content() {
 
   const inspectInstalledVersion = async (id: string, name: string) => {
     setVersionWorking(true);
-    setGepResult(undefined);
     try {
       const result = await withBackendTimeout(getInstalledBuildsForSettings([id], true), 60_000);
       if (!result.success) throw new Error(result.error || "A Steam-build ellenőrzése sikertelen.");
@@ -2348,7 +2340,6 @@ function Content() {
       );
       if (!result.success) throw new Error(result.error || "A verzió mentése sikertelen.");
       clearInstalledBuildCache();
-      setGepResult(undefined);
       const refreshed = await withBackendTimeout(getInstalledBuildsForSettings([versionDetail.id], true), 60_000);
       if (!refreshed.success || refreshed.builds?.[versionDetail.id] !== versionDetail.build) {
         throw new Error("A játék Steam-buildje megváltozott. Ellenőrizd újra.");
@@ -2361,23 +2352,6 @@ function Content() {
       toaster.toast({ title: "Játékverzió hiba", body: errorMessage(error) });
     } finally {
       setVersionWorking(false);
-    }
-  };
-
-  const inspectGepTranslation = async (refresh = false) => {
-    if (!versionDetail) return;
-    setGepWorking(true);
-    try {
-      const result = await withBackendTimeout(
-        getGepCompatibility(versionDetail.id, versionDetail.name, versionDetail.build, refresh), 60_000,
-      );
-      if (!result.success) throw new Error(result.error || "A Gep.Monster ellenőrzése sikertelen.");
-      setGepResult(result);
-    } catch (error) {
-      setGepResult(undefined);
-      toaster.toast({ title: "Magyarítás ellenőrzése", body: errorMessage(error) });
-    } finally {
-      setGepWorking(false);
     }
   };
 
@@ -2418,7 +2392,7 @@ function Content() {
     /></PanelSectionRow>
     <PanelSectionRow><ToggleField
       label="Telepített játékok verziója"
-      description="A megerősített vagy kiolvasható játékverziót mutatja; különben a Steam-build marad."
+      description="Játékverziót, illetve külön jelölt bizonytalan fájlverziót mutat; máskor a Steam-build marad."
       checked={visibility.show_installed_builds}
       disabled={settingsWorking}
       onChange={(checked) => void updateVisibility({ ...visibility, show_installed_builds: checked })}
@@ -2461,7 +2435,7 @@ function Content() {
     {versionDetail && <>
       <PanelSectionRow><div style={{ fontSize: "12px" }}>
         <strong>{versionDetail.name}</strong><br />Steam-build: {versionDetail.build}<br />
-        {versionDetail.version ? `${versionDetail.source === "confirmed" ? "Megerősített" : versionDetail.source === "project" ? "Projekt" : "Helyi fájl"}: ${versionDetail.version}` : "Játékverzió nem olvasható ki."}
+        {versionDetail.version ? `${versionDetail.source === "confirmed" ? "Megerősített" : versionDetail.source === "project" ? "Projekt" : versionDetail.source === "candidate" ? "Nem ellenőrzött verziójelölt" : "Helyi fájl"}: ${versionDetail.version}` : "Játékverzió nem olvasható ki."}
       </div></PanelSectionRow>
       <PanelSectionRow><TextField label="A játék menüjében látott verzió" value={versionInput} bShowClearAction
         disabled={versionWorking} onChange={(event) => setVersionInput(event.currentTarget.value)} /></PanelSectionRow>
@@ -2469,28 +2443,6 @@ function Content() {
         onClick={() => void saveConfirmedVersion(versionInput)}>Verzió megerősítése</ButtonItem></PanelSectionRow>
       {versionDetail.source === "confirmed" && <PanelSectionRow><ButtonItem layout="below" disabled={versionWorking}
         onClick={() => void saveConfirmedVersion("")}>Megerősítés törlése</ButtonItem></PanelSectionRow>}
-      <PanelSectionRow><ButtonItem layout="below" disabled={gepWorking || versionWorking}
-        onClick={() => void inspectGepTranslation(Boolean(gepResult))}>
-        {gepWorking ? "Magyarítások ellenőrzése…" : gepResult ? "Gep.Monster újraellenőrzése" : "Gep.Monster magyarítás ellenőrzése"}
-      </ButtonItem></PanelSectionRow>
-      {gepResult && <>
-        <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>
-          {gepResult.game ? `${gepResult.game} · ${gepResult.total_entries ?? 0} fordítás` : "A Steam AppID-hez nem találtam egyértelmű Gep.Monster-adatlapot."}
-          {gepResult.checked_at ? ` · Ellenőrizve: ${new Date(gepResult.checked_at * 1000).toLocaleString("hu-HU")}` : ""}
-        </div></PanelSectionRow>
-        {(gepResult.entries ?? []).map((entry, index) => <PanelSectionRow key={index}><div style={{ fontSize: "12px" }}>
-          <strong>{entry.status === "matching_version" ? "Verzió egyezik" :
-            entry.status === "platform_unverified" ? "Verzió egyezik, Steam nincs jelölve" :
-            entry.status === "different_version" ? "Eltérő verzió" :
-            entry.status === "other_platform" ? "Más platformhoz jelölt" : "Nem ellenőrizhető"}</strong>
-          {" · " + entry.version}
-          {entry.uploaded_at ? " · " + entry.uploaded_at : ""}
-        </div></PanelSectionRow>)}
-        {gepResult.game && <PanelSectionRow><div style={{ fontSize: "12px", opacity: .8 }}>
-          Az egyező verziószám sem garantálja a fordítás működését. A letöltés és a készítő megjegyzései a
-          {" "}<a href={gepResult.url} target="_blank" rel="noopener noreferrer">Gep.Monster adatlapján</a> ellenőrizhetők.
-        </div></PanelSectionRow>}
-      </>}
     </>}
   </PanelSection>;
   if (page === "settingsStore") return <PanelSection title="Áruházi elhelyezés">
