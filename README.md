@@ -215,6 +215,10 @@ A megerősített játékverzió oldalán a telepített játékhoz tartozó [Gep.
 
 A helyi EXE és Unity fájlokból ismét kiolvassuk a lehetséges verziószámot, de „Verziójelölt” felirattal: ez lehet fájl- vagy motorverzió, ezért nem tekinthető a játék megerősített verziójának. A saját verziófájlok és a kézzel megerősített érték továbbra is elsőbbséget kapnak. A korábbi, hiányzó találatokat az új verzió egyszer újra megvizsgálja. A Gep.Monster összevetés gombja átmenetileg nem jelenik meg, amíg a játékverziók felismerését pontosítjuk.
 
+## 1.0.131: Balatro játékverzió a saját fájljából
+
+A Balatro telepített archívumának `globals.lua` fájljából olvassuk ki a játék saját verzióját, például `1.0.1o-FULL` formában. A LÖVE motor `11.2` fájlverzióját ennél a játéknál nem mutatjuk játékverzióként. Ha a játék saját verzióadata nem olvasható, csak a Steam-build jelenik meg. A korábbi verziógyorsítótár automatikusan újraépül. Csak a Decky plugint kell frissíteni.
+
 ## 1.0.112: Enhanced és Deluxe árak
 
 Az AKS-keresés a pontos Steam-cím után az Enhanced és Deluxe névváltozatokat is ellenőrzi. Ha csak az alapjáték AKS-oldala található, kizárólag a címben jelölt kiadás árát mutatja; a Standard, Enhanced és Deluxe ajánlatok nem keverednek. A korábban elmentett negatív találatokat ezeknél a címeknél újraellenőrzi. A Decky plugint és az Ubuntu árszervert is frissíteni kell.

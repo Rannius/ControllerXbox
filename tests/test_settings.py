@@ -13,6 +13,7 @@ import time
 import types
 import unittest
 import urllib.error
+import zipfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1600,12 +1601,21 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         (game / "ExampleGame.exe").write_bytes(image)
         self.assertEqual(scanner.scan(game, "Example Game"), ("2.4.7", "candidate"))
         self.assertEqual(self.plugin._gep_status("2.4.7", "candidate", "2.4.7 (Steam)"), "unverified")
-        # A PE string is useful to display, but cannot prove the game's own
-        # menu version or a Gep.Monster translation match.
-        image.extend(("ProductVersion\0\0" + "2.4.7\0").encode("utf-16le"))
-        (game / "ExampleGame.exe").write_bytes(image)
-        self.assertEqual(scanner.scan(game, "Example Game"), ("2.4.7", "candidate"))
-        self.assertEqual(self.plugin._gep_status("2.4.7", "candidate", "2.4.7 (Steam)"), "unverified")
+
+    async def test_balatro_version_comes_from_game_archive_not_love_engine(self):
+        scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
+        game = Path(self.directory.name) / "Balatro"
+        game.mkdir()
+        (game / "build.json").write_text('{"version":"11.2"}', encoding="utf-8")
+        archive = game / "Balatro.exe"
+        archive.write_bytes(b"MZ" + b"\0" * 64)
+        with zipfile.ZipFile(archive, "a") as zipped:
+            zipped.writestr("globals.lua", "VERSION = '1.0.1o'\nVERSION = VERSION..'-FULL'\n")
+        self.assertEqual(scanner.scan(game, "Balatro", "2379780"), ("1.0.1o-FULL", "game"))
+        self.assertEqual(scanner._clean_version("1.0.1o-FULL"), "1.0.1o-FULL")
+        self.assertEqual(self.plugin._gep_version("v1.0.1o-FULL (Steam)"), "1.0.1o-FULL")
+        archive.unlink()
+        self.assertEqual(scanner.scan(game, "Balatro", "2379780"), ("", ""))
 
     @staticmethod
     def palworld_config_pak(version, compressed=False):

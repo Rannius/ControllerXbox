@@ -82,7 +82,7 @@ async function flushBuilds(): Promise<void> {
         const build = response.builds?.[id];
         const info = response.versions?.[id];
         const version = (info?.source === "game" || info?.source === "project" || info?.source === "confirmed" || info?.source === "candidate")
-          && typeof info.version === "string" && /^\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?$/.test(info.version) ? info.version : "";
+          && typeof info.version === "string" && /^\d+(?:\.\d+){1,3}[A-Za-z]?(?:[-+][A-Za-z0-9.]+)?$/.test(info.version) ? info.version : "";
         cache.set(id, { build: typeof build === "string" && /^\d{1,20}$/.test(build) ? build : "",
           version, source: version ? info?.source ?? "" : "", expires });
       }

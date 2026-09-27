@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 11
+INSTALLED_VERSION_CACHE_SCHEMA = 12
 CONFIRMED_VERSION_SCHEMA = 1
 GEP_CACHE_TTL_SECONDS = 30 * 60
 GEP_API_BASE = "https://gep.monster/api"
@@ -171,7 +171,7 @@ class HungarianCuratorParser:
 class InstalledGameVersionScanner:
     """Read bounded, local version clues without starting the game or Proton."""
 
-    VERSION = re.compile(r"v?(\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?)\Z", re.IGNORECASE)
+    VERSION = re.compile(r"v?(\d+(?:\.\d+){1,3}[A-Za-z]?(?:[-+][A-Za-z0-9.]+)?)\Z", re.IGNORECASE)
     # Filled by the release builder, preserving Decky's fixed ZIP layout.
     # Source: native/version-helper (MIT); statically linked for SteamOS x86_64.
     OODLE_HELPER_SHA256 = ""
@@ -254,6 +254,40 @@ class InstalledGameVersionScanner:
             if version:
                 return version, "game"
         return "", ""
+
+    @classmethod
+    def _balatro_version(cls, root: Path) -> str:
+        """Read Balatro's own VERSION constant from its bundled LÖVE archive."""
+        for relative in ("Balatro.exe", "Balatro.love", "game.love"):
+            path = root / relative
+            try:
+                if not cls._inside(root, path) or not path.is_file() or path.stat().st_size > 128 * 1024 * 1024:
+                    continue
+                with zipfile.ZipFile(path) as archive:
+                    if len(archive.infolist()) > 10000:
+                        continue
+                    matches = [info for info in archive.infolist() if info.filename.lower() == "globals.lua"]
+                    if len(matches) != 1 or matches[0].file_size > 64 * 1024:
+                        continue
+                    with archive.open(matches[0]) as source:
+                        content = source.read(64 * 1024 + 1)
+                if len(content) > 64 * 1024:
+                    continue
+                lines = content.decode("utf-8-sig").splitlines()[:16]
+                version = ""
+                for line in lines:
+                    literal = re.fullmatch(r"\s*VERSION\s*=\s*(['\"])([^'\"\r\n]{1,40})\1\s*(?:--.*)?", line)
+                    append = re.fullmatch(r"\s*VERSION\s*=\s*VERSION\s*\.\.\s*(['\"])([^'\"\r\n]{1,20})\1\s*(?:--.*)?", line)
+                    if literal:
+                        version = literal.group(2)
+                    elif append and version:
+                        version += append.group(2)
+                cleaned = cls._clean_version(version)
+                if cleaned:
+                    return cleaned
+            except (OSError, ValueError, UnicodeError, RuntimeError, zipfile.BadZipFile):
+                continue
+        return ""
 
     @classmethod
     def _version_candidate(cls, root: Path) -> str:
@@ -766,6 +800,9 @@ class InstalledGameVersionScanner:
     def scan(cls, root: Path, title: str, app_id: str = "") -> Tuple[str, str]:
         if app_id == "1623730":
             version = cls._palworld_version(root)
+            return (version, "game") if version else ("", "")
+        if app_id == "2379780":
+            version = cls._balatro_version(root)
             return (version, "game") if version else ("", "")
         declared = cls._declared_version(root)
         if declared[0]:
@@ -3019,12 +3056,12 @@ class Plugin:
     def _gep_version(value: Any) -> str:
         if not isinstance(value, str):
             return ""
-        match = re.match(r"^\s*v?(\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?)(?=$|\s|\(|-\s)",
+        match = re.match(r"^\s*v?(\d+(?:\.\d+){1,3}[A-Za-z]?(?:[-+][A-Za-z0-9.]+)?)(?=$|\s|\(|-\s)",
                          value, re.IGNORECASE)
         if not match:
             return ""
         version = match.group(1)
-        parts = [int(part) for part in re.split(r"[-+]", version, 1)[0].split(".")]
+        parts = [int(part) for part in re.findall(r"\d+", re.split(r"[-+]", version, 1)[0])]
         # A YYYY.MM.DD jelölés feltöltési dátum, nem bizonyított játékverzió.
         if len(parts) == 3 and 2000 <= parts[0] <= 2100 and 1 <= parts[1] <= 12 and 1 <= parts[2] <= 31:
             return ""
