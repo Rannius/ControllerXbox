@@ -207,6 +207,10 @@ A „Jelvények és méret” beállítások között külön kapcsolóval megje
 
 A Beállítások → Jelvények és méret → Játékverzió megerősítése oldalon a játék menüjében látott verzió menthető. A plugin ezt kizárólag a telepített játék aktuális Steam AppID-jéhez és BuildID-jéhez társítja. Másik buildnél nem jeleníti meg a régi értéket; ilyenkor az automatikusan kiolvasható verziót, ennek hiányában a Steam-buildet mutatja. A felirat jelzi, hogy a verzió megerősített, helyi fájlból származik vagy projektbeállítás. A megerősítés külön törölhető, az automatikus gyorsítótár ürítése nem törli. A Steam nem ad minden játékhoz egységes menüverziót; ez a funkció a nem kiolvasható játékoknál kézi megerősítést biztosít.
 
+## 1.0.129: Gep.Monster magyarítások verzióellenőrzése
+
+A megerősített játékverzió oldalán a telepített játékhoz tartozó [Gep.Monster](https://gep.monster/) fordítások külön gombbal ellenőrizhetők. A találatot a Gep.Monster adatlapján lévő Steam AppID-vel azonosítjuk; az ottani fordítások verzióját a kiolvasott vagy kézzel megerősített játékverzióval vetjük össze. Az eredmény külön jelzi az azonos számot, az eltérő számot, a nem Steamhez jelölt és a bizonytalan bejegyzést. Dátumból, projektverzióból vagy puszta BuildID-ből nem állítunk kompatibilitást. A felhasználó indíthat friss ellenőrzést; az egyébként ismételt lekérést 30 perces memóriacache fogja vissza. Az azonos verziószám sem garantálja a magyarítás működését, ezért a készítő megjegyzéseit mindig az adatlapon kell ellenőrizni. Csak a Decky plugint kell frissíteni.
+
 ## 1.0.112: Enhanced és Deluxe árak
 
 Az AKS-keresés a pontos Steam-cím után az Enhanced és Deluxe névváltozatokat is ellenőrzi. Ha csak az alapjáték AKS-oldala található, kizárólag a címben jelölt kiadás árát mutatja; a Standard, Enhanced és Deluxe ajánlatok nem keverednek. A korábban elmentett negatív találatokat ezeknél a címeknél újraellenőrzi. A Decky plugint és az Ubuntu árszervert is frissíteni kell.

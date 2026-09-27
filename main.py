@@ -66,6 +66,8 @@ NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
 INSTALLED_VERSION_CACHE_SCHEMA = 10
 CONFIRMED_VERSION_SCHEMA = 1
+GEP_CACHE_TTL_SECONDS = 30 * 60
+GEP_API_BASE = "https://gep.monster/api"
 NOTIFICATION_HISTORY_MAX_ENTRIES = 100
 BOOSTEROID_URL = "https://cloud.boosteroid.com/api/v1/public/applications?page={page}&platforms=6"
 STEAM_SEARCH_URL = "https://store.steampowered.com/api/storesearch/?term={term}&l=english&cc=us"
@@ -769,6 +771,8 @@ class Plugin:
         self._installed_version_cache: Dict[str, Dict[str, str]] = {}
         self._confirmed_version_path = Path(settings_directory) / "confirmed-game-versions.json"
         self._confirmed_versions: Dict[str, Dict[str, str]] = {}
+        self._gep_cache: Dict[str, Dict[str, Any]] = {}
+        self._gep_lock = asyncio.Lock()
         self._installed_version_lock = asyncio.Lock()
         self._installed_version_save_task: Optional[asyncio.Task] = None
         self._installed_version_dirty = False
@@ -2894,6 +2898,127 @@ class Plugin:
                 if not self._installed_version_save_task or self._installed_version_save_task.done():
                     self._installed_version_save_task = asyncio.create_task(self._save_installed_version_later())
         return {"success": True, "builds": result["builds"], "versions": result["versions"]}
+
+    @staticmethod
+    def _gep_version(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        match = re.match(r"^\s*v?(\d+(?:\.\d+){1,3}(?:[-+][A-Za-z0-9.]+)?)(?=$|\s|\(|-\s)",
+                         value, re.IGNORECASE)
+        if not match:
+            return ""
+        version = match.group(1)
+        parts = [int(part) for part in re.split(r"[-+]", version, 1)[0].split(".")]
+        # A YYYY.MM.DD jelölés feltöltési dátum, nem bizonyított játékverzió.
+        if len(parts) == 3 and 2000 <= parts[0] <= 2100 and 1 <= parts[1] <= 12 and 1 <= parts[2] <= 31:
+            return ""
+        return version
+
+    @staticmethod
+    def _gep_status(local_version: str, local_source: str, upload_version: str) -> str:
+        label = upload_version.casefold()
+        if not re.search(r"\bsteam\b", label) and re.search(r"\b(?:game\s*pass|gamepass|epic|gog|ubisoft|ncore)\b", label):
+            return "other_platform"
+        patch_version = Plugin._gep_version(upload_version)
+        if not local_version or local_source not in ("game", "confirmed") or not patch_version:
+            return "unverified"
+        if local_version != patch_version:
+            return "different_version"
+        return "matching_version" if re.search(r"\bsteam\b", label) else "platform_unverified"
+
+    @classmethod
+    def _gep_json(cls, path: str) -> Any:
+        request = urllib.request.Request(GEP_API_BASE + path, headers={
+            "User-Agent": "Deck Play Badges translation compatibility/1.0",
+            "Accept": "application/json",
+        })
+        with cls._open_verified_request(request, 12) as response:
+            content = response.read(1024 * 1024 + 1)
+        if len(content) > 1024 * 1024:
+            raise ValueError("Gep.Monster response is too large")
+        return json.loads(content.decode("utf-8"))
+
+    @classmethod
+    def _fetch_gep_translations(cls, app_id: str, title: str) -> Dict[str, Any]:
+        query = urllib.parse.quote(re.sub(r"[®™©]", "", title).strip()[:100], safe="")
+        catalog = cls._gep_json("/games?search=" + query)
+        candidates = catalog.get("games", []) if isinstance(catalog, dict) else []
+        if not isinstance(candidates, list):
+            raise ValueError("Invalid Gep.Monster search result")
+        wanted = unicodedata.normalize("NFKC", title).casefold()
+        wanted = re.sub(r"[^\w]+", " ", wanted).strip()
+        detail_attempts = 0
+        for candidate in candidates[:20]:
+            if not isinstance(candidate, dict):
+                continue
+            name = candidate.get("name")
+            slug = candidate.get("slug")
+            if not isinstance(name, str) or not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9-]{1,120}", slug):
+                continue
+            normalized = re.sub(r"[^\w]+", " ", unicodedata.normalize("NFKC", name).casefold()).strip()
+            if normalized != wanted:
+                continue
+            if detail_attempts >= 4:
+                break
+            detail_attempts += 1
+            game = cls._gep_json("/games/" + slug)
+            if not isinstance(game, dict):
+                continue
+            link = game.get("link_steam")
+            match = re.search(r"https?://store\.steampowered\.com/app/(\d+)(?:/|$)", link) if isinstance(link, str) else None
+            if not match or match.group(1) != app_id:
+                continue
+            game_id = game.get("id")
+            if not isinstance(game_id, int) or game_id <= 0:
+                continue
+            uploads = cls._gep_json("/downloads?game_id=" + str(game_id))
+            if not isinstance(uploads, list):
+                raise ValueError("Invalid Gep.Monster downloads")
+            entries = []
+            for upload in uploads[:100]:
+                if not isinstance(upload, dict) or upload.get("is_bad") or upload.get("marked_for_deletion"):
+                    continue
+                version = upload.get("version")
+                upload_id = upload.get("id")
+                if not isinstance(version, str) or not isinstance(upload_id, int) or len(version) > 160:
+                    continue
+                entries.append({"version": version.strip(), "parsed_version": cls._gep_version(version),
+                                "uploaded_at": str(upload.get("uploadDate", ""))[:30],
+                                "url": "https://gep.monster/games/" + slug})
+            return {"game": name, "url": "https://gep.monster/games/" + slug, "entries": entries}
+        return {"game": "", "url": "", "entries": []}
+
+    async def get_gep_translation_compatibility(self, app_id: Any, title: Any, build: Any,
+                                                 refresh: Any = False) -> Dict[str, Any]:
+        if (not isinstance(app_id, str) or not re.fullmatch(r"[1-9]\d{0,9}", app_id)
+                or not isinstance(title, str) or not 2 <= len(title.strip()) <= 160
+                or not isinstance(build, str) or not re.fullmatch(r"[1-9]\d{0,19}", build)
+                or not isinstance(refresh, bool)):
+            return {"success": False, "error": "Érvénytelen játékadat."}
+        installed = await self.get_installed_builds([app_id], True)
+        if not installed.get("success") or installed.get("builds", {}).get(app_id) != build:
+            return {"success": False, "error": "A telepített Steam-build megváltozott. Válaszd ki újra a játékot."}
+        local = installed.get("versions", {}).get(app_id, {})
+        async with self._gep_lock:
+            cached = self._gep_cache.get(app_id)
+            if refresh or not cached or cached["checked_at"] + GEP_CACHE_TTL_SECONDS <= time.time():
+                try:
+                    catalog = await self._run_blocking(self._fetch_gep_translations, app_id, title.strip())
+                except (OSError, TimeoutError, ValueError, urllib.error.URLError) as error:
+                    decky.logger.warning("Gep.Monster compatibility lookup failed for %s: %s", app_id, error)
+                    return {"success": False, "error": "A Gep.Monster adatainak lekérése sikertelen."}
+                cached = {"checked_at": time.time(), **catalog}
+                self._gep_cache[app_id] = cached
+        entries = [{**entry, "status": self._gep_status(local.get("version", ""),
+                                                        local.get("source", ""), entry["version"])}
+                   for entry in cached["entries"]]
+        priority = {"matching_version": 0, "platform_unverified": 1, "different_version": 2,
+                    "other_platform": 3, "unverified": 4}
+        entries.sort(key=lambda entry: priority.get(entry["status"], 5))
+        return {"success": True, "game": cached["game"], "url": cached["url"],
+                "local_version": local.get("version", ""), "local_source": local.get("source", ""),
+                "build": build, "entries": entries[:12], "total_entries": len(entries),
+                "checked_at": cached["checked_at"]}
 
     async def set_store_tile_prices(self, enabled: Any) -> Dict[str, Any]:
         if not isinstance(enabled, bool):

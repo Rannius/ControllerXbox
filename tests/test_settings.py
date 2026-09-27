@@ -1496,6 +1496,31 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await reloaded.set_confirmed_installed_version("10", "123", ""))["success"])
             self.assertNotIn("10", (await reloaded.get_installed_builds(["10"], True))["versions"])
 
+    async def test_gep_translation_match_requires_steam_appid_and_exact_version(self):
+        plugin = self.plugin_type
+        self.assertEqual(plugin._gep_version("v1.0.0.100427- (Steam, GamePass, Tört)"), "1.0.0.100427")
+        self.assertEqual(plugin._gep_version("1.2.3-beta (Steam)"), "1.2.3-beta")
+        self.assertEqual(plugin._gep_version("2026.05.19."), "")
+        self.assertEqual(plugin._gep_status("1.0.0.100427", "game", "v1.0.0.100427- (Steam, GamePass)"),
+                         "matching_version")
+        self.assertEqual(plugin._gep_status("1.0.0.100427", "confirmed", "v1.0.0.100426 (Steam)"),
+                         "different_version")
+        self.assertEqual(plugin._gep_status("1.0.0.100427", "game", "v1.0.0.100427 (Game Pass)"),
+                         "other_platform")
+        self.assertEqual(plugin._gep_status("1.0.0.100427", "project", "v1.0.0.100427 (Steam)"),
+                         "unverified")
+        def fake_json(path):
+            if path.startswith("/games?search="):
+                return {"games": [{"name": "Palworld", "slug": "palworld"}]}
+            if path == "/games/palworld":
+                return {"id": 1750, "link_steam": "https://store.steampowered.com/app/1623730/Palworld/"}
+            if path == "/downloads?game_id=1750":
+                return [{"id": 8638, "version": "v1.0.0.100427- (Steam, GamePass)", "uploadDate": "2026.07.10"}]
+            raise AssertionError(path)
+        with patch.object(plugin, "_gep_json", side_effect=fake_json):
+            self.assertEqual(len(plugin._fetch_gep_translations("1623730", "Palworld")["entries"]), 1)
+            self.assertEqual(plugin._fetch_gep_translations("123", "Palworld")["entries"], [])
+
     async def test_unverified_unreal_project_version_is_not_a_game_version(self):
         scanner = self.plugin_type._read_installed_builds.__globals__["InstalledGameVersionScanner"]
         game = Path(self.directory.name) / "Game"
@@ -1926,4 +1951,3 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
