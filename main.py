@@ -64,7 +64,7 @@ NOTIFICATION_SCHEMA_VERSION = 1
 WATCHLIST_SCHEMA_VERSION = 1
 NOTIFICATION_HISTORY_SCHEMA_VERSION = 1
 WATCHLIST_MAX_ENTRIES = 200
-INSTALLED_VERSION_CACHE_SCHEMA = 13
+INSTALLED_VERSION_CACHE_SCHEMA = 14
 CONFIRMED_VERSION_SCHEMA = 1
 GEP_CACHE_TTL_SECONDS = 30 * 60
 GEP_API_BASE = "https://gep.monster/api"
@@ -296,7 +296,7 @@ class InstalledGameVersionScanner:
             # Unity launchers and crash handlers report the editor version.
             # Never present it as a possible version of the game itself.
             if any(child.is_dir() and child.name.lower().endswith("_data")
-                   and (child / "globalgamemanagers").is_file()
+                   and ((child / "globalgamemanagers").is_file() or (child / "data.unity3d").is_file())
                    for child in root.iterdir()):
                 return ""
         except OSError:
@@ -334,15 +334,179 @@ class InstalledGameVersionScanner:
                 pass
         return cls._executable_version_candidate(root)
 
+    @staticmethod
+    def _unity_lz4_block(data: bytes, expected: int) -> bytes:
+        """Decode a bounded UnityFS LZ4 block without an optional package."""
+        if not 0 <= expected <= 32 * 1024 * 1024:
+            return b""
+        result = bytearray()
+        position = 0
+        try:
+            while position < len(data):
+                token = data[position]
+                position += 1
+                literal = token >> 4
+                if literal == 15:
+                    while True:
+                        extra = data[position]
+                        position += 1
+                        literal += extra
+                        if extra != 255:
+                            break
+                if position + literal > len(data) or len(result) + literal > expected:
+                    return b""
+                result.extend(data[position:position + literal])
+                position += literal
+                if position == len(data):
+                    break
+                distance = data[position] | data[position + 1] << 8
+                position += 2
+                if not 0 < distance <= len(result):
+                    return b""
+                count = token & 15
+                if count == 15:
+                    while True:
+                        extra = data[position]
+                        position += 1
+                        count += extra
+                        if extra != 255:
+                            break
+                count += 4
+                if len(result) + count > expected:
+                    return b""
+                if distance >= count:
+                    result.extend(result[-distance:-distance + count] if distance > count else result[-distance:])
+                else:
+                    for _ in range(count):
+                        result.append(result[-distance])
+        except IndexError:
+            return b""
+        return bytes(result) if len(result) == expected else b""
+
+    @classmethod
+    def _unity_decompress(cls, data: bytes, expected: int, flags: int) -> bytes:
+        mode = flags & 0x3f
+        if mode == 0:
+            return data if len(data) == expected else b""
+        if mode in (2, 3):
+            return cls._unity_lz4_block(data, expected)
+        if mode == 1 and len(data) >= 5:
+            try:
+                import lzma
+                properties, dictionary = struct.unpack_from("<BI", data)
+                remainder = properties // 9
+                if not 0 < dictionary <= 64 * 1024 * 1024 or remainder // 5 > 4:
+                    return b""
+                filters = [{"id": lzma.FILTER_LZMA1, "dict_size": dictionary,
+                            "lc": properties % 9, "lp": remainder % 5, "pb": remainder // 5}]
+                decoder = lzma.LZMADecompressor(format=lzma.FORMAT_RAW, filters=filters)
+                content = decoder.decompress(data[5:], max_length=expected + 1)
+                return content if len(content) == expected else b""
+            except Exception:
+                return b""
+        return b""
+
+    @classmethod
+    def _unity_archive_manager(cls, root: Path, path: Path) -> bytes:
+        """Extract only globalgamemanagers from a UnityFS player archive."""
+        try:
+            if not cls._inside(root, path) or not path.is_file():
+                return b""
+            file_size = path.stat().st_size
+            if not 64 <= file_size <= 512 * 1024 * 1024:
+                return b""
+            with path.open("rb") as archive:
+                header = archive.read(256)
+                if not header.startswith(b"UnityFS\0"):
+                    return b""
+                version = struct.unpack_from(">I", header, 8)[0]
+                first = header.find(b"\0", 12)
+                second = header.find(b"\0", first + 1) if first >= 0 else -1
+                if version not in (6, 7, 8) or second < 0 or second + 21 > len(header):
+                    return b""
+                size, compressed, uncompressed, flags = struct.unpack_from(">QIII", header, second + 1)
+                if (size != file_size or not 0 < compressed <= 8 * 1024 * 1024
+                        or not 0 < uncompressed <= 8 * 1024 * 1024):
+                    return b""
+                position = second + 21
+                editor = re.match(rb"\d+", header[first + 1:second])
+                modern_editor = bool(editor and int(editor.group()) >= 2020)
+                if version >= 7 or modern_editor:
+                    position = (position + 15) & ~15
+                metadata_at_end = bool(flags & 0x80)
+                metadata_position = file_size - compressed if metadata_at_end else position
+                if metadata_position < position or metadata_position + compressed > file_size:
+                    return b""
+                archive.seek(metadata_position)
+                metadata = cls._unity_decompress(archive.read(compressed), uncompressed, flags)
+                if not metadata or len(metadata) < 24:
+                    return b""
+                count = struct.unpack_from(">I", metadata, 16)[0]
+                if not 0 < count <= 8192 or 20 + count * 10 + 4 > len(metadata):
+                    return b""
+                blocks = [struct.unpack_from(">IIH", metadata, 20 + index * 10) for index in range(count)]
+                cursor = 20 + count * 10
+                nodes = struct.unpack_from(">I", metadata, cursor)[0]
+                cursor += 4
+                if not 0 < nodes <= 4096:
+                    return b""
+                target = None
+                for _ in range(nodes):
+                    if cursor + 21 > len(metadata):
+                        return b""
+                    offset, length, _ = struct.unpack_from(">QQI", metadata, cursor)
+                    cursor += 20
+                    end = metadata.find(b"\0", cursor)
+                    if end < 0:
+                        return b""
+                    name = metadata[cursor:end].decode("utf-8", errors="replace").replace("\\", "/")
+                    cursor = end + 1
+                    if name.rsplit("/", 1)[-1].lower() == "globalgamemanagers":
+                        if target is not None or not 48 <= length <= 32 * 1024 * 1024:
+                            return b""
+                        target = (offset, length)
+                if target is None:
+                    return b""
+                data_position = position if metadata_at_end else position + compressed
+                if flags & 0x200:
+                    data_position = (data_position + 15) & ~15
+                offset, length = target
+                end = offset + length
+                logical = 0
+                pieces = []
+                for raw_size, packed_size, block_flags in blocks:
+                    if (not 0 < raw_size <= 32 * 1024 * 1024 or not 0 < packed_size <= 32 * 1024 * 1024
+                            or data_position + packed_size > (metadata_position if metadata_at_end else file_size)):
+                        return b""
+                    if logical < end and logical + raw_size > offset:
+                        archive.seek(data_position)
+                        decoded = cls._unity_decompress(archive.read(packed_size), raw_size, block_flags)
+                        if not decoded:
+                            return b""
+                        start = max(offset, logical) - logical
+                        stop = min(end, logical + raw_size) - logical
+                        pieces.append(decoded[start:stop])
+                    logical += raw_size
+                    data_position += packed_size
+                    if logical >= end:
+                        break
+                result = b"".join(pieces)
+                return result if len(result) == length else b""
+        except (OSError, ValueError, struct.error):
+            return b""
+
     @classmethod
     def _unity_player_settings_version(cls, root: Path, data_dir: Path, title: str) -> str:
         """Read the app version from Unity's PlayerSettings object (ClassID 129)."""
         path = data_dir / "globalgamemanagers"
         try:
-            if not cls._inside(root, path) or not path.is_file() or not 48 <= path.stat().st_size <= 32 * 1024 * 1024:
-                return ""
-            content = path.read_bytes()
+            if cls._inside(root, path) and path.is_file() and 48 <= path.stat().st_size <= 32 * 1024 * 1024:
+                content = path.read_bytes()
+            else:
+                content = cls._unity_archive_manager(root, data_dir / "data.unity3d")
         except OSError:
+            return ""
+        if len(content) < 48:
             return ""
         format_version = struct.unpack_from(">I", content, 8)[0]
         if format_version not in (22, 23):

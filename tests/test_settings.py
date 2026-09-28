@@ -1643,7 +1643,48 @@ class SettingsTest(unittest.IsolatedAsyncioTestCase):
         settings = settings.replace(b"0.9.6.5", b"0.9.6.6")
         manager.write_bytes(header + metadata + b"\0" * (data_offset - 48 - len(metadata)) + settings)
         self.assertEqual(scanner.scan(game, "9 Kings", "2784470"), ("0.9.6.6", "project"))
+        serialized = manager.read_bytes()
         manager.unlink()
+        (data / "app.info").write_text("company\n9 Kings\n6000.3.8f1\n", encoding="utf-8")
+
+        def lz4_literals(value):
+            length = len(value)
+            result = bytearray([min(length, 15) << 4])
+            if length >= 15:
+                length -= 15
+                while length >= 255:
+                    result.append(255)
+                    length -= 255
+                result.append(length)
+            return bytes(result) + value
+
+        packed = lz4_literals(serialized)
+        directory = (b"\0" * 16 + struct.pack(">I", 1) +
+                     struct.pack(">IIH", len(serialized), len(packed), 2) +
+                     struct.pack(">IQQI", 1, 0, len(serialized), 0) + b"globalgamemanagers\0")
+        packed_directory = lz4_literals(directory)
+        archive_header = b"UnityFS\0" + struct.pack(">I", 7) + b"6000.3.8f1\0" * 2
+        archive_header += struct.pack(">QIII", 0, len(packed_directory), len(directory), 0x42)
+        archive_header += b"\0" * (-len(archive_header) % 16)
+        archive_size = len(archive_header) + len(packed_directory) + len(packed)
+        size_offset = len(b"UnityFS\0") + 4 + 2 * len(b"6000.3.8f1\0")
+        archive_header = archive_header[:size_offset] + struct.pack(">Q", archive_size) + archive_header[size_offset + 8:]
+        (data / "data.unity3d").write_bytes(archive_header + packed_directory + packed)
+        self.assertEqual(scanner.scan(game, "9 Kings", "2784470"), ("0.9.6.6", "project"))
+        midpoint = len(serialized) // 2
+        first, second = lz4_literals(serialized[:midpoint]), lz4_literals(serialized[midpoint:])
+        directory = (b"\0" * 16 + struct.pack(">I", 2) +
+                     struct.pack(">IIH", midpoint, len(first), 2) +
+                     struct.pack(">IIH", len(serialized) - midpoint, len(second), 2) +
+                     struct.pack(">IQQI", 1, 0, len(serialized), 0) + b"globalgamemanagers\0")
+        packed_directory = lz4_literals(directory)
+        archive_size = len(archive_header) + len(first) + len(second) + len(packed_directory)
+        archive_header = (archive_header[:size_offset] + struct.pack(">QIII", archive_size,
+                          len(packed_directory), len(directory), 0xC2) + archive_header[size_offset + 20:])
+        (data / "data.unity3d").write_bytes(archive_header + first + second + packed_directory)
+        self.assertEqual(scanner.scan(game, "9 Kings", "2784470"), ("0.9.6.6", "project"))
+        (data / "data.unity3d").write_bytes(b"invalid")
+        self.assertEqual(scanner.scan(game, "9 Kings", "2784470"), ("", ""))
         (data / "globalgamemanagers").write_bytes(b"invalid")
         self.assertEqual(scanner.scan(game, "9 Kings", "2784470"), ("", ""))
 

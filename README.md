@@ -223,6 +223,10 @@ A Balatro telepített archívumának `globals.lua` fájljából olvassuk ki a j�
 
 A Unity-játékoknál a telepített `globalgamemanagers` fájl `PlayerSettings` objektumából keressük a termék verzióját. Az értéket „Projektverzió” néven jelöljük; a Unity motor `6000.x` verziószámát nem használjuk játékverzió-jelöltként. Ha a fájl formátuma nem olvasható vagy a terméknév nem egyezik, a Steam-build marad látható. A verziógyorsítótár frissítéskor újraépül. Csak a Decky plugint kell frissíteni.
 
+## 1.0.133: tömörített Unity-telepítések verziója
+
+A verzióolvasó a `data.unity3d` archívumból is kiolvassa a játék `globalgamemanagers` fájlját, így a tömörítve telepített Unity-játékok projektverzióját is ellenőrizheti. Csak a szükséges adatblokkokat bontja ki. Ha nincs megbízható találat, a Unity motor vagy a futtatható fájl verziója helyett a Steam-build jelenik meg. A korábbi helyi verziógyorsítótár újraépül. Csak a Decky plugint kell frissíteni.
+
 ## 1.0.112: Enhanced és Deluxe árak
 
 Az AKS-keresés a pontos Steam-cím után az Enhanced és Deluxe névváltozatokat is ellenőrzi. Ha csak az alapjáték AKS-oldala található, kizárólag a címben jelölt kiadás árát mutatja; a Standard, Enhanced és Deluxe ajánlatok nem keverednek. A korábban elmentett negatív találatokat ezeknél a címeknél újraellenőrzi. A Decky plugint és az Ubuntu árszervert is frissíteni kell.
