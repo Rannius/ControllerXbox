@@ -17,3 +17,8 @@ A SteamOS helper statikus Linux/musl ELF program. A kiadás Ubuntu x64 buildgép
 Szükséges: Git, Bash, GitHub CLI (`gh`), Python 3, Rustup/Cargo és jelszó nélküli `sudo apt-get` a rögzített Rust 1.90.0 és musl-tools előkészítéséhez. A Node.js 22 és pnpm 11.9.0 verziókat továbbra is a workflow telepíti.
 A runner egyedileg ebbe a repóba legyen regisztrálva, a fenti címkékkel. A workflow csak megbízható `v*` tag esetén publikál; nyilvános fork pull requestje nem indít saját gépen jobot.
 A kész Linux ZIP és árszervercsomag sorrendje, tartalma és ellenőrzése változatlan.
+
+## Jelenlegi állapot
+
+A tulajdonos 2026-10-13-i döntése szerint saját Linux gép hiányában ez a CI-rész kimarad. A repó GitHub Actions-futtatása ki van kapcsolva (`enabled=false`), ezért új tag sem indít automatikus kiadást és nem fogyaszt hosted perceket.
+Később megfelelő Linux runner regisztrálása után a repository Actions-beállítását újra engedélyezni kell, majd a kézi runnerellenőrzést sikeresen lefuttatni. A kiadási workflow már kizárólag a saját Linux címkékre céloz.
