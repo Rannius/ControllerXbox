@@ -1,0 +1,35 @@
+name: Saját runner és workflow-szabályzat ellenőrzése
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/**']
+
+permissions:
+  contents: read
+
+jobs:
+  runner-check:
+    runs-on: [self-hosted, Linux, X64, rannius-linux, project-controllerxbox]
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Saját runner igazolása
+        run: |
+          test "$RUNNER_ENVIRONMENT" = self-hosted
+          echo "Runner: $RUNNER_NAME; OS: $RUNNER_OS; architecture: $RUNNER_ARCH"
+          git --version
+          gh --version
+          ssh -V
+      - uses: actions/checkout@v4
+      - name: Workflow-k kizárólag saját runnerre céloznak
+        run: python3 .github/scripts/check-runner-policy.py
+      - name: SteamOS fordítás eszközei
+        run: |
+          for tool in python3 rustup cargo sudo; do command -v "$tool"; done
+          rustup toolchain install 1.90.0 --profile minimal --target x86_64-unknown-linux-musl
+          sudo -n apt-get update -qq
+          sudo -n apt-get install -y musl-tools

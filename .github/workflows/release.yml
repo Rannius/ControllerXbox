@@ -11,8 +11,19 @@ permissions:
 jobs:
   release:
     name: Telepítőcsomag és GitHub Release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, rannius-linux, project-controllerxbox]
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
     steps:
+      - name: Saját Linux buildkörnyezet ellenőrzése
+        run: |
+          test "$RUNNER_ENVIRONMENT" = self-hosted
+          for tool in gh python3 rustup cargo sudo; do
+            command -v "$tool" >/dev/null || { echo "Hiányzó buildeszköz: $tool"; exit 1; }
+          done
+
       - name: Forrás letöltése
         uses: actions/checkout@v4
 
@@ -25,7 +36,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: pnpm
 
       - name: Függőségek telepítése
         run: pnpm install --frozen-lockfile
